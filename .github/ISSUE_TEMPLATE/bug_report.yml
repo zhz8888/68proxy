@@ -15,7 +15,6 @@ body:
       options:
         - Windows 10
         - Windows 11
-        - macOS
     validations:
       required: true
   - type: input
