@@ -116,14 +116,14 @@ export function ModelsView() {
                   <p className="select-text truncate font-mono text-[12.5px]" title={m.id}>
                     {m.id}
                   </p>
-                  <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                  <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                     {provider && (
                       <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">
                         {provider}
                       </Badge>
                     )}
                     <span className="truncate">{m.name}</span>
-                  </p>
+                  </div>
                 </div>
                 <Button
                   variant="ghost"

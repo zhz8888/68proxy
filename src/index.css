@@ -4,6 +4,10 @@
 
 :root {
   --radius: 0.625rem;
+  --app-radius-sm: calc(var(--radius) - 4px);
+  --app-radius-md: calc(var(--radius) - 2px);
+  --app-radius-lg: var(--radius);
+  --app-radius-xl: calc(var(--radius) + 4px);
 
   /* 黑白配色：纯黑底 + 白墨色，层级用灰度表达 */
   --background: #000000;
@@ -35,6 +39,12 @@
 }
 
 .dark {
+  --radius: 0.625rem;
+  --app-radius-sm: calc(var(--radius) - 4px);
+  --app-radius-md: calc(var(--radius) - 2px);
+  --app-radius-lg: var(--radius);
+  --app-radius-xl: calc(var(--radius) + 4px);
+
   --background: #000000;
   --foreground: #fafafa;
   --card: #0d0d0d;
@@ -88,10 +98,11 @@
   --color-signal-error: var(--signal-error);
   --color-signal-info: var(--signal-info);
 
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  /* 显式映射，避免主题 token 与运行时变量同名互相覆盖 */
+  --radius-sm: var(--app-radius-sm);
+  --radius-md: var(--app-radius-md);
+  --radius-lg: var(--app-radius-lg);
+  --radius-xl: var(--app-radius-xl);
 
   --font-sans:
     "PingFang SC", "Microsoft YaHei UI", "Noto Sans SC", system-ui, -apple-system, sans-serif;
