@@ -148,7 +148,6 @@ Two artifacts are produced (in `src-tauri/target/release/`):
 </p>
 
 - [Command Code](https://commandcode.ai) — Upstream API provider
-- [OpenCode](https://opencode.ai) — API ecosystem & inspiration
 - [Tauri](https://tauri.app) — Desktop app framework
 - [axum](https://github.com/tokio-rs/axum) — Rust web framework
 

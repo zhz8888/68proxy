@@ -148,7 +148,6 @@ pnpm tauri build
 </p>
 
 - [Command Code](https://commandcode.ai) — 上游 API 提供商
-- [OpenCode](https://opencode.ai) — API 生态与灵感
 - [Tauri](https://tauri.app) — 桌面应用框架
 - [axum](https://github.com/tokio-rs/axum) — Rust Web 框架
 
