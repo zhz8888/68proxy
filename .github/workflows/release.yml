@@ -1,0 +1,93 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag (e.g. v1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # Tauri 2 发布产物（NSIS 安装包 + 便携 exe）
+      TAURI_SKIP_SIGNING: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend typecheck
+        run: pnpm build
+
+      - name: Build installer (NSIS)
+        run: pnpm tauri build --bundles nsis
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: 68proxy-win-x64
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/*.exe
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate checksums
+        run: find artifacts -type f -exec sha256sum {} \; > checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
+          body: |
+            68proxy ${{ inputs.tag }}
+
+            **下载说明**
+            - 🖥️ `68proxy_<version>_x64-setup.exe` — 安装版（NSIS），含桌面快捷方式、开始菜单与卸载入口
+            - 📦 `68proxy.exe` — 便携版，免安装双击即用
+
+            **使用前提**
+            - 需要 `user_` 开头的 Command Code API Key
+            - 支持 OpenAI / Anthropic 兼容协议接入
+            - 详见 [README](https://github.com/evanfu0110/68proxy#readme)
+
+            **校验**
+            - `checksums.txt` 提供所有文件的 sha256
+          files: |
+            artifacts/**/*
+            checksums.txt

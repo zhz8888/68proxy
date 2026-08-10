@@ -1,0 +1,81 @@
+name: 问题反馈 Bug Report
+description: 报告 68proxy 使用中遇到的问题 (Report a bug)
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### 环境信息 Environment
+        请在提交前确认已使用最新版本，并补充环境信息。
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 系统平台 Platform
+      options:
+        - Windows 10
+        - Windows 11
+        - macOS
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 Version
+      description: 「关于」页可查看版本号 (e.g. v1.0.0)
+    validations:
+      required: true
+  - type: dropdown
+    id: proxy_state
+    attributes:
+      label: 代理状态 Proxy status
+      description: 出现问题时，代理是否在运行中？
+      options:
+        - 运行中 / Running
+        - 已停止 / Stopped
+        - 启动失败 / Failed to start
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: 接入的客户端 Client
+      description: 通过哪个工具接入（Cursor / OpenCode / Cherry Studio / 自研 / 其他）
+    validations:
+      required: false
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述 Description
+      description: 简洁清晰地描述遇到的问题
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 Steps to reproduce
+      placeholder: |
+        1. 打开 68proxy
+        2. 点击...
+        3. 出现...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为 Expected behavior
+    validations:
+      required: false
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为 Actual behavior
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 截图 Logs or screenshots
+      description: 如有错误信息、调试日志或截图请粘贴在此；**注意：请务必打码 API Key（user_ 开头）、Cookie 等敏感信息**
+    validations:
+      required: false

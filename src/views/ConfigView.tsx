@@ -1,0 +1,335 @@
+import { useEffect, useState } from "react";
+import { AlertTriangle, Download, Eye, EyeOff, KeyRound, RefreshCw, Save, Trash2, XCircle } from "lucide-react";
+import { toast } from "sonner";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Separator } from "@/components/ui/separator";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { api, type ApiKeyState, type Config } from "@/lib/api";
+
+const DEFAULTS: Config = {
+  port: 3050,
+  host: "0.0.0.0",
+  api_base: "https://api.commandcode.ai",
+  project_slug: "cc-proxy",
+  log_file: "",
+  log_level: "info",
+  use_provider_models: true,
+  model_refresh_interval_ms: 300000,
+  auto_start_proxy: false,
+  show_window_on_start: true,
+  autostart: false,
+  close_to_tray: true,
+};
+
+function Section({
+  title,
+  desc,
+  children,
+  className,
+}: {
+  title: string;
+  desc?: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <Card className={className}>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">{title}</CardTitle>
+        {desc && <CardDescription>{desc}</CardDescription>}
+      </CardHeader>
+      <CardContent className="space-y-4 pt-0">{children}</CardContent>
+    </Card>
+  );
+}
+
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-baseline justify-between">
+        <Label>{label}</Label>
+        {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+export function ConfigView() {
+  const [cfg, setCfg] = useState<Config>(DEFAULTS);
+  const [loaded, setLoaded] = useState(false);
+  const [apiKey, setApiKey] = useState<ApiKeyState>({ has_key: false, masked: "" });
+  const [keyInput, setKeyInput] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [portInUse, setPortInUse] = useState<{ in_use: boolean; pid: number | null }>({
+    in_use: false,
+    pid: null,
+  });
+  const [freeing, setFreeing] = useState(false);
+
+  useEffect(() => {
+    Promise.all([api.configGet(), api.apiKeyGet()]).then(([c, k]) => {
+      setCfg(c);
+      setApiKey(k);
+      setLoaded(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setTimeout(() => {
+      api.portCheck(cfg.port).then(setPortInUse).catch(() => {});
+    }, 400);
+    return () => clearTimeout(t);
+  }, [cfg.port, loaded]);
+
+  function update<K extends keyof Config>(key: K, value: Config[K]) {
+    setCfg((c) => ({ ...c, [key]: value }));
+  }
+
+  async function save() {
+    try {
+      const res = await api.configSave(cfg);
+      await api.autostartSet(cfg.autostart);
+      if (res.needs_restart) {
+        toast.success("端口或地址已变更，重启代理后生效");
+      }
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }
+
+  async function freePort() {
+    setFreeing(true);
+    try {
+      const r = await api.portFree(cfg.port);
+      toast.success(r.message);
+      const check = await api.portCheck(cfg.port);
+      setPortInUse(check);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setFreeing(false);
+    }
+  }
+
+  // 配置改动后自动保存（防抖 600ms），无需手动点保存
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setTimeout(() => {
+      save();
+    }, 600);
+    return () => clearTimeout(t);
+  }, [cfg, loaded]);
+
+  async function saveKey() {
+    if (!keyInput.trim()) {
+      toast.error("请输入 API Key");
+      return;
+    }
+    if (!keyInput.startsWith("user_")) {
+      toast.error("API Key 必须以 user_ 开头");
+      return;
+    }
+    try {
+      await api.apiKeySet(keyInput.trim());
+      setApiKey(await api.apiKeyGet());
+      setKeyInput("");
+      toast.success("API Key 已保存到本地配置文件");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }
+
+  async function deleteKey() {
+    try {
+      await api.apiKeyDelete();
+      setApiKey({ has_key: false, masked: "" });
+      toast.success("API Key 已删除");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }
+
+  async function exportLogs() {
+    try {
+      const path = await saveDialog({
+        defaultPath: "68proxy-logs.log",
+        filters: [{ name: "日志文件", extensions: ["log", "txt"] }],
+      });
+      if (!path) return;
+      const count = await api.logsExport(path);
+      toast.success(`已导出 ${count} 条日志`);
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }
+
+  return (
+    <div className="space-y-4 pb-8">
+        <div className="grid grid-cols-2 gap-4">
+          <Section title="服务" desc="代理监听地址与端口">
+            <Field label="监听端口" hint="1-65535">
+              <div className="space-y-1.5">
+                <Input
+                  type="number"
+                  value={cfg.port}
+                  onChange={(e) => update("port", Number(e.target.value))}
+                />
+                {portInUse.in_use && (
+                  <div className="space-y-1.5">
+                    <p className="flex items-center gap-1.5 text-xs text-destructive">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      端口 {cfg.port} 已被占用
+                      {portInUse.pid ? `（PID ${portInUse.pid}）` : ""}
+                    </p>
+                    {portInUse.pid && (
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={freePort}
+                        disabled={freeing}
+                      >
+                        {freeing ? <RefreshCw className="animate-spin" /> : <XCircle />}
+                        结束占用进程（PID {portInUse.pid}）
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </Field>
+            <Field label="监听地址" hint="0.0.0.0 允许局域网访问">
+              <Input value={cfg.host} onChange={(e) => update("host", e.target.value)} />
+            </Field>
+          </Section>
+
+          <Section title="模型" desc="模型列表的来源与刷新">
+            <div className="flex items-center justify-between">
+              <Label>动态拉取 Provider 模型</Label>
+              <Switch
+                checked={cfg.use_provider_models}
+                onCheckedChange={(v) => update("use_provider_models", v)}
+              />
+            </div>
+            <Field label="刷新间隔（毫秒）">
+              <Input
+                type="number"
+                value={cfg.model_refresh_interval_ms}
+                onChange={(e) => update("model_refresh_interval_ms", Number(e.target.value))}
+              />
+            </Field>
+          </Section>
+
+          <Section title="偏好" desc="应用与代理的启动方式">
+            <div className="flex items-center justify-between">
+              <Label>启动程序时自动运行代理</Label>
+              <Switch
+                checked={cfg.auto_start_proxy}
+                onCheckedChange={(v) => update("auto_start_proxy", v)}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label>开机自动启动 68proxy</Label>
+              <Switch checked={cfg.autostart} onCheckedChange={(v) => update("autostart", v)} />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label>关闭窗口时隐藏到托盘</Label>
+              <Switch checked={cfg.close_to_tray} onCheckedChange={(v) => update("close_to_tray", v)} />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label>启动时显示窗口</Label>
+              <Switch
+                checked={cfg.show_window_on_start}
+                onCheckedChange={(v) => update("show_window_on_start", v)}
+              />
+            </div>
+          </Section>
+
+          <Section title="日志" desc="日志级别与导出">
+            <Field label="日志级别">
+              <Select value={cfg.log_level} onValueChange={(v) => update("log_level", v)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="debug">debug</SelectItem>
+                  <SelectItem value="info">info</SelectItem>
+                  <SelectItem value="warn">warn</SelectItem>
+                  <SelectItem value="error">error</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="导出最近日志" hint="选择保存位置，导出最近 1000 条">
+              <Button variant="outline" size="sm" onClick={exportLogs}>
+                <Download />
+                导出日志…
+              </Button>
+            </Field>
+          </Section>
+        </div>
+
+        <Section title="凭据" desc="API Key 以明文保存在本地配置文件（config.json）中，请勿分享给他人">
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <KeyRound className="h-3.5 w-3.5" />
+              {apiKey.has_key ? `已保存：${apiKey.masked}` : "尚未保存 API Key（也可每次请求时通过 Authorization 头传入）"}
+            </div>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Input
+                  type={showKey ? "text" : "password"}
+                  value={keyInput}
+                  onChange={(e) => setKeyInput(e.target.value)}
+                  placeholder="user_xxxxxxxxx"
+                  className="pr-9 font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowKey((v) => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+              <Button onClick={saveKey}>保存 Key</Button>
+              {apiKey.has_key && (
+                <Button variant="ghost" onClick={deleteKey}>
+                  <Trash2 />
+                  删除
+                </Button>
+              )}
+            </div>
+          </div>
+        </Section>
+
+        <Separator />
+
+        <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground">
+          <span className="flex items-center gap-1.5">
+            <Save className="h-3.5 w-3.5" />
+            配置改动后自动保存
+          </span>
+        </div>
+    </div>
+  );
+}

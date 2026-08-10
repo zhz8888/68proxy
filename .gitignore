@@ -1,0 +1,39 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Rust / Tauri 构建产物
+target/
+/src-tauri/target/
+/tools/icon-render/target/
+
+# 桌面应用不需要的移动端图标（由 pnpm tauri icon 生成）
+/src-tauri/icons/android/
+/src-tauri/icons/ios/
+
+# Agent 相关（本地生成，不随仓库提交）
+.agents/
+.opencode/
+skills-lock.json
+AGENTS.md
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
