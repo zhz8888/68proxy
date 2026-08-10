@@ -366,6 +366,9 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_window(app);
+        }))
         .invoke_handler(tauri::generate_handler![
             proxy_start,
             proxy_stop,

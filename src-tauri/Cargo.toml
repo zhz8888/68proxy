@@ -35,6 +35,7 @@ regex = "1"
 futures-util = "0.3"
 bytes = "1"
 tower-http = { version = "0.6", features = ["cors", "limit"] }
+tauri-plugin-single-instance = "2"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
