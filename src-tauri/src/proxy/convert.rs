@@ -162,9 +162,7 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
 
     let mut body = json!({
         "config": {
-            "workingDir": std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "C:\\Users\\dev".into()),
+            "workingDir": "",
             "date": chrono::Utc::now().format("%Y-%m-%d").to_string(),
             "environment": ENV_STRING,
             "structure": [],
