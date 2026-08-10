@@ -28,8 +28,6 @@
 | 📦 **Models** | ![Models](Preview%20Photo/3.png) |
 | ⚙️ **Settings** | ![Settings](Preview%20Photo/4.png) |
 
-> Placeholders — they will be replaced with real screenshots on release.
-
 <p align="center">
   <img src="./assets/readme/section-features.svg" width="100%" alt="Features">
 </p>

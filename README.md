@@ -28,8 +28,6 @@
 | 📦 **模型列表** | ![Models](Preview%20Photo/3.png) |
 | ⚙️ **配置** | ![Settings](Preview%20Photo/4.png) |
 
-> 截图占位图，将在正式发布时替换为实际界面截图。
-
 <p align="center">
   <img src="./assets/readme/section-features.svg" width="100%" alt="功能 Features">
 </p>
