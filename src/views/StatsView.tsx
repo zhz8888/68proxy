@@ -3,7 +3,7 @@ import { Activity, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ModelLogo } from "@/components/ModelLogo";
-import { StatusLamp, type LampState } from "@/components/StatusLamp";
+import { StatusLamp } from "@/components/StatusLamp";
 import { UsageTrendChart } from "@/components/UsageTrendChart";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -26,6 +26,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, onStats, type UsageChartPoint, type UsageGroupRow, type UsagePeriod, type UsageStats } from "@/lib/api";
 import { formatCost, formatLogTime, formatTokens } from "@/lib/format";
+import { lampForStatus } from "@/lib/status";
 import { cn } from "@/lib/utils";
 
 /** 时间范围选项：值与中文标签。 */
@@ -37,20 +38,6 @@ const PERIODS: Array<{ value: UsagePeriod; label: string }> = [
   { value: "60d", label: "60 天" },
   { value: "all", label: "全部" },
 ];
-
-/** 请求状态 → 指示灯。 */
-function lampForStatus(status: string): LampState {
-  switch (status) {
-    case "ok":
-      return "ok";
-    case "error":
-      return "error";
-    case "timeout":
-      return "timeout";
-    default:
-      return "stopped";
-  }
-}
 
 /** 汇总卡片：小字标题 + 大字数值（font-mono）。 */
 function SummaryCard({ title, value, hint }: { title: string; value: string; hint?: string }) {

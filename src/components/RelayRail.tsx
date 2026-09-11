@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { AppWindow, Cloud, Server } from "lucide-react";
 
 import { ModelLogo } from "@/components/ModelLogo";
-import { StatusLamp, type LampState } from "@/components/StatusLamp";
+import { StatusLamp } from "@/components/StatusLamp";
 import {
   Dialog,
   DialogContent,
@@ -14,42 +14,9 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatDuration } from "@/lib/format";
+import { lampForStatus, statusLabel } from "@/lib/status";
 import type { RequestInfo } from "@/lib/api";
 import { cn } from "@/lib/utils";
-
-/** 把请求状态字符串映射为指示灯状态。 */
-function lampForStatus(status: string): LampState {
-  switch (status) {
-    case "streaming":
-      return "streaming";
-    case "ok":
-      return "ok";
-    case "timeout":
-      return "timeout";
-    case "error":
-      return "error";
-    default:
-      return "stopped";
-  }
-}
-
-/** 把请求状态字符串翻译成中文文案。 */
-function statusLabel(status: string): string {
-  switch (status) {
-    case "streaming":
-      return "流式中";
-    case "ok":
-      return "成功";
-    case "timeout":
-      return "超时";
-    case "error":
-      return "错误";
-    case "disconnect":
-      return "断连";
-    default:
-      return status;
-  }
-}
 
 /** 中继轨道上的一个节点（客户端/代理/上游）。
  * @param left 节点在轨道内的水平位置（CSS 定位表达式）

@@ -2,44 +2,11 @@ import { useEffect, useState } from "react";
 import { Activity } from "lucide-react";
 
 import { ModelLogo } from "@/components/ModelLogo";
-import { StatusLamp, type LampState } from "@/components/StatusLamp";
+import { StatusLamp } from "@/components/StatusLamp";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { api, onRequest, onStatus, type RequestInfo } from "@/lib/api";
 import { formatDuration, formatLogTime } from "@/lib/format";
-
-/** 把请求状态字符串映射为指示灯状态。 */
-function lampForStatus(status: string): LampState {
-  switch (status) {
-    case "streaming":
-      return "streaming";
-    case "ok":
-      return "ok";
-    case "timeout":
-      return "timeout";
-    case "error":
-      return "error";
-    default:
-      return "stopped";
-  }
-}
-
-/** 把请求状态字符串翻译成中文文案。 */
-function statusLabel(status: string): string {
-  switch (status) {
-    case "streaming":
-      return "流式中";
-    case "ok":
-      return "成功";
-    case "timeout":
-      return "超时";
-    case "error":
-      return "错误";
-    case "disconnect":
-      return "断连";
-    default:
-      return status;
-  }
-}
+import { lampForStatus, statusLabel } from "@/lib/status";
 
 /** 中继视图：实时展示代理启动以来每一次请求的中继记录。 */
 export function RelayView() {
