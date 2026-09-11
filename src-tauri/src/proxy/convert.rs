@@ -28,11 +28,10 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
         .cloned()
         .unwrap_or_default();
 
-    // system 消息提取为顶层 system
-    let system_msgs: Vec<&Value> = messages
-        .iter()
-        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-        .collect();
+    // system/developer 消息提取为顶层 system（OpenAI 新规范用 developer 承载 system prompt）
+    let is_system_role =
+        |m: &&Value| matches!(m.get("role").and_then(|r| r.as_str()), Some("system") | Some("developer"));
+    let system_msgs: Vec<&Value> = messages.iter().filter(is_system_role).collect();
     let system_prompt = system_msgs
         .iter()
         .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
@@ -40,7 +39,7 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
         .join("\n");
     let chat_messages: Vec<&Value> = messages
         .iter()
-        .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+        .filter(|m| !is_system_role(m))
         .collect();
 
     // tool_call_id → tool_name 反查表

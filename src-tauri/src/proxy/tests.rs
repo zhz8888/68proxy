@@ -38,6 +38,26 @@ fn build_cc_request_basic_envelope() {
 }
 
 #[test]
+fn build_cc_request_developer_role_merged_into_system() {
+    // issue #1: OpenAI 新客户端以 role: "developer" 发送 system prompt，
+    // 需与 system 一并提取为顶层 system，不能原样转发（CC API 会报 400）
+    let req = json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "messages": [
+            { "role": "developer", "content": "系统指令" },
+            { "role": "system", "content": "补充说明" },
+            { "role": "user", "content": "你好" },
+        ],
+    });
+    let cc = convert::build_cc_request(&req);
+    assert_eq!(cc["params"]["system"], "系统指令\n补充说明");
+    let msgs = cc["params"]["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["role"], "user");
+    assert!(!msgs.iter().any(|m| m["role"] == "developer" || m["role"] == "system"));
+}
+
+#[test]
 fn build_cc_request_image_and_tools() {
     let req = json!({
         "model": "xiaomi/mimo-v2.5",
