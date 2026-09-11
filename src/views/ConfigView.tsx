@@ -18,6 +18,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { api, type ApiKeyState, type Config } from "@/lib/api";
 
+// 配置项默认值，字段与后端 config.json 一一对应
 const DEFAULTS: Config = {
   port: 3050,
   host: "0.0.0.0",
@@ -33,6 +34,7 @@ const DEFAULTS: Config = {
   close_to_tray: true,
 };
 
+/** 配置页通用区块卡片：标题 + 可选描述 + 内容。 */
 function Section({
   title,
   desc,
@@ -55,6 +57,7 @@ function Section({
   );
 }
 
+/** 单个配置字段：标签 + 可选提示文案 + 控件。 */
 function Field({
   label,
   hint,
@@ -75,6 +78,7 @@ function Field({
   );
 }
 
+/** 配置视图：编辑服务、模型、偏好、日志与凭据设置，改动后自动保存。 */
 export function ConfigView() {
   const [cfg, setCfg] = useState<Config>(DEFAULTS);
   const [loaded, setLoaded] = useState(false);
@@ -87,6 +91,7 @@ export function ConfigView() {
   });
   const [freeing, setFreeing] = useState(false);
 
+  // 挂载时并行加载配置与 API Key 状态，loaded 用于区分“初始加载完成”
   useEffect(() => {
     Promise.all([api.configGet(), api.apiKeyGet()]).then(([c, k]) => {
       setCfg(c);
@@ -95,6 +100,7 @@ export function ConfigView() {
     });
   }, []);
 
+  // 端口改动后防抖 400ms 再检测占用，避免逐字符输入时频繁请求
   useEffect(() => {
     if (!loaded) return;
     const t = setTimeout(() => {
@@ -103,10 +109,12 @@ export function ConfigView() {
     return () => clearTimeout(t);
   }, [cfg.port, loaded]);
 
+  /** 更新单个配置字段（只改本地状态，实际保存由防抖 effect 完成）。 */
   function update<K extends keyof Config>(key: K, value: Config[K]) {
     setCfg((c) => ({ ...c, [key]: value }));
   }
 
+  /** 保存配置到后端，并同步开机自启开关；端口/地址变更时提示需重启。 */
   async function save() {
     try {
       const res = await api.configSave(cfg);
@@ -119,6 +127,7 @@ export function ConfigView() {
     }
   }
 
+  /** 结束占用当前端口的进程，并重新检测占用状态。 */
   async function freePort() {
     setFreeing(true);
     try {
@@ -142,6 +151,7 @@ export function ConfigView() {
     return () => clearTimeout(t);
   }, [cfg, loaded]);
 
+  /** 校验并保存 API Key（必须以 user_ 开头）到本地配置文件。 */
   async function saveKey() {
     if (!keyInput.trim()) {
       toast.error("请输入 API Key");
@@ -161,6 +171,7 @@ export function ConfigView() {
     }
   }
 
+  /** 删除已保存的 API Key 并刷新凭据状态。 */
   async function deleteKey() {
     try {
       await api.apiKeyDelete();
@@ -171,6 +182,7 @@ export function ConfigView() {
     }
   }
 
+  /** 弹出保存对话框，把最近日志导出到用户选择的文件。 */
   async function exportLogs() {
     try {
       const path = await saveDialog({

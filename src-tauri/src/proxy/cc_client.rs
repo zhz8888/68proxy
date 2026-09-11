@@ -42,6 +42,7 @@ pub const HARDCODED_MODELS: &[(&str, &str)] = &[
     ("poolside/laguna-s-2.1-free", "Poolside Laguna S 2.1 Free"),
 ];
 
+/// 生成 W3C traceparent 头（`00-{32位trace}-{16位parent}-01`），模拟 CLI 的链路追踪。
 pub fn generate_traceparent() -> String {
     let mut rng = rand::thread_rng();
     let trace: String = (0..16).map(|_| format!("{:02x}", rng.gen::<u8>())).collect();
@@ -50,6 +51,10 @@ pub fn generate_traceparent() -> String {
 }
 
 /// 从 sessionId 构造假工作目录 slug，与真实 CLI 规则一致。
+///
+/// 取 sessionId 前 4 位十六进制数从名称池选词，拼成伪装的 Windows 项目路径
+/// `C:\Users\dev\projects\{name}-{hex4}`，再按 CLI 规则去除盘符、
+/// 非字母数字转 `-` 并全部小写。
 pub fn fake_project_slug(session_id: &str) -> String {
     const NAMES: &[&str] = &[
         "app", "api", "backend", "bot", "cli", "core", "data", "frontend", "lib", "plugin",
@@ -79,6 +84,10 @@ pub fn fake_project_slug(session_id: &str) -> String {
     }
 }
 
+/// 解析本次请求应使用的会话 ID。
+///
+/// 优先透传下游客户端头 `x-session-id` / `x-claude-code-session-id`（长度 ≥8 才采信），
+/// 否则回退到本地为该 Key 维护的会话（见 ensure_session）。
 fn get_session_id(state: &AppState, headers: &HeaderMap, api_key: &str) -> String {
     for name in ["x-session-id", "x-claude-code-session-id"] {
         if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
@@ -90,6 +99,7 @@ fn get_session_id(state: &AppState, headers: &HeaderMap, api_key: &str) -> Strin
     ensure_session(state, api_key)
 }
 
+/// 取该 API Key 当前有效会话；不存在或已过期时生成新 UUID 会话并按 12h+抖动 设置过期。
 fn ensure_session(state: &AppState, api_key: &str) -> String {
     let now = now_millis();
     if let Some(entry) = state.sessions.lock().unwrap().get(api_key) {
@@ -111,6 +121,7 @@ fn ensure_session(state: &AppState, api_key: &str) -> String {
     session_id
 }
 
+/// 取该 API Key 的伪装状态；首次访问时生成随机设备指纹并缓存。
 fn get_or_create_key_state(state: &AppState, api_key: &str) -> KeyState {
     let mut states = state.key_states.lock().unwrap();
     if let Some(s) = states.get(api_key) {
@@ -125,6 +136,7 @@ fn get_or_create_key_state(state: &AppState, api_key: &str) -> KeyState {
     ks
 }
 
+/// 读取当前模拟的 command-code CLI 版本号。
 pub fn cc_version(state: &AppState) -> String {
     state.cc_version.read().unwrap().clone()
 }
@@ -142,6 +154,7 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str) {
     let cfg = state.config.read().unwrap().clone();
     let client = state.client.clone();
 
+    // 两个初始化预请求的 URL 与请求体：上报指纹 + 上报 CLI 会话存活事件
     let fp_url = format!("{}/alpha/fingerprint/record", cfg.api_base);
     let lc_url = format!("{}/alpha/lifecycle-events", cfg.api_base);
     let fp_body = serde_json::to_value(&fingerprint).unwrap_or_else(|_| json!({}));
@@ -156,6 +169,7 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str) {
         },
     });
 
+    // 单个预请求：15s 超时兜底，失败仅记日志不阻断主流程
     let post = |url: String, body: Value| {
         let client = client.clone();
         let headers = headers.clone();
@@ -173,6 +187,7 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str) {
         }
     };
 
+    // 两个预请求并发发送，全部完成后才安排下次刷新时间
     let fp = post(fp_url, fp_body);
     let lc = post(lc_url, lc_body);
     futures_util::join!(fp, lc);
@@ -189,6 +204,7 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str) {
     log::info("Fingerprint/lifecycle next refresh scheduled");
 }
 
+/// 构造 CC 上游公共请求头：JSON 内容类型、CLI 环境标识、Bearer 鉴权与 CLI 版本号。
 fn base_headers(state: &AppState, api_key: &str) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -208,6 +224,10 @@ fn base_headers(state: &AppState, api_key: &str) -> reqwest::header::HeaderMap {
 }
 
 /// 转发到 CC API /alpha/generate。
+///
+/// - `body`：已由 convert 模块构造好的 CLI 信封请求体；
+/// - `incoming_headers`：下游客户端请求头，用于透传会话 ID；
+/// - 返回上游原始 `Response`（调用方负责读取 NDJSON 流与状态码）。
 pub async fn forward_to_cc(
     state: &AppState,
     body: &Value,
@@ -219,6 +239,7 @@ pub async fn forward_to_cc(
     let session_id = get_session_id(state, incoming_headers, api_key);
     let slug = fake_project_slug(&session_id);
 
+    // 在公共头基础上补齐 CLI 会话/项目/链路追踪等伪装头
     let mut headers = base_headers(state, api_key);
     headers.insert("x-session-id", session_id.parse().unwrap());
     headers.insert("x-co-flag", "false".parse().unwrap());
@@ -263,9 +284,12 @@ pub async fn refresh_cc_version(state: &AppState) {
 }
 
 /// 模型列表：Provider API 动态拉取（按配置间隔缓存），失败回退硬编码列表。
+///
+/// 返回 `(模型列表, 是否为硬编码回退)`；缓存未过期时直接命中缓存不发请求。
 pub async fn fetch_models(state: &AppState, api_key: Option<&str>) -> (Vec<ModelInfo>, bool) {
     let cfg = state.config.read().unwrap().clone();
     let now = now_millis();
+    // 缓存非空且未过期时直接命中；用独立块提前释放读锁，避免后续写缓存时死锁
     {
         let cache = state.models.read().unwrap();
         if !cache.models.is_empty() && now - cache.fetched_at < cfg.model_refresh_interval_ms {

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
+/** 一行可复制的地址：左侧可选标签、中间等宽字体地址、右侧复制按钮。 */
 export function UrlRow({
   url,
   label,
@@ -16,6 +17,7 @@ export function UrlRow({
 }) {
   const [copied, setCopied] = useState(false);
 
+  /** 复制地址到剪贴板，并短暂显示“已复制”图标。 */
   async function handleCopy() {
     if (await copyText(url)) {
       setCopied(true);

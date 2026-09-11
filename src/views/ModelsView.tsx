@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { api, type ModelInfo } from "@/lib/api";
 import { copyText } from "@/lib/format";
 
+/** 模型视图：展示可用模型列表，支持搜索、复制模型 ID 与手动刷新。 */
 export function ModelsView() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [fallback, setFallback] = useState(false);
@@ -17,6 +18,9 @@ export function ModelsView() {
   const [search, setSearch] = useState("");
   const [copiedId, setCopiedId] = useState("");
 
+  /** 拉取模型列表。
+   * @param force 为 true 时跳过缓存，强制向上游刷新
+   */
   async function load(force: boolean) {
     setLoading(true);
     setError("");
@@ -31,6 +35,7 @@ export function ModelsView() {
     }
   }
 
+  // 首次进入优先用缓存，不强制刷新上游
   useEffect(() => {
     load(false);
   }, []);
@@ -41,6 +46,7 @@ export function ModelsView() {
     return models.filter((m) => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q));
   }, [models, search]);
 
+  /** 复制模型 ID 到剪贴板，并在对应按钮上短暂显示“已复制”图标。 */
   async function copy(id: string) {
     if (await copyText(id)) {
       setCopiedId(id);

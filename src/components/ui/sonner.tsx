@@ -1,5 +1,7 @@
+// shadcn/ui 基础组件：全局 Toast 通知容器（Toaster），基于 sonner
 import { Toaster as Sonner, type ToasterProps } from "sonner";
 
+/** 全局 Toast 挂载点：固定暗色主题，并按项目配色覆盖默认样式。 */
 const Toaster = ({ ...props }: ToasterProps) => {
   return (
     <Sonner

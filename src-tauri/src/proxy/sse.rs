@@ -4,6 +4,11 @@ use super::convert::{map_anthropic_stop_reason, map_finish_reason};
 use super::log;
 use super::state::now_secs;
 
+/// 组装一个 OpenAI chat.completion.chunk SSE 帧（`data: {...}\n\n`）。
+///
+/// - `delta`：本帧的增量内容（role/content/tool_calls 等）；
+/// - `finish_reason`：仅最后一帧携带；
+/// - `usage`：可选，仅最后一帧附带 token 统计。
 fn make_chunk(id: &str, created: u64, model: &str, delta: Value, finish_reason: Option<&str>, usage: Option<Value>) -> String {
     let mut chunk = serde_json::json!({
         "id": id,
@@ -18,6 +23,8 @@ fn make_chunk(id: &str, created: u64, model: &str, delta: Value, finish_reason: 
     format!("data: {chunk}\n\n")
 }
 
+/// 用量归一化：上游输出为 0 token（空响应/异常）时把输入与缓存计数一并清零，
+/// 避免下游把无效请求计入 token 统计。三个参数为就地修改的计数。
 fn normalize_usage(input: &mut u64, output: &mut u64, cached: &mut u64) {
     if *output == 0 {
         *input = 0;
@@ -27,19 +34,29 @@ fn normalize_usage(input: &mut u64, output: &mut u64, cached: &mut u64) {
 
 /// CC NDJSON → OpenAI SSE 翻译器。
 pub struct OpenAiTranslator {
+    /// 下游响应体的 completion id（跨帧保持不变）。
     completion_id: String,
+    /// 响应创建时间（Unix 秒）。
     created: u64,
     model: String,
+    /// 已输出的 chunk 计数，首帧需额外携带 role 字段。
     chunk_index: u32,
+    /// 下一个 tool_call 的 index（OpenAI tool_calls 增量按下标拼接）。
     tool_call_index: u32,
+    /// finish-step 事件提前记录的 finish_reason，finish 事件缺省时回退使用。
     finish_reason: Option<String>,
+    /// 最近一次解析到的 CC 事件类型（供请求追踪展示）。
     pub last_cc_event: String,
+    /// 上游回报的输入 token 数。
     pub input_tokens: u64,
+    /// 上游回报的输出 token 数。
     pub output_tokens: u64,
+    /// 命中缓存的输入 token 数。
     pub cached_tokens: u64,
 }
 
 impl OpenAiTranslator {
+    /// 创建翻译器，`completion_id` 与模型名将出现在每个输出 chunk 中。
     pub fn new(model: &str, completion_id: &str) -> Self {
         Self {
             completion_id: completion_id.to_string(),
@@ -55,6 +72,9 @@ impl OpenAiTranslator {
         }
     }
 
+    /// 解析一行 CC NDJSON 事件，返回需要下发给下游的 SSE 帧列表（可能为空）。
+    ///
+    /// 空行、`[DONE]`、注释行与非法 JSON 直接忽略；事件解析失败不会中断流。
     pub fn parse_line(&mut self, line: &str) -> Vec<String> {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed == "[DONE]" || trimmed.starts_with(':') {
@@ -82,6 +102,7 @@ impl OpenAiTranslator {
                 if text.is_empty() {
                     return out;
                 }
+                // 首个 chunk 额外携带 role 字段，后续帧只发纯增量
                 let delta = if self.chunk_index == 0 {
                     serde_json::json!({ "role": "assistant", "content": text })
                 } else {
@@ -131,6 +152,7 @@ impl OpenAiTranslator {
                 out.push(make_chunk(&self.completion_id, self.created, &self.model, delta, None, None));
             }
             "finish-step" => {
+                // finish_reason 与 usage 通常在 finish-step 就给出，先记录供 finish 帧缺省时回退
                 if let Some(fr) = event.get("finishReason").and_then(|v| v.as_str()) {
                     self.finish_reason = Some(map_finish_reason(fr));
                 }
@@ -184,10 +206,12 @@ impl OpenAiTranslator {
         out
     }
 
+    /// 流正常结束时的终止帧 `data: [DONE]`。
     pub fn done_event(&self) -> String {
         "data: [DONE]\n\n".to_string()
     }
 
+    /// 上游零输出（空响应）时下发的错误帧，伪装成限流并提示 10s 后重试。
     pub fn zero_output_error_frame(&self) -> String {
         let body = serde_json::json!({
             "error": { "message": "Empty response from upstream (zero output tokens)", "type": "rate_limit_error" },
@@ -197,6 +221,7 @@ impl OpenAiTranslator {
     }
 }
 
+/// 组装带事件名的 SSE 帧（`event: {name}\ndata: {payload}\n\n`）。
 fn sse_event(name: &str, payload: Value) -> String {
     format!("event: {name}\ndata: {payload}\n\n")
 }
@@ -205,24 +230,39 @@ fn sse_event(name: &str, payload: Value) -> String {
 /// 事件序列：response.created → output_item.added/content_part.added
 /// → output_text.delta…/function_call_arguments.delta → 各 done → response.completed。
 pub struct ResponsesTranslator {
+    /// 下游响应体的 response id（跨事件保持不变）。
     response_id: String,
+    /// 响应创建时间（Unix 秒）。
     created_at: u64,
     model: String,
+    /// 下一个 output 条目的全局下标（message 与 function_call 共享编号）。
     next_output_index: u32,
+    /// 是否有尚未关闭的 message 文本条目。
     text_open: bool,
+    /// 当前文本条目的 item id。
     text_item_id: String,
+    /// 当前文本条目在 output 数组中的下标。
     text_item_index: u32,
+    /// 当前文本条目累计的完整文本（done 事件需要全文）。
     item_text: String,
+    /// 已完成的 output 条目，写入最终 response.completed 的 output 数组。
     output_items: Vec<Value>,
+    /// 上游 finishReason 原始值（"length" 时最终置为 incomplete）。
     stop_reason: Option<String>,
+    /// 最近一次解析到的 CC 事件类型（供请求追踪展示）。
     pub last_cc_event: String,
+    /// 上游回报的输入 token 数。
     pub input_tokens: u64,
+    /// 上游回报（或增量估算）的输出 token 数。
     pub output_tokens: u64,
+    /// 命中缓存的输入 token 数。
     pub cached_tokens: u64,
+    /// 流中已出现过 error 事件，finalize 时不再补发完成事件。
     pub has_error: bool,
 }
 
 impl ResponsesTranslator {
+    /// 创建翻译器，`response_id` 与模型名将出现在所有响应事件中。
     pub fn new(model: &str, response_id: &str) -> Self {
         Self {
             response_id: response_id.to_string(),
@@ -243,6 +283,7 @@ impl ResponsesTranslator {
         }
     }
 
+    /// 构造 response 对象骨架（不含 usage/incomplete_details，由调用方补充）。
     fn skeleton(&self, status: &str, output: Vec<Value>) -> Value {
         serde_json::json!({
             "id": self.response_id,
@@ -255,6 +296,7 @@ impl ResponsesTranslator {
         })
     }
 
+    /// 流开始时的 response.created 事件（status 为 in_progress、output 为空）。
     pub fn response_start(&self) -> String {
         sse_event(
             "response.created",
@@ -262,6 +304,7 @@ impl ResponsesTranslator {
         )
     }
 
+    /// 按 Responses 协议字段名组装 usage 对象。
     fn usage_value(&self) -> Value {
         serde_json::json!({
             "input_tokens": self.input_tokens,
@@ -300,6 +343,10 @@ impl ResponsesTranslator {
         self.output_items.push(item);
     }
 
+    /// 解析一行 CC NDJSON 事件，返回需下发的 Responses SSE 事件列表（可能为空）。
+    ///
+    /// 文本增量会自动开启/延续 message 条目；tool-call 会先关闭未完结的文本条目，
+    /// 再发出 function_call 的完整事件序列（added → arguments.delta/done → item.done）。
     pub fn process_line(&mut self, line: &str) -> Vec<String> {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed == "[DONE]" || trimmed.starts_with(':') {
@@ -355,6 +402,7 @@ impl ResponsesTranslator {
                         "output_index": self.text_item_index, "content_index": 0, "delta": text,
                     }),
                 ));
+                // 上游 finish 前无法得知真实 token，先按每段增量 1 token 粗估，最终以 finish 事件为准
                 self.output_tokens += 1;
             }
             "tool-call" => {
@@ -395,6 +443,7 @@ impl ResponsesTranslator {
                     serde_json::json!({ "type": "response.output_item.done", "output_index": idx, "item": item }),
                 ));
                 self.output_items.push(item);
+                // tool call 按固定 20 token 粗估（同上，最终以 finish 事件回报值覆盖）
                 self.output_tokens += 20;
             }
             "finish-step" | "finish" => {
@@ -439,6 +488,10 @@ impl ResponsesTranslator {
         out
     }
 
+    /// 流结束收尾：关闭未完结条目并补发 response.completed / response.failed。
+    ///
+    /// 已出错过（has_error）时返回空；零输出视为上游空响应，发 failed + rate_limit_error；
+    /// finishReason 为 length 时 status 置 incomplete 并附 max_output_tokens 原因。
     pub fn finalize(&mut self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         if self.has_error {
@@ -474,22 +527,35 @@ impl ResponsesTranslator {
 
 /// CC NDJSON → Anthropic SSE 翻译器。
 pub struct AnthropicTranslator {
+    /// 下游响应体的 message id（跨事件保持不变）。
     message_id: String,
     model: String,
+    /// 下一个 content block 的 index（text 与 tool_use 共享编号）。
     next_block_index: u32,
+    /// 当前打开的 content block index，-1 表示没有打开的块。
     current_block_index: i32,
+    /// 当前打开块的类型（"text" 或空）。
     current_block_type: &'static str,
+    /// 是否已发出当前块的 content_block_start 事件。
     block_started: bool,
+    /// 上游 finishReason 映射后的 Anthropic stop_reason。
     stop_reason: Option<String>,
+    /// 最近一次解析到的 CC 事件类型（供请求追踪展示）。
     pub last_cc_event: String,
+    /// 上游回报的输入 token 数。
     pub input_tokens: u64,
+    /// 上游回报（或增量估算）的输出 token 数。
     pub output_tokens: u64,
+    /// 命中缓存的输入 token 数（映射为 cache_read_input_tokens）。
     pub cached_tokens: u64,
+    /// 写入缓存的输入 token 数（映射为 cache_creation_input_tokens，可能缺失）。
     pub cache_write_tokens: Option<u64>,
+    /// 流中已出现过 error 事件，finalize 时不再补发完成事件。
     pub has_error: bool,
 }
 
 impl AnthropicTranslator {
+    /// 创建翻译器，`message_id` 与模型名将出现在 message_start 事件中。
     pub fn new(model: &str, message_id: &str) -> Self {
         Self {
             message_id: message_id.to_string(),
@@ -508,6 +574,7 @@ impl AnthropicTranslator {
         }
     }
 
+    /// 流开始时的 message_start 事件（usage 先置 0，最终以 message_delta 回报为准）。
     pub fn message_start(&self) -> String {
         format!(
             "event: message_start\ndata: {}\n\n",
@@ -525,6 +592,7 @@ impl AnthropicTranslator {
         )
     }
 
+    /// 若当前打开的是 text 块则发出 content_block_stop，否则返回空串。
     fn close_text_block(&mut self) -> String {
         if self.block_started && self.current_block_type == "text" {
             self.block_started = false;
@@ -538,6 +606,8 @@ impl AnthropicTranslator {
         String::new()
     }
 
+    /// 确保有一个打开的 text 块：若当前块类型不符，先关闭旧块再发出新的
+    /// content_block_start，返回需要下发的帧（可能包含关闭旧块的事件）。
     fn start_text_block(&mut self) -> String {
         if !self.block_started || self.current_block_type != "text" {
             let close = self.close_text_block();
@@ -556,6 +626,10 @@ impl AnthropicTranslator {
         }
     }
 
+    /// 解析一行 CC NDJSON 事件，返回需下发的 Anthropic SSE 事件列表（可能为空）。
+    ///
+    /// 文本增量会自动开启/延续 text 块；tool-call 先关闭 text 块再一次性发出
+    /// tool_use 的 start/delta/stop 三帧；reasoning 事件被有意丢弃（Anthropic 客户端不消费该字段）。
     pub fn process_line(&mut self, line: &str) -> Vec<String> {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed == "[DONE]" {
@@ -574,6 +648,7 @@ impl AnthropicTranslator {
 
         match event_type {
             "start" | "start-step" | "text-start" | "reasoning-start" => {}
+            // Anthropic 协议无对应增量类型，推理内容直接丢弃
             "reasoning-delta" => {}
             "text-delta" => {
                 let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
@@ -643,6 +718,7 @@ impl AnthropicTranslator {
                         .pointer("/inputTokenDetails/cacheWriteTokens")
                         .and_then(|v| v.as_u64());
                 } else {
+                    // 上游未回报 usage：清零估算值，避免 message_delta 上报虚高 token
                     self.input_tokens = 0;
                     self.output_tokens = 0;
                     self.cached_tokens = 0;
@@ -669,6 +745,8 @@ impl AnthropicTranslator {
         out
     }
 
+    /// 流结束收尾：关闭 text 块后补发 message_delta + message_stop；
+    /// 零输出时改发 error 帧（rate_limit_error + retry_after），已出错过则返回空。
     pub fn finalize(&mut self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         if self.has_error {

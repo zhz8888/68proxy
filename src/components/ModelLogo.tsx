@@ -2,6 +2,7 @@ import { ModelIcon, Poolside, ProviderIcon, modelMappings } from "@lobehub/icons
 import { Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+// 模型 ID 前缀 → 供应商标识的映射表，用于挑选对应的品牌图标
 const PROVIDER_BY_PREFIX: Array<[RegExp, string]> = [
   [/^deepseek\//, "deepseek"],
   [/^claude-/, "anthropic"],
@@ -17,6 +18,9 @@ const PROVIDER_BY_PREFIX: Array<[RegExp, string]> = [
   [/^hunyuan\//, "hunyuan"],
 ];
 
+/** 按模型 ID 前缀推断所属供应商。
+ * @returns 供应商标识；无法识别时返回 null
+ */
 export function providerForModel(id: string): string | null {
   for (const [re, provider] of PROVIDER_BY_PREFIX) {
     if (re.test(id)) return provider;
@@ -32,6 +36,7 @@ function hasLobeMapping(model: string): boolean {
   );
 }
 
+/** 模型品牌图标：依次尝试 Poolside 专属图标、lobehub 模型图标、供应商标志，均不匹配时回退为通用机器人图标。 */
 export function ModelLogo({
   model,
   size = 20,
@@ -44,6 +49,7 @@ export function ModelLogo({
   const provider = providerForModel(model);
   const isPoolside = /^poolside\//i.test(model);
   const lobeMapped = hasLobeMapping(model);
+  // 是否识别出品牌：决定外框虚线样式与 title 提示文案
   const known = provider !== null || isPoolside || lobeMapped;
   return (
     <span
@@ -68,6 +74,7 @@ export function ModelLogo({
   );
 }
 
+/** 供应商品牌图标（按供应商标识渲染，不做起模型级匹配）。 */
 export function ProviderLogo({
   provider,
   size = 20,

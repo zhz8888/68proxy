@@ -1,3 +1,9 @@
+//! proxy 模块的单元与集成测试。
+//!
+//! 单元测试覆盖：三种协议的请求转换、SSE/流事件翻译、错误映射、Key 提取、
+//! 设备指纹与项目 slug 生成；集成测试用 axum 搭建 mock CC 上游，端到端验证
+//! 代理服务的流式/非流式转发、零输出限流、上游错误映射与鉴权行为。
+
 use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::Router;
@@ -16,6 +22,8 @@ use super::state::AppState;
 
 // ── 单元测试：请求转换 ────────────────────────────────
 
+/// 验证基础 OpenAI 请求转换出的 CC 信封：model/system 提取、user 消息转 text parts、
+/// max_tokens 透传、permissionMode 固定 standard、config.date 为字符串。
 #[test]
 fn build_cc_request_basic_envelope() {
     let req = json!({
@@ -37,6 +45,8 @@ fn build_cc_request_basic_envelope() {
     assert!(cc["config"]["date"].is_string());
 }
 
+/// 验证 developer 与 system 两种角色的消息按序合并为顶层 system 字段，
+/// 且均不会作为聊天消息原样转发（CC API 会拒绝未知角色，issue #1）。
 #[test]
 fn build_cc_request_developer_role_merged_into_system() {
     // issue #1: OpenAI 新客户端以 role: "developer" 发送 system prompt，
@@ -57,6 +67,9 @@ fn build_cc_request_developer_role_merged_into_system() {
     assert!(!msgs.iter().any(|m| m["role"] == "developer" || m["role"] == "system"));
 }
 
+/// 验证多模态与工具场景的转换：image_url 转 image part、assistant tool_calls 转
+/// tool-call（arguments 解析为 JSON 对象）、tool 消息转 tool-result 并反查工具名、
+/// tool_choice=required 映射为 any、tools 扁平化并携带 input_schema。
 #[test]
 fn build_cc_request_image_and_tools() {
     let req = json!({
@@ -97,6 +110,10 @@ fn build_cc_request_image_and_tools() {
     assert_eq!(cc["params"]["tools"][0]["input_schema"]["type"], "object");
 }
 
+/// 验证 Anthropic Messages 请求转 OpenAI Chat 格式：system 置顶、assistant 的
+/// text/tool_use 块合并为 content+tool_calls、tool_result 拆为 role=tool 消息、
+/// tool_choice any→required、thinking budget 12000 折算 reasoning_effort=high、
+/// input_schema 映射为 function.parameters。
 #[test]
 fn anthropic_to_openai_conversion() {
     let req = json!({
@@ -139,6 +156,11 @@ fn anthropic_to_openai_conversion() {
     assert_eq!(openai["tools"][0]["function"]["parameters"]["type"], "object");
 }
 
+/// 验证 Responses（Codex CLI 等）请求转 Chat 格式：instructions 转 system、
+/// function_call/function_call_output 回灌为 tool_calls 与 role=tool、reasoning
+/// 条目不回灌、内置工具（web_search）被过滤仅保留 function、max_output_tokens 与
+/// reasoning.effort 映射；并覆盖 input 字符串形态、developer 归并 system、
+/// 未知 tool_choice 归一为 auto。
 #[test]
 fn responses_to_openai_conversion() {
     // issue #2: Codex CLI 等 Responses 客户端 → Chat 格式（供 build_cc_request 复用）
@@ -198,6 +220,9 @@ fn responses_to_openai_conversion() {
     assert_eq!(convert::convert_responses_to_openai(&req3)["tool_choice"], "auto");
 }
 
+/// 验证 Responses 非流式响应体结构：text 与 function_call 两类 output 条目、
+/// usage 字段命名，以及 finish_reason=length 时 status=incomplete 并附
+/// incomplete_details.reason=max_output_tokens。
 #[test]
 fn build_responses_response_shape() {
     let tool_calls = vec![json!({
@@ -223,6 +248,8 @@ fn build_responses_response_shape() {
 
 // ── 单元测试：SSE 翻译 ────────────────────────────────
 
+/// 验证 OpenAI 翻译器：text-delta 首帧携带 role 与 content，finish 帧输出
+/// finish_reason 与 usage（completion_tokens=5），流尾产出 [DONE] 终止帧。
 #[test]
 fn openai_translator_streams_text_and_done() {
     let mut t = OpenAiTranslator::new("deepseek/deepseek-v4-flash", "chatcmpl-test");
@@ -241,6 +268,8 @@ fn openai_translator_streams_text_and_done() {
     assert!(t.done_event().contains("[DONE]"));
 }
 
+/// 验证零输出归一化：上游 outputTokens=0 时输入/缓存 token 计数被清零，
+/// 且可生成 rate_limit_error 错误帧。
 #[test]
 fn openai_translator_zero_output_normalization() {
     let mut t = OpenAiTranslator::new("m", "c");
@@ -250,6 +279,9 @@ fn openai_translator_zero_output_normalization() {
     assert!(t.zero_output_error_frame().contains("rate_limit_error"));
 }
 
+/// 验证 Anthropic 翻译器：message_start 首事件、text-delta 自动开启 text 块并产出
+/// content_block_start/text_delta；finish 帧本身不输出事件；finalize 补发
+/// message_delta（含 output_tokens=2）与 message_stop。
 #[test]
 fn anthropic_translator_blocks_and_finalize() {
     let mut t = AnthropicTranslator::new("claude-sonnet-4-6", "msg_test");
@@ -267,6 +299,9 @@ fn anthropic_translator_blocks_and_finalize() {
     assert!(end.iter().any(|f| f.contains("\"output_tokens\":2")));
 }
 
+/// 验证 Responses 翻译器事件序列：created → 文本条目 added/part.added/delta；
+/// tool-call 前自动关闭文本条目（output_text.done）并发出 function_call 参数
+/// delta/done；finish 回报覆盖 token 估算，finalize 补发 response.completed。
 #[test]
 fn responses_translator_text_and_tool_events() {
     let mut t = ResponsesTranslator::new("gpt-5-codex", "resp_test");
@@ -294,6 +329,8 @@ fn responses_translator_text_and_tool_events() {
     assert!(end.iter().any(|f| f.contains("\"output_tokens\":5")));
 }
 
+/// 验证 Responses 翻译器异常路径：零输出时 finalize 发 response.failed（限流）；
+/// 上游 error 事件即时转 response.failed 并置 has_error，此后 finalize 不再补发事件。
 #[test]
 fn responses_translator_zero_output_and_error() {
     let mut t = ResponsesTranslator::new("m", "resp_1");
@@ -313,6 +350,8 @@ fn responses_translator_zero_output_and_error() {
 
 // ── 单元测试：错误映射 / Key 提取 / 指纹 / slug ────────
 
+/// 验证上游错误映射：429 保留状态码并附 retry_after=30 与上游消息；
+/// 402（额度耗尽）映射为 429；500 映射为 502。
 #[test]
 fn error_mapping() {
     let (s, body) = errors::map_cc_error(429, r#"{"error":{"message":"slow down"}}"#);
@@ -326,6 +365,8 @@ fn error_mapping() {
     assert_eq!(s, 502);
 }
 
+/// 验证 API Key 提取：无 Authorization 头返回 None；Bearer 值中匹配 user_ 前缀片段；
+/// 非 user_ 前缀（如 sk-）的 Key 不被采信。
 #[test]
 fn api_key_extraction() {
     let mut headers = HeaderMap::new();
@@ -342,6 +383,8 @@ fn api_key_extraction() {
     assert!(server::extract_api_key(&headers).is_none());
 }
 
+/// 验证生成指纹的结构约束：thumbmark 为 64 位十六进制、平台固定 win32、
+/// collector_version=1、MAC 哈希数量在 2-5 之间。
 #[test]
 fn fingerprint_shape() {
     let fp = fingerprint::generate();
@@ -352,6 +395,7 @@ fn fingerprint_shape() {
     assert!((2..=5).contains(&n));
 }
 
+/// 验证伪造项目 slug 的格式：不含盘符前缀、仅小写字母数字与连字符、不以连字符开头或结尾。
 #[test]
 fn project_slug_format() {
     let slug = cc_client::fake_project_slug("a3f2c001-0000-0000-0000-000000000000");
@@ -363,6 +407,8 @@ fn project_slug_format() {
 
 // ── 集成测试：mock 上游 ───────────────────────────────
 
+/// mock CC 上游路由：/alpha/generate 按模型名返回正常 NDJSON、零输出 NDJSON
+/// 或 429 错误；另提供指纹/生命周期/模型列表端点。
 fn mock_upstream() -> Router {
     Router::new()
         .route(
@@ -409,6 +455,8 @@ fn mock_upstream() -> Router {
         )
 }
 
+/// 启动 mock 上游与真实代理服务（api_base 指向 mock，不启用后台任务），
+/// 轮询等待服务就绪后返回（代理 base URL, 共享状态）。
 async fn start_proxy() -> (String, Arc<AppState>) {
     let mock = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mock_addr = mock.local_addr().unwrap();
@@ -440,6 +488,8 @@ async fn start_proxy() -> (String, Arc<AppState>) {
     (format!("http://{addr}"), state)
 }
 
+/// 端到端：Chat Completions 非流式请求返回 200，聚合文本为 Hello，
+/// usage 含 completion_tokens 与缓存命中计数。
 #[tokio::test]
 async fn chat_completions_nonstream() {
     let (base, state) = start_proxy().await;
@@ -462,6 +512,7 @@ async fn chat_completions_nonstream() {
     state.mark_stopped();
 }
 
+/// 端到端：Chat Completions 流式请求返回 SSE，包含内容 chunk、[DONE] 终止帧与 usage 统计。
 #[tokio::test]
 async fn chat_completions_streaming() {
     let (base, state) = start_proxy().await;
@@ -485,6 +536,8 @@ async fn chat_completions_streaming() {
     state.mark_stopped();
 }
 
+/// 端到端：上游零输出（outputTokens=0）时，非流式请求回退为 429 限流响应
+/// （rate_limit_error + retry_after=10）。
 #[tokio::test]
 async fn chat_completions_zero_output_returns_429() {
     let (base, state) = start_proxy().await;
@@ -506,6 +559,7 @@ async fn chat_completions_zero_output_returns_429() {
     state.mark_stopped();
 }
 
+/// 端到端：上游返回 429 错误体时，透传状态码、retry_after=30 与上游错误消息。
 #[tokio::test]
 async fn upstream_error_mapped() {
     let (base, state) = start_proxy().await;
@@ -527,6 +581,8 @@ async fn upstream_error_mapped() {
     state.mark_stopped();
 }
 
+/// 端到端：/v1/models 返回 Provider 动态模型列表、/health 返回 OK、
+/// 无 API Key 的补全请求被拒绝为 401。
 #[tokio::test]
 async fn models_and_health_and_401() {
     let (base, state) = start_proxy().await;
@@ -556,6 +612,8 @@ async fn models_and_health_and_401() {
     state.mark_stopped();
 }
 
+/// 端到端：Responses 非流式请求返回 response 对象（resp_ 前缀 id、completed 状态、
+/// message 输出条目与 Responses 风格 usage）。
 #[tokio::test]
 async fn responses_nonstream() {
     let (base, state) = start_proxy().await;
@@ -583,6 +641,8 @@ async fn responses_nonstream() {
     state.mark_stopped();
 }
 
+/// 端到端：Responses 流式请求返回完整事件序列（response.created → output_text.delta
+/// → response.completed，含 output_tokens 统计）。
 #[tokio::test]
 async fn responses_streaming() {
     let (base, state) = start_proxy().await;
@@ -608,6 +668,8 @@ async fn responses_streaming() {
     state.mark_stopped();
 }
 
+/// 端到端：Responses 流式请求在上游零输出时回退为 429 JSON 限流响应
+/// （首帧内容未出现前仍可携带真实状态码）。
 #[tokio::test]
 async fn responses_zero_output_returns_429() {
     let (base, state) = start_proxy().await;
@@ -629,6 +691,8 @@ async fn responses_zero_output_returns_429() {
     state.mark_stopped();
 }
 
+/// 端到端：Anthropic Messages 非流式请求返回 text content 块、stop_reason=end_turn
+/// 与 output_tokens 统计。
 #[tokio::test]
 async fn anthropic_messages_nonstream() {
     let (base, state) = start_proxy().await;

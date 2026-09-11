@@ -1,3 +1,9 @@
+//! 本地 HTTP 服务：路由分发、鉴权、流式/非流式转发与协议错误处理。
+//!
+//! 三种下游协议入口（/v1/chat/completions、/v1/messages、/v1/responses）统一走
+//! “转换为 CC 信封 → 转发上游 → 按协议翻译回 SSE/JSON”的流程；流式路径通过
+//! mpsc 通道把后台读流任务产出的帧交给响应流，实现首帧前可回退为普通 JSON 错误。
+
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap};
@@ -24,13 +30,19 @@ use super::log;
 use super::sse::{AnthropicTranslator, OpenAiTranslator, ResponsesTranslator};
 use super::state::{now_millis, now_secs, AppState, RequestInfo};
 
+/// 请求体大小上限：10 MiB。
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+/// 流式响应两次上游数据之间的最大空闲时间，超时判定为 Timeout。
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 非流式响应等待上游完整结果的最大空闲时间。
 const NONSTREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// 连续超时达到该阈值后，超时错误消息提示客户端缩减上下文长度。
 const TIMEOUT_REDUCE_CONTEXT_THRESHOLD: u32 = 3;
 
+/// 合法 API Key 的正则（OnceLock 惰性编译一次，避免每次请求重复构建）。
 static KEY_RE: OnceLock<regex::Regex> = OnceLock::new();
 
+/// 获取已编译的 API Key 匹配正则 `user_[A-Za-z0-9_-]+`。
 fn key_re() -> &'static regex::Regex {
     KEY_RE.get_or_init(|| regex::Regex::new(r"user_[A-Za-z0-9_-]+").unwrap())
 }
@@ -38,6 +50,7 @@ fn key_re() -> &'static regex::Regex {
 /// 请求事件转发器（Tauri 注入，供前端中继轨道展示）。
 static REQUEST_SINK: Mutex<Option<Box<dyn Fn(&RequestInfo) + Send + Sync>>> = Mutex::new(None);
 
+/// 注册请求事件转发回调（Tauri setup 阶段调用，用于向前端实时推送请求状态）。
 pub fn set_request_sink<F>(f: F)
 where
     F: Fn(&RequestInfo) + Send + Sync + 'static,
@@ -45,22 +58,26 @@ where
     *REQUEST_SINK.lock().unwrap() = Some(Box::new(f));
 }
 
+/// 把一条请求摘要推送给已注册的 sink（未注册则忽略）。
 fn emit_request(info: &RequestInfo) {
     if let Some(sink) = REQUEST_SINK.lock().unwrap().as_ref() {
         sink(info);
     }
 }
 
+/// 从 `Authorization: Bearer <key>` 头提取合法 API Key（user_ 前缀片段），无效返回 None。
 pub(crate) fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let auth = auth.strip_prefix("Bearer ")?;
     key_re().find(auth).map(|m| m.as_str().to_string())
 }
 
+/// 读取配置中的代理监听端口。
 fn config_port(cfg: &Config) -> u16 {
     cfg.port
 }
 
+/// 组装全部路由：三个协议入口 + /v1/models + /health，附请求体大小限制与宽松 CORS。
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
@@ -74,6 +91,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// 在给定 listener 上启动服务，收到 `shutdown` 信号后优雅停机。
+///
+/// - `with_background`：是否启动后台任务（24h 刷新 CLI 版本、每小时清理过期会话）。
+///   集成测试传 false 以避免后台网络请求干扰。
 pub async fn serve(
     listener: TcpListener,
     state: Arc<AppState>,
@@ -122,6 +143,7 @@ pub async fn serve(
         .await
 }
 
+/// 构造 JSON 响应，`retry_after` 存在时附带 `Retry-After` 头。
 fn json_response(status: u16, body: Value, retry_after: Option<u64>) -> axum::response::Response {
     let mut builder = axum::response::Response::builder()
         .status(status)
@@ -134,6 +156,10 @@ fn json_response(status: u16, body: Value, retry_after: Option<u64>) -> axum::re
         .expect("valid response")
 }
 
+/// 把已缓存的首帧 `prefix` 与后台读流任务经 `rx` 送来的后续帧拼接为 SSE 响应。
+///
+/// 收到 Done 帧时结束流并记 ok；Timeout/Error 帧则先下发按协议构造的错误帧再终止，
+/// 并借 `pending` 状态保证错误帧发出后才结束迭代。
 fn sse_response(
     prefix: Vec<String>,
     rx: mpsc::Receiver<Frame>,
@@ -186,13 +212,18 @@ fn sse_response(
         .expect("valid sse response")
 }
 
+/// 下游协议类型，决定错误帧/错误响应的构造格式。
 #[derive(Clone, Copy)]
 enum Protocol {
+    /// OpenAI Chat Completions。
     OpenAi,
+    /// Anthropic Messages。
     Anthropic,
+    /// OpenAI Responses。
     Responses,
 }
 
+/// 按协议构造流内错误帧（响应头已发出、无法改状态码时使用）。
 fn protocol_error_frame(protocol: Protocol, msg: &str, retry_after: Option<u64>) -> String {
     match protocol {
         Protocol::OpenAi => {
@@ -216,6 +247,8 @@ fn protocol_error_frame(protocol: Protocol, msg: &str, retry_after: Option<u64>)
     }
 }
 
+/// 生成超时错误消息：连续超时达到阈值（上下文过长）时给出缩减上下文的建议。
+/// 副作用：连续超时计数加 1。
 fn timeout_message(st: &AppState) -> String {
     let n = st.consecutive_timeouts.fetch_add(1, Ordering::SeqCst) + 1;
     if n >= TIMEOUT_REDUCE_CONTEXT_THRESHOLD {
@@ -225,10 +258,12 @@ fn timeout_message(st: &AppState) -> String {
     }
 }
 
+/// 请求成功后清零连续超时计数。
 fn reset_timeouts(st: &AppState) {
     st.consecutive_timeouts.store(0, Ordering::SeqCst);
 }
 
+/// 请求开始时登记初始摘要（status=streaming）并推送给前端。
 fn record_start(st: &AppState, ctx: &ReqCtx) {
     let info = RequestInfo {
         id: ctx.id.clone(),
@@ -247,6 +282,7 @@ fn record_start(st: &AppState, ctx: &ReqCtx) {
     emit_request(&info);
 }
 
+/// 请求结束时按 id 回填队列中对应条目的状态/耗时/token，并把最终摘要推送给前端。
 fn finish_request(st: &AppState, ctx: &ReqCtx, status: &str) {
     let elapsed = now_millis().saturating_sub(ctx.started_at);
     let mut q = st.requests.lock().unwrap();
@@ -275,30 +311,47 @@ fn finish_request(st: &AppState, ctx: &ReqCtx, status: &str) {
     emit_request(&info);
 }
 
+/// 单次请求的上下文：贯穿 handler → 流式任务 → 结束回填的生命周期数据。
 #[derive(Clone)]
 struct ReqCtx {
+    /// 请求 ID（与下游响应体中的 id 一致）。
     id: String,
+    /// 入口路径。
     path: &'static str,
+    /// 请求模型名。
     model: String,
+    /// 是否流式。
     stream: bool,
+    /// 开始时间（Unix 毫秒）。
     started_at: u64,
+    /// 结束时回填：输入 token。
     input_tokens: u64,
+    /// 结束时回填：输出 token。
     output_tokens: u64,
+    /// 结束时回填：缓存命中 token。
     cached_tokens: u64,
+    /// 结束时回填：最后的 CC 事件类型。
     last_event: String,
 }
 
+/// 后台读流任务经 mpsc 通道传给响应流的帧类型。
 enum Frame {
+    /// 一条可直接下发的 SSE 文本帧。
     Sse(String),
+    /// 上游流正常结束；`zero_output` 标记是否零输出（需改判限流）。
     Done { zero_output: bool },
+    /// 上游空闲超时。
     Timeout,
+    /// 上游读流出错，携带错误消息。
     Error(String),
 }
 
+/// 解析请求体为 JSON，失败返回 Err（调用方回 400）。
 fn parse_json_body(body: Bytes) -> Result<Value, ()> {
     serde_json::from_slice(&body).map_err(|_| ())
 }
 
+/// 鉴权：优先取请求头中的 API Key，其次用本地缓存的 Key；都没有则返回 401 响应。
 async fn api_key_or_401(headers: &HeaderMap) -> Result<String, axum::response::Response> {
     if let Some(k) = extract_api_key(headers) {
         return Ok(k);
@@ -320,6 +373,8 @@ async fn api_key_or_401(headers: &HeaderMap) -> Result<String, axum::response::R
 
 // ── OpenAI /v1/chat/completions ─────────────────────────
 
+/// OpenAI Chat Completions 入口：转换请求 → 转发 CC → 按 stream 走 SSE 或 JSON 路径。
+/// 上游非 2xx 经 map_cc_error 映射为下游状态码。
 async fn chat_completions(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -398,6 +453,8 @@ async fn chat_completions(
 
 // ── Anthropic /v1/messages ─────────────────────────────
 
+/// Anthropic Messages 入口：先转成 OpenAI Chat 格式再复用 CC 转换与转发，
+/// 错误响应按 Anthropic 格式重新包装。
 async fn messages(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -498,6 +555,7 @@ async fn messages(
 
 // ── OpenAI Responses /v1/responses ─────────────────────
 
+/// OpenAI Responses 入口（Codex CLI 等）：先转成 OpenAI Chat 格式再复用 CC 转换与转发。
 async fn responses(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -577,6 +635,11 @@ async fn responses(
 
 // ── 流式处理 ──────────────────────────────────────────
 
+/// 流式响应总控：spawn 后台任务读上游 NDJSON 并按协议翻译，经 mpsc 转发帧。
+///
+/// 关键点：先消费通道直到出现首帧“内容帧”才确定升级为 SSE——在此之前若发生
+/// 超时/错误/零输出，仍可回退为携带正确状态码的普通 JSON 错误响应。
+/// keepalive 注释帧（": " 开头）不算内容帧，仅用于维持上游活跃。
 async fn handle_stream(
     st: Arc<AppState>,
     upstream: reqwest::Response,
@@ -602,14 +665,17 @@ async fn handle_stream(
         }
     });
 
+    // 首帧确认循环：缓存前缀帧，直到出现首个“内容帧”才切到 SSE 输出
     let mut prefix: Vec<String> = Vec::new();
     let mut rx = rx;
     loop {
         match rx.recv().await {
             Some(Frame::Sse(s)) => {
+                // SSE 注释帧（keepalive）不推进状态，直接丢弃
                 if s.starts_with(": ") {
                     continue;
                 }
+                // 各协议“真正携带模型输出”的帧特征，决定从该帧起升级为 SSE
                 let is_content = match protocol {
                     Protocol::OpenAi => true,
                     Protocol::Anthropic => s.contains("\"text_delta\"") || s.contains("\"tool_use\""),
@@ -627,6 +693,7 @@ async fn handle_stream(
             }
             Some(Frame::Done { zero_output }) => {
                 if zero_output {
+                    // 上游未产出任何内容：尚未发 SSE 头，直接以 JSON 429 限流响应回退
                     reset_timeouts(&st);
                     finish_request(&st, &ctx, "error");
                     let (status, body, ra) = match protocol {
@@ -697,6 +764,10 @@ async fn handle_stream(
     }
 }
 
+/// 后台任务：读上游字节流（按空闲超时），逐行经 OpenAiTranslator 翻译后发帧。
+///
+/// 本轮 chunk 未产出任何帧时补发 keepalive 注释帧维持下游连接；
+/// 结束后按零输出与否发 Done，接收方若已断开（send 失败）则直接退出。
 async fn stream_openai(
     st: Arc<AppState>,
     upstream: reqwest::Response,
@@ -763,6 +834,8 @@ async fn stream_openai(
     }
 }
 
+/// 后台任务：读上游字节流并经 AnthropicTranslator 翻译（流程同 stream_openai，
+/// 额外先发 message_start、结束时经 finalize 补发 message_delta/message_stop）。
 async fn stream_anthropic(
     st: Arc<AppState>,
     upstream: reqwest::Response,
@@ -832,6 +905,8 @@ async fn stream_anthropic(
     let _ = tx.send(Frame::Done { zero_output: zero }).await;
 }
 
+/// 后台任务：读上游字节流并经 ResponsesTranslator 翻译（流程同 stream_openai，
+/// 额外先发 response.created、结束时经 finalize 补发 response.completed/failed）。
 async fn stream_responses(
     st: Arc<AppState>,
     upstream: reqwest::Response,
@@ -901,6 +976,7 @@ async fn stream_responses(
     let _ = tx.send(Frame::Done { zero_output: zero }).await;
 }
 
+/// 流结束后把上游回报的 token 统计与最后事件类型回填到请求队列对应条目。
 fn update_ctx_tokens(
     st: &AppState,
     id: &str,
@@ -920,6 +996,10 @@ fn update_ctx_tokens(
 
 // ── 非流式处理 ────────────────────────────────────────
 
+/// 非流式响应：读完整上游 NDJSON，聚合文本/推理/工具调用/usage 后一次性构造响应。
+///
+/// 上游本身始终以 NDJSON 流式返回，非流式只是把整条流聚合后再回给下游；
+/// 零输出视为上游空响应返回 429，成功时按协议调用对应的 build_*_response。
 async fn handle_nonstream(
     st: Arc<AppState>,
     upstream: reqwest::Response,
@@ -986,6 +1066,7 @@ async fn handle_nonstream(
         .and_then(|u| u.pointer("/inputTokenDetails/cacheWriteTokens"))
         .and_then(|v| v.as_u64());
     if output == 0 {
+        // 与流式路径一致的归一化：输出为 0 说明是无效响应，输入/缓存计数一并清零
         input = 0;
         cached = 0;
     }
@@ -1059,6 +1140,7 @@ fn split_lines(buffer: &str) -> (Vec<String>, String) {
     )
 }
 
+/// 非流式路径的协议化错误响应：429 记限流类型，其余记代理错误类型。
 fn nonstream_error(protocol: Protocol, status: u16, msg: &str, retry_after: Option<u64>) -> axum::response::Response {
     let (status, body) = match protocol {
         Protocol::OpenAi | Protocol::Responses => errors::openai_error(status, if status == 429 { "rate_limit_error" } else { "proxy_error" }, msg, retry_after),
@@ -1067,6 +1149,7 @@ fn nonstream_error(protocol: Protocol, status: u16, msg: &str, retry_after: Opti
     json_response(status, body, retry_after)
 }
 
+/// 从 CC usage 对象提取 (输入, 输出, 缓存命中) token 数，缺失一律按 0。
 fn usage_tokens(usage: &Option<Value>) -> (u64, u64, u64) {
     let u = match usage {
         Some(u) => u,
@@ -1079,6 +1162,10 @@ fn usage_tokens(usage: &Option<Value>) -> (u64, u64, u64) {
     )
 }
 
+/// 非流式聚合：解析单行 CC NDJSON 事件并就地累积到各聚合器（参数多因此豁免 clippy）。
+///
+/// text-delta 拼文本；reasoning-delta 仅 OpenAI 协议保留；tool-call 归一为
+/// OpenAI tool_call 结构；finish 记录 finish_reason 与 totalUsage。
 #[allow(clippy::too_many_arguments)]
 fn parse_ndjson_line(
     line: &str,
@@ -1154,6 +1241,7 @@ fn parse_ndjson_line(
 
 // ── 其他路由 ──────────────────────────────────────────
 
+/// GET /v1/models：返回模型列表（OpenAI list 格式），Key 缺失时仍可回退硬编码列表。
 async fn models(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1176,10 +1264,12 @@ async fn models(
     .into_response()
 }
 
+/// GET /health：存活探针，恒返回 "OK"。
 async fn health() -> &'static str {
     "OK"
 }
 
+/// 未匹配路由的统一 404 JSON 响应。
 async fn not_found() -> axum::response::Response {
     json_response(
         404,
@@ -1188,6 +1278,7 @@ async fn not_found() -> axum::response::Response {
     )
 }
 
+/// 由配置计算监听地址，host 非法时回退 0.0.0.0。
 pub fn listen_addr(cfg: &Config) -> SocketAddr {
     let host: std::net::IpAddr = cfg
         .host

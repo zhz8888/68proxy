@@ -17,8 +17,12 @@ import { cn } from "@/lib/utils";
 import { api, onStatus, type ModelInfo, type ProxyStatus } from "@/lib/api";
 import { copyText } from "@/lib/format";
 
+// 模型配置模式：由上游自动获取全部模型，或手动指定要接入的模型
 type ModelMode = "upstream" | "custom";
 
+/** 生成发给 AI 的接入提示词：描述本地代理的接口信息，让 AI 替用户把代理接入目标工具。
+ * @param selected 手动模式下选中的模型 ID 列表
+ */
 function buildPrompt(port: number, mode: ModelMode, selected: string[], toolName: string): string {
   const tool = toolName.trim() || "目标工具";
   const modelBullet =
@@ -65,6 +69,7 @@ function buildPrompt(port: number, mode: ModelMode, selected: string[], toolName
 - 配置完成后，说明如何切换回原服务，方便随时恢复`;
 }
 
+/** 生成发给 AI 的移除提示词：让 AI 删除目标工具中指向本代理的供应商配置。 */
 function buildRemovePrompt(port: number, toolName: string): string {
   const tool = toolName.trim() || "目标工具";
   return `# 任务：把「${tool}」中接入的本地代理供应商移除
@@ -85,6 +90,7 @@ function buildRemovePrompt(port: number, toolName: string): string {
 - 说明删除的位置（界面字段 / 配置文件），以及如何验证（例如重新打开模型选择器确认该供应商已消失）`;
 }
 
+/** 工具接入视图：生成接入/移除本地代理的 AI 提示词，用户复制后发给目标工具的 AI 助手完成配置。 */
 export function ToolsView() {
   const [status, setStatus] = useState<ProxyStatus | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -94,9 +100,11 @@ export function ToolsView() {
   const [copied, setCopied] = useState(false);
   const [removeCopied, setRemoveCopied] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
+  // draftMode/draftSelected 是弹窗中的临时选择，点“确定”后才应用到 mode/selected
   const [draftMode, setDraftMode] = useState<ModelMode>("upstream");
   const [draftSelected, setDraftSelected] = useState<string[]>([]);
 
+  // 挂载时获取端口与模型列表，并订阅状态变化以保持端口实时准确
   useEffect(() => {
     api.proxyStatus().then(setStatus).catch(() => {});
     const off = onStatus(setStatus);
@@ -105,12 +113,15 @@ export function ToolsView() {
       .then((r) => setModels(r.data))
       .catch(() => {});
     return () => {
+      // 卸载时取消状态订阅
       off.then((f) => f());
     };
   }, []);
 
+  // 端口未就绪时回退到默认 3050
   const port = status?.port ?? 3050;
 
+  // 模型选择结果的摘要文案（用于按钮与标题展示）
   const summary = useMemo(() => {
     if (mode === "upstream") return "根据上游自动获取";
     if (selected.length === 0) return "未选择模型";
@@ -127,6 +138,7 @@ export function ToolsView() {
     [port, toolName],
   );
 
+  /** 复制接入提示词，并短暂显示“已复制”状态。 */
   async function copyPrompt() {
     if (await copyText(prompt)) {
       setCopied(true);
@@ -134,6 +146,7 @@ export function ToolsView() {
     }
   }
 
+  /** 复制移除提示词，并短暂显示“已复制”状态。 */
   async function copyRemovePrompt() {
     if (await copyText(removePrompt)) {
       setRemoveCopied(true);
@@ -141,17 +154,20 @@ export function ToolsView() {
     }
   }
 
+  /** 打开模型选择弹窗，用当前生效的配置初始化草稿。 */
   function openDialog() {
     setDraftMode(mode);
     setDraftSelected(mode === "upstream" ? [] : selected);
     setDialogOpen(true);
   }
 
+  /** 勾选/取消草稿中的模型；任何勾选操作都会自动切换到手动指定模式。 */
   function toggleDraftModel(id: string) {
     setDraftMode("custom");
     setDraftSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
+  /** 把弹窗草稿应用为正式配置并关闭弹窗。 */
   function confirmDialog() {
     setMode(draftMode);
     setSelected(draftMode === "upstream" ? [] : draftSelected);

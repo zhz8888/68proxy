@@ -1,9 +1,11 @@
+// shadcn/ui 基础组件：按钮（Button），支持多种变体与尺寸
 import * as React from "react";
 import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/lib/utils";
 
+// 按钮的样式变体定义（cva）
 const buttonVariants = cva(
   "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
@@ -30,12 +32,14 @@ const buttonVariants = cva(
   },
 );
 
+/** 按钮属性：原生 button 属性 + variant/size 变体 + asChild。 */
 export interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
 }
 
+/** 基础按钮，通过 cva 支持多种变体与尺寸；asChild 时经 Slot 把样式渲染到子元素上。 */
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant, size, asChild = false, ...props }, ref) => {
     const Comp = asChild ? Slot : "button";

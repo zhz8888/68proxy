@@ -12,12 +12,14 @@ import { api, onRequest, onStatus, type ProxyStatus, type RequestInfo } from "@/
 import { formatUptime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
+/** 控制台视图：展示代理运行状态、监听端口与代理地址，并提供启动/停止/重启及健康检查操作。 */
 export function ConsoleView() {
   const [status, setStatus] = useState<ProxyStatus | null>(null);
   const [requests, setRequests] = useState<RequestInfo[]>([]);
   const [busy, setBusy] = useState<"start" | "stop" | "restart" | null>(null);
-  const mounted = useRef(true);
+  const mounted = useRef(true); // 组件是否仍挂载，避免卸载后的异步回调再 setState
 
+  /** 拉取一次代理状态；组件已卸载时丢弃结果。 */
   const refreshStatus = useCallback(async () => {
     try {
       const s = await api.proxyStatus();
@@ -27,19 +29,25 @@ export function ConsoleView() {
     }
   }, []);
 
+  // 挂载时加载初始数据并订阅后端事件，卸载时全部清理
   useEffect(() => {
     mounted.current = true;
     refreshStatus();
+    // 初始拉取最近 20 条请求记录
     api.requestsGet(20).then((r) => mounted.current && setRequests(r)).catch(() => {});
+    // 订阅后端推送的代理状态变化
     const offStatus = onStatus((s) => setStatus(s));
+    // 订阅请求事件：新记录插到列表头部并按 id 去重，最多保留 30 条
     const offRequest = onRequest((r) =>
       setRequests((prev) => {
         const next = [r, ...prev.filter((x) => x.id !== r.id)];
         return next.slice(0, 30);
       }),
     );
+    // 事件推送之外的兜底轮询：每 3 秒主动刷新一次状态
     const timer = setInterval(refreshStatus, 3000);
     return () => {
+      // 卸载：停止异步回写、清除轮询并取消事件订阅
       mounted.current = false;
       clearInterval(timer);
       offStatus.then((f) => f());
@@ -47,6 +55,7 @@ export function ConsoleView() {
     };
   }, [refreshStatus]);
 
+  /** 执行启动/停止/重启操作，执行期间通过 busy 禁用按钮并反馈结果。 */
   async function run(action: "start" | "stop" | "restart") {
     setBusy(action);
     try {
@@ -65,6 +74,7 @@ export function ConsoleView() {
     }
   }
 
+  /** 请求代理的 /health 端点验证可用性；代理未运行时直接提示。 */
   async function checkHealth() {
     if (!status?.running) {
       toast.error("代理未运行，先启动代理再健康检查");
@@ -83,7 +93,9 @@ export function ConsoleView() {
   }
 
   const running = status?.running ?? false;
+  // 只要有一条请求仍在流式返回，就视为“转发中”
   const streaming = requests.some((r) => r.status === "streaming");
+  // 状态文字颜色：转发中为警告色、运行中为成功色、已停止为灰色
   const statusTextClass = running
     ? streaming
       ? "text-signal-warn"

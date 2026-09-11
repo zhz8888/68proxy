@@ -2,20 +2,31 @@ use serde_json::{json, Map, Value};
 
 use super::state::now_secs;
 
+/// 请求未指定 model 时使用的默认模型。
 pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash";
+/// 上游 max_tokens 上限（超过则截断）。
 const MAX_TOKENS_CAP: u64 = 200_000;
+/// 请求未指定 max_tokens 时的默认值。
 const DEFAULT_MAX_TOKENS: u64 = 64_000;
+/// 写入 CLI 信封 config.environment 的伪装运行环境描述。
 const ENV_STRING: &str = "win32-x64, Node.js v24.16.0";
 
+/// 尽力解析 JSON 字符串，失败时返回空对象 `{}`（用于 tool_call 的 arguments）。
 fn try_parse_json(s: &str) -> Value {
     serde_json::from_str(s).unwrap_or_else(|_| json!({}))
 }
 
+/// 取 JSON 值的字符串内容，非字符串或缺失时返回空串。
 fn as_str_or_empty(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
 }
 
 /// OpenAI Chat Completions 请求 → CC 请求体（CLI 信封格式）。
+///
+/// 主要转换：system/developer 消息提取为 params.system；user/assistant/tool 消息
+/// 转为 CC 的 content parts 结构（text/image/tool-call/tool-result）；tools 扁平化为
+/// `{type, name, description, input_schema}`；tool_choice 的 required 映射为 any；
+/// max_tokens 缺省 64000 并封顶 200000；stream 恒为 true（上游只支持流式）。
 pub fn build_cc_request(openai_req: &Value) -> Value {
     let model = openai_req
         .get("model")
@@ -214,6 +225,7 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
         }
     }
     if let Some(tc) = openai_req.get("tool_choice") {
+        // OpenAI 语义 → CC 语义：required 对应 any；指定函数对应 tool + name
         let mapped = match tc {
             Value::String(s) => {
                 let t = match s.as_str() {
@@ -383,6 +395,9 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
 }
 
 /// CC 完成结果 → OpenAI Responses 非流式响应体。
+///
+/// - `tool_calls`：可选的工具调用列表（OpenAI Chat 格式的 tool_call 对象）；
+/// - `finish_reason == "length"` 时 status 置 incomplete 并附 max_output_tokens 原因。
 pub fn build_responses_response(
     response_id: &str,
     model: &str,
@@ -441,7 +456,12 @@ pub fn build_responses_response(
     body
 }
 
-/// Anthropic Messages 请求 → OpenAI Chat Completions 请求。
+/// Anthropic Messages 请求 → OpenAI Chat Completions 请求（供 build_cc_request 复用）。
+///
+/// 主要转换：system 字符串或 text 块数组归并为 system 消息；assistant 的 text/tool_use
+/// 块合并为 content + tool_calls；user 的 tool_result 块拆为独立的 role=tool 消息
+/// （工具名通过 tool_use_id 反查）；tools/tool_choice/thinking 等参数按对应语义映射，
+/// 其中 thinking 的 budget_tokens 阈值（≥10000 高 / ≥5000 中 / 其余低）折算为 reasoning_effort。
 pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
     // 1. system
     let mut system_prompt = String::new();
@@ -653,6 +673,7 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
     openai_req
 }
 
+/// CC finishReason → OpenAI finish_reason（tool-calls 归一为 tool_calls，空值视为 stop，未知透传）。
 pub fn map_finish_reason(reason: &str) -> String {
     match reason {
         "tool-calls" => "tool_calls".into(),
@@ -663,6 +684,7 @@ pub fn map_finish_reason(reason: &str) -> String {
     }
 }
 
+/// OpenAI finish_reason → Anthropic stop_reason（tool_use / max_tokens / end_turn，未知一律 end_turn）。
 pub fn map_anthropic_stop_reason(reason: &str) -> &'static str {
     match reason {
         "tool_calls" => "tool_use",
@@ -673,6 +695,10 @@ pub fn map_anthropic_stop_reason(reason: &str) -> &'static str {
 }
 
 /// 非流式 OpenAI 响应构建。
+///
+/// - `reasoning_content`：非空时以扩展字段写入 assistant 消息（deepseek 风格）；
+/// - `tool_calls`：已是 OpenAI tool_call 格式则原样挂到 message.tool_calls；
+/// - `full_text` 为空时 content 置 null（纯工具调用响应）。
 pub fn build_openai_response(
     completion_id: &str,
     model: &str,
@@ -711,6 +737,9 @@ pub fn build_openai_response(
 }
 
 /// 非流式 Anthropic 响应构建。
+///
+/// tool_call 的 arguments 字符串会尽力解析为 JSON 对象写入 tool_use.input；
+/// `finish_reason` 经 map_anthropic_stop_reason 折算为 Anthropic 的 stop_reason。
 pub fn build_anthropic_response(
     message_id: &str,
     model: &str,

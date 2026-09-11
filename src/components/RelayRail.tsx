@@ -17,6 +17,7 @@ import { formatDuration } from "@/lib/format";
 import type { RequestInfo } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+/** 把请求状态字符串映射为指示灯状态。 */
 function lampForStatus(status: string): LampState {
   switch (status) {
     case "streaming":
@@ -32,6 +33,7 @@ function lampForStatus(status: string): LampState {
   }
 }
 
+/** 把请求状态字符串翻译成中文文案。 */
 function statusLabel(status: string): string {
   switch (status) {
     case "streaming":
@@ -49,6 +51,10 @@ function statusLabel(status: string): string {
   }
 }
 
+/** 中继轨道上的一个节点（客户端/代理/上游）。
+ * @param left 节点在轨道内的水平位置（CSS 定位表达式）
+ * @param accent 高亮配色：amber 强调代理节点、blue 强调上游节点
+ */
 function Node({
   label,
   sub,
@@ -94,6 +100,7 @@ function Node({
   );
 }
 
+/** 实时中继轨道卡片：可视化“客户端 → 代理 → 上游”链路，展示最近一次请求并可点开详情。 */
 export function RelayRail({
   running,
   streaming,
@@ -131,6 +138,7 @@ export function RelayRail({
                 : "bg-border",
             )}
           />
+          {/* 运行时轨道上有正向流动的光点；流式转发时叠加一个反向流动的光点 */}
           {running && (
             <span className="rail-dot absolute top-[19px] -mt-0.5 h-1.5 w-1.5 rounded-full bg-signal-warn shadow-[0_0_8px_rgba(245,165,36,0.9)]" />
           )}
@@ -148,6 +156,7 @@ export function RelayRail({
               还没有请求记录——启动代理后，向 /v1/chat/completions 发一次请求试试。
             </p>
           ) : (
+            // 轨道下方只展示最近一次请求
             requests.slice(0, 1).map((r) => (
               <button
                 key={r.id}
@@ -200,6 +209,7 @@ export function RelayRail({
   );
 }
 
+/** 请求详情弹窗中的一行“键 - 值”展示。 */
 function Row({ k, v }: { k: string; v: string }) {
   return (
     <div className="flex justify-between gap-4">

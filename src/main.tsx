@@ -1,3 +1,4 @@
+// 前端入口：加载 Space Grotesk / JetBrains Mono 字体与全局样式，将 App 挂载到 #root 节点
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "@fontsource/space-grotesk/500.css";

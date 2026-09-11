@@ -1,3 +1,4 @@
+// Vite 构建配置：React + Tailwind 插件、@ 路径别名，以及 Tauri 开发服务器相关设置
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -5,6 +6,7 @@ import { fileURLToPath, URL } from "node:url";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 
+// Tauri 真机/远程开发时的宿主机地址（TAURI_DEV_HOST），本地开发时为空
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
@@ -12,6 +14,7 @@ export default defineConfig(() => ({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
+      // 将 @ 指向 src 目录，与 tsconfig 中的 paths 保持一致
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
@@ -19,6 +22,7 @@ export default defineConfig(() => ({
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   clearScreen: false,
   server: {
+    // 固定 1420 端口供 Tauri 窗口加载；忽略 src-tauri 的文件变更以免误触发热更新
     port: 1420,
     strictPort: true,
     host: host || false,

@@ -1,8 +1,10 @@
+// shadcn/ui 基础组件：分隔线（Separator），基于 Radix Separator
 import * as React from "react";
 import * as SeparatorPrimitive from "@radix-ui/react-separator";
 
 import { cn } from "@/lib/utils";
 
+/** 内容分隔线，支持水平/垂直方向，默认水平且对读屏器隐藏。 */
 const Separator = React.forwardRef<
   React.ElementRef<typeof SeparatorPrimitive.Root>,
   React.ComponentPropsWithoutRef<typeof SeparatorPrimitive.Root>

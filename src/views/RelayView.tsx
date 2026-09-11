@@ -7,6 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { api, onRequest, onStatus, type RequestInfo } from "@/lib/api";
 import { formatDuration, formatLogTime } from "@/lib/format";
 
+/** 把请求状态字符串映射为指示灯状态。 */
 function lampForStatus(status: string): LampState {
   switch (status) {
     case "streaming":
@@ -22,6 +23,7 @@ function lampForStatus(status: string): LampState {
   }
 }
 
+/** 把请求状态字符串翻译成中文文案。 */
 function statusLabel(status: string): string {
   switch (status) {
     case "streaming":
@@ -39,20 +41,25 @@ function statusLabel(status: string): string {
   }
 }
 
+/** 中继视图：实时展示代理启动以来每一次请求的中继记录。 */
 export function RelayView() {
   const [relay, setRelay] = useState<RequestInfo[]>([]);
 
+  // 挂载时加载历史记录并订阅请求/状态事件，卸载时取消订阅
   useEffect(() => {
+    // 初始拉取最近 500 条请求记录
     api
       .requestsGet(500)
       .then((r) => setRelay(r))
       .catch(() => {});
+    // 新请求插入列表头部并按 id 去重，最多保留 500 条
     const offReq = onRequest((r) =>
       setRelay((prev) => {
         const next = [r, ...prev.filter((x) => x.id !== r.id)];
         return next.slice(0, 500);
       }),
     );
+    // 代理停止时后端会丢弃记录，前端同步清空列表
     const offStatus = onStatus((s) => {
       if (!s.running) setRelay([]);
     });

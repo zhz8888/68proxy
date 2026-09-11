@@ -31,8 +31,10 @@ import { ModelsView } from "@/views/ModelsView";
 import { RelayView } from "@/views/RelayView";
 import { ToolsView } from "@/views/ToolsView";
 
+/** 应用主视图标识，与左侧导航项一一对应。 */
 type View = "console" | "logs" | "relay" | "config" | "models" | "tools" | "about";
 
+/** 左侧导航栏的菜单项配置：视图 id、显示文案与图标。 */
 const NAV: Array<{ id: View; label: string; icon: LucideIcon }> = [
   { id: "console", label: "控制台", icon: LayoutDashboard },
   { id: "logs", label: "调试日志", icon: Terminal },
@@ -43,8 +45,10 @@ const NAV: Array<{ id: View; label: string; icon: LucideIcon }> = [
   { id: "about", label: "关于", icon: Info },
 ];
 
+/** 当前 Tauri 窗口句柄，用于拖动、最小化、最大化、关闭等窗口操作。 */
 const win = getCurrentWindow();
 
+/** 应用主框架：左侧导航栏 + 顶部状态栏 + 按当前视图切换的内容区。 */
 function App() {
   const [view, setView] = useState<View>("console");
   const [status, setStatus] = useState<ProxyStatus | null>(null);
@@ -52,18 +56,21 @@ function App() {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
+    // 挂载时拉取一次代理状态，并订阅后端推送；同时以 3 秒间隔轮询兜底
     api.proxyStatus().then(setStatus).catch(() => {});
     const off = onStatus(setStatus);
     const timer = setInterval(() => {
       api.proxyStatus().then(setStatus).catch(() => {});
     }, 3000);
     win.isMaximized().then(setMaximized).catch(() => {});
+    // 卸载时清除轮询定时器并取消事件订阅，避免泄漏
     return () => {
       clearInterval(timer);
       off.then((f) => f());
     };
   }, []);
 
+  /** 启动或停止本地代理：运行中则停止，否则启动，期间禁用按钮防重复点击。 */
   async function toggle() {
     const running = status?.running ?? false;
     setBusy(running ? "stop" : "start");
@@ -78,6 +85,7 @@ function App() {
     }
   }
 
+  /** 切换窗口最大化/还原状态，并同步本地 maximized 标记以更新按钮提示。 */
   async function toggleMaximize() {
     const isMax = await win.isMaximized();
     if (isMax) {
@@ -88,6 +96,7 @@ function App() {
     setMaximized(!isMax);
   }
 
+  // 代理是否运行中，控制状态灯、文案与启停按钮样式
   const running = status?.running ?? false;
 
   return (
@@ -186,6 +195,7 @@ function App() {
             </div>
           </header>
 
+          {/* 内容区：日志/模型/中继视图占满高度，其余视图可纵向滚动 */}
           <div className="min-h-0 flex-1 overflow-hidden p-4">
             {view === "logs" || view === "models" || view === "relay" ? (
               <div className="h-full">

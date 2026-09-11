@@ -1,8 +1,10 @@
+// shadcn/ui 基础组件：开关（Switch），基于 Radix Switch
 import * as React from "react";
 import * as SwitchPrimitives from "@radix-ui/react-switch";
 
 import { cn } from "@/lib/utils";
 
+/** 开关控件，用于布尔型设置的开/关切换。 */
 const Switch = React.forwardRef<
   React.ElementRef<typeof SwitchPrimitives.Root>,
   React.ComponentPropsWithoutRef<typeof SwitchPrimitives.Root>

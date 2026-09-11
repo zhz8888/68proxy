@@ -1,6 +1,12 @@
 use serde_json::{json, Value};
 
 /// CC 上游 HTTP 状态 → 下游（OpenAI/Anthropic）状态与错误类型映射。
+///
+/// - `cc_status`：上游返回的 HTTP 状态码；
+/// - `cc_body`：上游响应体文本，尝试从中提取可读的错误消息（JSON 的 error/message 或 message 字段，
+///   非 JSON 时截取前 200 字符）；
+/// - 返回：（映射后的下游状态码, 标准错误 JSON 体）。429（含上游 402 额度耗尽）会附带
+///   `retry_after: 30` 提示客户端退避。
 pub fn map_cc_error(cc_status: u16, cc_body: &str) -> (u16, Value) {
     let mapped = match cc_status {
         400 => (400, "invalid_request_error"),
@@ -47,6 +53,9 @@ pub fn map_cc_error(cc_status: u16, cc_body: &str) -> (u16, Value) {
     )
 }
 
+/// 构造 OpenAI 风格错误响应（`{"error": {message, type}}`）。
+///
+/// - `retry_after`：可选的重试间隔秒数，存在时附加顶层 `retry_after` 字段。
 pub fn openai_error(status: u16, err_type: &str, message: &str, retry_after: Option<u64>) -> (u16, Value) {
     let mut body = json!({ "error": { "message": message, "type": err_type } });
     if let Some(ra) = retry_after {
@@ -55,6 +64,9 @@ pub fn openai_error(status: u16, err_type: &str, message: &str, retry_after: Opt
     (status, body)
 }
 
+/// 构造 Anthropic 风格错误响应（`{"type": "error", "error": {type, message}}`）。
+///
+/// - `retry_after`：可选的重试间隔秒数，存在时附加顶层 `retry_after` 字段。
 pub fn anthropic_error(status: u16, err_type: &str, message: &str, retry_after: Option<u64>) -> (u16, Value) {
     let mut body = json!({
         "type": "error",

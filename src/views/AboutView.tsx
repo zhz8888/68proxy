@@ -8,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 
+// 代理实现逻辑的四个步骤，按顺序展示
 const LOGIC_STEPS = [
   {
     title: "兼容入口",
@@ -27,6 +28,7 @@ const LOGIC_STEPS = [
   },
 ];
 
+// 技术栈条目：图标、名称与简介
 const TECH_STACK: Array<{ icons: IconType[]; name: string; desc: string }> = [
   { icons: [SiTauri], name: "Tauri 2", desc: "桌面应用壳：Rust 后端 + 系统 WebView，体积小、资源占用低" },
   { icons: [SiReact, SiTypescript, SiVite], name: "React 19 + TypeScript + Vite", desc: "前端界面：shadcn/ui 组件 + Tailwind CSS 4" },
@@ -34,6 +36,7 @@ const TECH_STACK: Array<{ icons: IconType[]; name: string; desc: string }> = [
   { icons: [FaFile], name: "本地配置文件", desc: "API Key 明文保存在本地配置文件（config.json）中，方便迁移与备份" },
 ];
 
+/** 用系统默认浏览器打开外部链接，失败时弹出错误提示。 */
 async function openLink(url: string) {
   try {
     await openUrl(url);
@@ -42,12 +45,14 @@ async function openLink(url: string) {
   }
 }
 
+// 作者联系方式与主页链接
 const LINKS: Array<{ icon: typeof Github; label: string; value: string; href: string }> = [
   { icon: Github, label: "GitHub", value: "evanfu0110", href: "https://github.com/evanfu0110" },
   { icon: Globe, label: "网站", value: "www.110.wtf", href: "https://www.110.wtf" },
   { icon: Mail, label: "邮箱", value: "1771005798@qq.com", href: "mailto:1771005798@qq.com" },
 ];
 
+/** 关于视图：项目简介、实现逻辑、技术栈与作者联系方式。 */
 export function AboutView() {
   return (
     <div className="space-y-4 pb-8">

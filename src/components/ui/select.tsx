@@ -1,13 +1,18 @@
+// shadcn/ui 基础组件：下拉选择（Select），基于 Radix Select
 import * as React from "react";
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
+/** 下拉选择根组件，管理选中值（受控/非受控）。 */
 const Select = SelectPrimitive.Root;
+/** 选项分组容器。 */
 const SelectGroup = SelectPrimitive.Group;
+/** 展示当前选中值的占位组件。 */
 const SelectValue = SelectPrimitive.Value;
 
+/** 下拉选择的触发按钮，展示选中值并带下箭头图标。 */
 const SelectTrigger = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
@@ -28,6 +33,7 @@ const SelectTrigger = React.forwardRef<
 ));
 SelectTrigger.displayName = SelectPrimitive.Trigger.displayName;
 
+/** 下拉选项浮层内容，渲染在传送门中，带上下滚动按钮。 */
 const SelectContent = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
@@ -63,6 +69,7 @@ const SelectContent = React.forwardRef<
 ));
 SelectContent.displayName = SelectPrimitive.Content.displayName;
 
+/** 单个选项，选中时右侧显示对勾图标。 */
 const SelectItem = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>

@@ -1,5 +1,9 @@
+//! 图标渲染小工具：将 SVG 光栅化为 PNG，用于生成应用的各尺寸图标。
+//! 用法：`icon-render <input.svg> <output.png>`，依赖系统字体渲染 SVG 中的文本。
+
 use std::path::Path;
 
+/// 读取命令行指定的 SVG，经 usvg 布局后用 resvg/tiny-skia 渲染并保存为 PNG。
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -7,6 +11,7 @@ fn main() {
         std::process::exit(1);
     }
     let svg = std::fs::read_to_string(Path::new(&args[1])).expect("read svg");
+    // 加载系统字体供 SVG 中的 <text> 元素使用
     let mut fontdb = fontdb::Database::new();
     fontdb.load_system_fonts();
     let mut options = usvg::Options::default();
