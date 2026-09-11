@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
     env:
       # Tauri 2 发布产物（NSIS 安装包 + 便携 exe）
@@ -54,8 +54,48 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/*.exe
 
+  build-macos:
+    # macos-latest 为 Apple Silicon runner（arm64）
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend typecheck
+        run: pnpm build
+
+      - name: Build dmg (macOS arm64)
+        run: pnpm tauri build --bundles dmg --target aarch64-apple-darwin
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: 68proxy-macos-arm64
+          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+
   release:
-    needs: build
+    needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
 
     steps:
@@ -80,6 +120,7 @@ jobs:
             **下载说明**
             - 🖥️ `68proxy_<version>_x64-setup.exe` — 安装版（NSIS），含桌面快捷方式、开始菜单与卸载入口
             - 📦 `68proxy.exe` — 便携版，免安装双击即用
+            - 🍎 `68proxy_<version>_aarch64.dmg` — macOS 版（Apple Silicon / arm64）。应用未签名与公证，首次打开请右键 →「打开」绕过 Gatekeeper，或在终端执行 `sudo xattr -r -d com.apple.quarantine /Applications/68proxy.app` 移除隔离属性
 
             **使用前提**
             - 需要 `user_` 开头的 Command Code API Key

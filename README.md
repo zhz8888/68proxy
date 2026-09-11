@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/github/stars/evanfu0110/68proxy?style=flat-square&label=Stars&color=4B6BFB" alt="GitHub Stars">
   <img src="https://img.shields.io/github/v/release/evanfu0110/68proxy?style=flat-square&label=Release&color=2E9E6B" alt="Latest Release">
   <img src="https://img.shields.io/github/license/evanfu0110/68proxy?style=flat-square&label=License&color=E85642" alt="License">
-  <img src="https://img.shields.io/badge/Platform-Windows-64748B?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-64748B?style=flat-square" alt="Platform">
 </p>
 
 **68PROXY** 是一款开箱即用的本地**反向代理 + 协议转换网关**：作为客户端与 Command Code 之间的一层中转，它把请求改写成 CC CLI 信封格式并代理至上游，同时对外暴露 OpenAI / Anthropic 兼容接口——让 Cursor、OpenCode、Cherry Studio 以及自研工具无需任何 SDK 适配即可直接接入。API Key 明文保存在本地配置文件中，一次配置、全局复用。
@@ -91,7 +91,7 @@ API Key                任意占位符即可（如 sk-placeholder），
 | 前端 | 后端 | 工具 |
 |------|------|------|
 | Tauri 2 | Rust（axum + tokio + reqwest） | tauri-cli |
-| React 19 + TypeScript | 本地配置文件（config.json） | Windows |
+| React 19 + TypeScript | 本地配置文件（config.json） | Windows / macOS |
 | Vite + Tailwind CSS 4 | serde / uuid / rand / sha2 | shadcn/ui |
 | Radix + lucide-react + sonner | tower-http + CORS | |
 
@@ -129,17 +129,28 @@ API Key                任意占位符即可（如 sk-placeholder），
 </p>
 
 ```bash
-pnpm tauri build
+# Windows（NSIS 安装包）
+pnpm tauri build --bundles nsis
+
+# macOS（Apple Silicon arm64 dmg）
+pnpm tauri build --bundles dmg --target aarch64-apple-darwin
 ```
 
-输出两种版本（`src-tauri/target/release/`）：
+输出产物：
 
-| 版本 | 文件 | 说明 |
-|------|------|------|
-| 🖥️ **安装版** | `bundle/nsis/68proxy_<version>_x64-setup.exe` | NSIS 安装程序，含桌面快捷方式、开始菜单、卸载入口，适合日常使用 |
-| 📦 **便携版** | `68proxy.exe` | 免安装，双击即用，适合移动/绿色使用 |
+| 平台 | 版本 | 文件 | 说明 |
+|------|------|------|------|
+| 🖥️ Windows | **安装版** | `target/release/bundle/nsis/68proxy_<version>_x64-setup.exe` | NSIS 安装程序，含桌面快捷方式、开始菜单、卸载入口，适合日常使用 |
+| 🖥️ Windows | **便携版** | `68proxy.exe` | 免安装，双击即用，适合移动/绿色使用 |
+| 🍎 macOS | **dmg 镜像** | `target/aarch64-apple-darwin/release/bundle/dmg/68proxy_<version>_aarch64.dmg` | Apple Silicon（arm64）dmg；未完成 Apple 公证，首次打开方式见下方说明 |
 
-> GitHub Releases 同时提供两种版本，均校验 sha256。
+> GitHub Releases 同时提供 Windows 两种版本与 macOS dmg，均校验 sha256。
+
+> **macOS 首次打开说明**：应用未经 Apple 签名与公证，首次打开可能被 Gatekeeper 拦截。可在「访达 → 应用程序」中右键应用 →「打开」绕过，或在终端执行以下命令移除隔离属性：
+>
+> ```bash
+> sudo xattr -r -d com.apple.quarantine /Applications/68proxy.app
+> ```
 
 <p align="center">
   <img src="./assets/readme/section-thanks.svg" width="100%" alt="致谢 Acknowledgments">

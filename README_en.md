@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/github/stars/evanfu0110/68proxy?style=flat-square&label=Stars&color=4B6BFB" alt="GitHub Stars">
   <img src="https://img.shields.io/github/v/release/evanfu0110/68proxy?style=flat-square&label=Release&color=2E9E6B" alt="Latest Release">
   <img src="https://img.shields.io/github/license/evanfu0110/68proxy?style=flat-square&label=License&color=E85642" alt="License">
-  <img src="https://img.shields.io/badge/Platform-Windows-64748B?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-64748B?style=flat-square" alt="Platform">
 </p>
 
 **68PROXY** is a plug-and-play local **reverse proxy + protocol gateway**: a relay between your clients and Command Code that rewrites requests into the CC CLI envelope format and forwards them upstream, while exposing OpenAI / Anthropic compatible endpoints — so Cursor, OpenCode, Cherry Studio and your own tools can connect directly without any SDK adaptation. Your API key is stored in plaintext in a local config file — configure once, reuse everywhere.
@@ -91,7 +91,7 @@ API Key                      any placeholder (e.g. sk-placeholder) — the proxy
 | Frontend | Backend | Tools |
 |----------|---------|-------|
 | Tauri 2 | Rust (axum + tokio + reqwest) | tauri-cli |
-| React 19 + TypeScript | Local config file (config.json) | Windows |
+| React 19 + TypeScript | Local config file (config.json) | Windows / macOS |
 | Vite + Tailwind CSS 4 | serde / uuid / rand / sha2 | shadcn/ui |
 | Radix + lucide-react + sonner | tower-http + CORS | |
 
@@ -129,17 +129,28 @@ API Key                      any placeholder (e.g. sk-placeholder) — the proxy
 </p>
 
 ```bash
-pnpm tauri build
+# Windows (NSIS installer)
+pnpm tauri build --bundles nsis
+
+# macOS (Apple Silicon arm64 dmg)
+pnpm tauri build --bundles dmg --target aarch64-apple-darwin
 ```
 
-Two artifacts are produced (in `src-tauri/target/release/`):
+Artifacts produced:
 
-| Version | File | Notes |
-|---------|------|-------|
-| 🖥️ **Installer** | `bundle/nsis/68proxy_<version>_x64-setup.exe` | NSIS setup with desktop shortcut, Start Menu entry and uninstaller — recommended for daily use |
-| 📦 **Portable** | `68proxy.exe` | No install needed, double-click to run — great for on-the-go use |
+| Platform | Version | File | Notes |
+|----------|---------|------|-------|
+| 🖥️ Windows | **Installer** | `target/release/bundle/nsis/68proxy_<version>_x64-setup.exe` | NSIS setup with desktop shortcut, Start Menu entry and uninstaller — recommended for daily use |
+| 🖥️ Windows | **Portable** | `68proxy.exe` | No install needed, double-click to run — great for on-the-go use |
+| 🍎 macOS | **dmg image** | `target/aarch64-apple-darwin/release/bundle/dmg/68proxy_<version>_aarch64.dmg` | Apple Silicon (arm64) dmg; not Apple-notarized (see first-launch note below) |
 
-> Both versions are shipped on GitHub Releases, each verified by sha256.
+> Both Windows versions and the macOS dmg are shipped on GitHub Releases, each verified by sha256.
+
+> **First launch on macOS**: the app is not signed or notarized by Apple, so Gatekeeper may block it on first launch. Right-click the app in Finder → Applications → **Open** to bypass, or remove the quarantine attribute in Terminal:
+>
+> ```bash
+> sudo xattr -r -d com.apple.quarantine /Applications/68proxy.app
+> ```
 
 <p align="center">
   <img src="./assets/readme/section-thanks.svg" width="100%" alt="Acknowledgments">
