@@ -23,6 +23,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { UrlRow } from "@/components/UrlRow";
 import { Button } from "@/components/ui/button";
 import { api, onStatus, type ProxyStatus } from "@/lib/api";
+import { DEFAULT_PORT } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { AboutView } from "@/views/AboutView";
 import { ConfigView } from "@/views/ConfigView";
@@ -160,7 +161,7 @@ function App() {
             >
               {running ? "运行中" : "已停止"}
             </span>
-            <UrlRow url={status?.url ?? "http://127.0.0.1:3050/v1"} className="w-64 min-w-0" />
+            <UrlRow url={status?.url ?? `http://127.0.0.1:${DEFAULT_PORT}/v1`} className="w-64 min-w-0" />
             <div data-tauri-drag-region onDoubleClick={toggleMaximize} className="min-w-0 flex-1" />
             <Button
               variant={running ? "destructive" : "default"}

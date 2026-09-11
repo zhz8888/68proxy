@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { api, onStatus, type ModelInfo, type ProxyStatus } from "@/lib/api";
+import { DEFAULT_PORT } from "@/lib/constants";
 import { copyText } from "@/lib/format";
 
 // 模型配置模式：由上游自动获取全部模型，或手动指定要接入的模型
@@ -118,8 +119,8 @@ export function ToolsView() {
     };
   }, []);
 
-  // 端口未就绪时回退到默认 3050
-  const port = status?.port ?? 3050;
+  // 端口未就绪时回退到默认端口
+  const port = status?.port ?? DEFAULT_PORT;
 
   // 模型选择结果的摘要文案（用于按钮与标题展示）
   const summary = useMemo(() => {

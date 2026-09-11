@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, onRequest, onStatus, type ProxyStatus, type RequestInfo } from "@/lib/api";
+import { DEFAULT_PORT } from "@/lib/constants";
 import { formatUptime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -76,12 +77,12 @@ export function ConsoleView() {
 
   /** 请求代理的 /health 端点验证可用性；代理未运行时直接提示。 */
   async function checkHealth() {
-    if (!status?.running) {
+    if (!status?.running || !status) {
       toast.error("代理未运行，先启动代理再健康检查");
       return;
     }
     try {
-      const r = await fetch(`${status?.anthropic_url ?? `http://127.0.0.1:${status?.port ?? 3050}`}/health`);
+      const r = await fetch(`${status.anthropic_url}/health`);
       if (r.ok) {
         toast.success("健康检查通过（OK）");
       } else {
@@ -104,7 +105,7 @@ export function ConsoleView() {
 
   return (
     <div className="space-y-4">
-      <RelayRail running={running} streaming={streaming} port={status?.port ?? 3050} requests={requests} />
+      <RelayRail running={running} streaming={streaming} port={status?.port ?? DEFAULT_PORT} requests={requests} />
 
       <div className="grid grid-cols-3 gap-4">
         <Card className="min-w-0">
@@ -153,8 +154,8 @@ export function ConsoleView() {
           <CardDescription>粘贴到 Cursor / OpenCode / SDK 的 base URL</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2 pt-0">
-          <UrlRow url={status?.url ?? `http://127.0.0.1:${status?.port ?? 3050}/v1`} label="OpenAI" />
-          <UrlRow url={status?.anthropic_url ?? `http://127.0.0.1:${status?.port ?? 3050}`} label="Anthropic" />
+          <UrlRow url={status?.url ?? `http://127.0.0.1:${DEFAULT_PORT}/v1`} label="OpenAI" />
+          <UrlRow url={status?.anthropic_url ?? `http://127.0.0.1:${DEFAULT_PORT}`} label="Anthropic" />
         </CardContent>
       </Card>
 
