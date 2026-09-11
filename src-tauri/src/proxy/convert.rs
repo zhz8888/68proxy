@@ -244,6 +244,203 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
     body
 }
 
+/// OpenAI Responses 请求 → Chat Completions 请求（供 build_cc_request 复用）。
+/// 支持 Codex CLI 等客户端：input 字符串/条目数组、instructions、function_call 回灌等。
+pub fn convert_responses_to_openai(resp: &Value) -> Value {
+    let mut messages: Vec<Value> = Vec::new();
+    if let Some(instructions) = resp.get("instructions").and_then(|v| v.as_str()) {
+        if !instructions.is_empty() {
+            messages.push(json!({ "role": "system", "content": instructions }));
+        }
+    }
+    match resp.get("input") {
+        Some(Value::String(s)) => messages.push(json!({ "role": "user", "content": s })),
+        Some(Value::Array(items)) => {
+            for item in items {
+                if let Value::String(s) = item {
+                    messages.push(json!({ "role": "user", "content": s }));
+                    continue;
+                }
+                match item.get("type").and_then(|v| v.as_str()) {
+                    Some("function_call") => {
+                        messages.push(json!({
+                            "role": "assistant",
+                            "content": Value::Null,
+                            "tool_calls": [{
+                                "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                                    "arguments": item.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}"),
+                                },
+                            }],
+                        }));
+                    }
+                    Some("function_call_output") => {
+                        let output = match item.get("output") {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(Value::Array(arr)) => arr
+                                .iter()
+                                .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(""),
+                            Some(v) => v.to_string(),
+                            None => String::new(),
+                        };
+                        messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                            "content": output,
+                        }));
+                    }
+                    // 历史 reasoning 条目不回灌上游
+                    Some("reasoning") => {}
+                    _ => {
+                        let role = match item.get("role").and_then(|v| v.as_str()).unwrap_or("user") {
+                            "assistant" => "assistant",
+                            "system" | "developer" => "system",
+                            _ => "user",
+                        };
+                        match item.get("content") {
+                            Some(Value::String(s)) => messages.push(json!({ "role": role, "content": s })),
+                            Some(Value::Array(parts)) => {
+                                let mapped: Vec<Value> = parts
+                                    .iter()
+                                    .filter_map(|p| {
+                                        match p.get("type").and_then(|t| t.as_str()) {
+                                            Some("input_text") | Some("output_text") | Some("text") => Some(json!({
+                                                "type": "text",
+                                                "text": p.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                                            })),
+                                            Some("input_image") => Some(json!({
+                                                "type": "image_url",
+                                                "image_url": { "url": p.get("image_url").and_then(|v| v.as_str()).unwrap_or("") },
+                                            })),
+                                            _ => None,
+                                        }
+                                    })
+                                    .collect();
+                                if !mapped.is_empty() {
+                                    messages.push(json!({ "role": role, "content": mapped }));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let mut openai_req = json!({
+        "model": resp.get("model").and_then(|v| v.as_str()).unwrap_or(DEFAULT_MODEL),
+        "messages": messages,
+        "stream": resp.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+    });
+    if let Some(m) = resp.get("max_output_tokens").and_then(|v| v.as_u64()) {
+        openai_req["max_tokens"] = json!(m);
+    }
+    if let Some(t) = resp.get("temperature") {
+        openai_req["temperature"] = t.clone();
+    }
+    if let Some(effort) = resp.pointer("/reasoning/effort").cloned() {
+        openai_req["reasoning_effort"] = effort;
+    } else if let Some(r) = resp.get("reasoning_effort") {
+        openai_req["reasoning_effort"] = r.clone();
+    }
+    // Responses 工具为扁平结构，且可能混有内置工具（web_search 等），仅保留 function
+    if let Some(tools) = resp.get("tools").and_then(|v| v.as_array()) {
+        let mapped: Vec<Value> = tools
+            .iter()
+            .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("function"))
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        "description": t.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                        "parameters": t.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
+                    },
+                })
+            })
+            .collect();
+        if !mapped.is_empty() {
+            openai_req["tools"] = Value::Array(mapped);
+        }
+    }
+    if let Some(tc) = resp.get("tool_choice") {
+        let mapped = match tc {
+            Value::String(s) if matches!(s.as_str(), "auto" | "none" | "required") => json!(s),
+            Value::Object(o) if o.get("type").and_then(|v| v.as_str()) == Some("function") => {
+                json!({ "type": "function", "function": { "name": o.get("name").and_then(|v| v.as_str()).unwrap_or("") } })
+            }
+            _ => json!("auto"),
+        };
+        openai_req["tool_choice"] = mapped;
+    }
+    openai_req
+}
+
+/// CC 完成结果 → OpenAI Responses 非流式响应体。
+pub fn build_responses_response(
+    response_id: &str,
+    model: &str,
+    full_text: &str,
+    tool_calls: Option<&[Value]>,
+    finish_reason: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_tokens: u64,
+) -> Value {
+    let short_id = || uuid::Uuid::new_v4().to_string()[..12].to_string();
+    let mut output: Vec<Value> = Vec::new();
+    if !full_text.is_empty() {
+        output.push(json!({
+            "type": "message",
+            "id": format!("msg_{}", short_id()),
+            "role": "assistant",
+            "status": "completed",
+            "content": [{ "type": "output_text", "text": full_text, "annotations": [] }],
+        }));
+    }
+    if let Some(tcs) = tool_calls {
+        for tc in tcs {
+            output.push(json!({
+                "type": "function_call",
+                "id": format!("fc_{}", short_id()),
+                "call_id": tc.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                "name": tc.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or(""),
+                "arguments": tc.pointer("/function/arguments").and_then(|v| v.as_str()).unwrap_or("{}"),
+                "status": "completed",
+            }));
+        }
+    }
+    let incomplete = finish_reason == "length";
+    let mut body = json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": now_secs(),
+        "status": if incomplete { "incomplete" } else { "completed" },
+        "error": Value::Null,
+        "model": model,
+        "output": output,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "input_tokens_details": { "cached_tokens": cached_tokens },
+            "output_tokens_details": { "reasoning_tokens": 0 },
+        },
+    });
+    if incomplete {
+        body["incomplete_details"] = json!({ "reason": "max_output_tokens" });
+    } else {
+        body["incomplete_details"] = Value::Null;
+    }
+    body
+}
+
 /// Anthropic Messages 请求 → OpenAI Chat Completions 请求。
 pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
     // 1. system

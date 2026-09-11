@@ -21,7 +21,7 @@ use super::config::Config;
 use super::convert::{self, DEFAULT_MODEL};
 use super::errors;
 use super::log;
-use super::sse::{AnthropicTranslator, OpenAiTranslator};
+use super::sse::{AnthropicTranslator, OpenAiTranslator, ResponsesTranslator};
 use super::state::{now_millis, now_secs, AppState, RequestInfo};
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -65,6 +65,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(messages))
+        .route("/v1/responses", post(responses))
         .route("/v1/models", get(models))
         .route("/health", get(health))
         .fallback(not_found)
@@ -189,6 +190,7 @@ fn sse_response(
 enum Protocol {
     OpenAi,
     Anthropic,
+    Responses,
 }
 
 fn protocol_error_frame(protocol: Protocol, msg: &str, retry_after: Option<u64>) -> String {
@@ -203,6 +205,13 @@ fn protocol_error_frame(protocol: Protocol, msg: &str, retry_after: Option<u64>)
         Protocol::Anthropic => format!(
             "event: error\ndata: {}\n\n",
             json!({ "type": "error", "error": { "type": "internal_error", "message": msg } })
+        ),
+        Protocol::Responses => format!(
+            "event: response.failed\ndata: {}\n\n",
+            json!({ "type": "response.failed", "response": {
+                "object": "response", "status": "failed",
+                "error": { "type": "server_error", "message": msg },
+            } })
         ),
     }
 }
@@ -487,6 +496,85 @@ async fn messages(
     }
 }
 
+// ── OpenAI Responses /v1/responses ─────────────────────
+
+async fn responses(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let req = match parse_json_body(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response(
+                400,
+                json!({ "error": { "message": "Invalid JSON body", "type": "invalid_request_error" } }),
+                None,
+            )
+        }
+    };
+    let api_key = match api_key_or_401(&headers).await {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let model = req
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or(DEFAULT_MODEL)
+        .to_string();
+    let response_id = format!("resp_{}", &uuid::Uuid::new_v4().to_string()[..12]);
+    let ctx = ReqCtx {
+        id: response_id.clone(),
+        path: "/v1/responses",
+        model: model.clone(),
+        stream,
+        started_at: now_millis(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_tokens: 0,
+        last_event: String::new(),
+    };
+    record_start(&st, &ctx);
+
+    let openai_req = convert::convert_responses_to_openai(&req);
+    let cc_body = convert::build_cc_request(&openai_req);
+    cc_client::ensure_initialized(&st, &api_key).await;
+    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &headers).await {
+        Ok(r) => r,
+        Err(e) => {
+            log::error(&format!("Upstream error: {e}"));
+            finish_request(&st, &ctx, "error");
+            return json_response(
+                502,
+                json!({ "error": { "message": format!("Upstream error: {e}"), "type": "proxy_error" } }),
+                Some(10),
+            );
+        }
+    };
+    if !upstream.status().is_success() {
+        let status = upstream.status().as_u16();
+        let text = upstream
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(500)
+            .collect::<String>();
+        log::error(&format!("CC API error (Responses): {status}"));
+        let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
+        let retry_after = mapped_body.get("retry_after").and_then(|v| v.as_u64());
+        finish_request(&st, &ctx, "error");
+        return json_response(mapped_status, mapped_body, retry_after);
+    }
+
+    if stream {
+        handle_stream(st, upstream, ctx, Protocol::Responses).await
+    } else {
+        handle_nonstream(st, upstream, ctx, Protocol::Responses).await
+    }
+}
+
 // ── 流式处理 ──────────────────────────────────────────
 
 async fn handle_stream(
@@ -508,6 +596,9 @@ async fn handle_stream(
             Protocol::Anthropic => {
                 stream_anthropic(st2, upstream, tx, model, id).await;
             }
+            Protocol::Responses => {
+                stream_responses(st2, upstream, tx, model, id).await;
+            }
         }
     });
 
@@ -522,6 +613,11 @@ async fn handle_stream(
                 let is_content = match protocol {
                     Protocol::OpenAi => true,
                     Protocol::Anthropic => s.contains("\"text_delta\"") || s.contains("\"tool_use\""),
+                    Protocol::Responses => {
+                        s.contains("response.output_item.added")
+                            || s.contains("response.output_text.delta")
+                            || s.contains("response.function_call_arguments.delta")
+                    }
                 };
                 if is_content {
                     prefix.push(s);
@@ -534,7 +630,7 @@ async fn handle_stream(
                     reset_timeouts(&st);
                     finish_request(&st, &ctx, "error");
                     let (status, body, ra) = match protocol {
-                        Protocol::OpenAi => {
+                        Protocol::OpenAi | Protocol::Responses => {
                             let (s, b) = errors::openai_error(
                                 429,
                                 "rate_limit_error",
@@ -564,7 +660,7 @@ async fn handle_stream(
                 return json_response(
                     429,
                     match protocol {
-                        Protocol::OpenAi => {
+                        Protocol::OpenAi | Protocol::Responses => {
                             errors::openai_error(429, "rate_limit_error", &msg, Some(5)).1
                         }
                         Protocol::Anthropic => {
@@ -579,7 +675,7 @@ async fn handle_stream(
                 return json_response(
                     502,
                     match protocol {
-                        Protocol::OpenAi => {
+                        Protocol::OpenAi | Protocol::Responses => {
                             errors::openai_error(502, "proxy_error", &msg, Some(10)).1
                         }
                         Protocol::Anthropic => {
@@ -736,6 +832,75 @@ async fn stream_anthropic(
     let _ = tx.send(Frame::Done { zero_output: zero }).await;
 }
 
+async fn stream_responses(
+    st: Arc<AppState>,
+    upstream: reqwest::Response,
+    tx: mpsc::Sender<Frame>,
+    model: String,
+    response_id: String,
+) {
+    let mut translator = ResponsesTranslator::new(&model, &response_id);
+    if tx.send(Frame::Sse(translator.response_start())).await.is_err() {
+        return;
+    }
+    let mut stream = upstream.bytes_stream();
+    let mut buffer = String::new();
+    let mut last_event = String::new();
+
+    loop {
+        let chunk = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
+            Ok(Some(Ok(c))) => c,
+            Ok(Some(Err(e))) => {
+                log::error(&format!("Stream read error: {e}"));
+                let _ = tx.send(Frame::Error(e.to_string())).await;
+                return;
+            }
+            Ok(None) => break,
+            Err(_) => {
+                log::warn("Stream idle timeout");
+                let _ = tx.send(Frame::Timeout).await;
+                return;
+            }
+        };
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        let (complete, last) = split_lines(&buffer);
+        buffer = last;
+        let mut had_output = false;
+        for line in &complete {
+            let frames = translator.process_line(line);
+            if !frames.is_empty() {
+                had_output = true;
+            }
+            if !translator.last_cc_event.is_empty() {
+                last_event = translator.last_cc_event.clone();
+            }
+            for f in frames {
+                if tx.send(Frame::Sse(f)).await.is_err() {
+                    return;
+                }
+            }
+        }
+        if !had_output && tx.send(Frame::Sse(": keepalive\n\n".into())).await.is_err() {
+            return;
+        }
+    }
+    if !buffer.trim().is_empty() {
+        for f in translator.process_line(&buffer) {
+            if tx.send(Frame::Sse(f)).await.is_err() {
+                return;
+            }
+        }
+    }
+    let zero = translator.output_tokens == 0;
+    for f in translator.finalize() {
+        if tx.send(Frame::Sse(f)).await.is_err() {
+            return;
+        }
+    }
+    update_ctx_tokens(&st, &response_id, &translator.input_tokens, &translator.output_tokens, &translator.cached_tokens, &last_event);
+    let _ = tx.send(Frame::Done { zero_output: zero }).await;
+}
+
 fn update_ctx_tokens(
     st: &AppState,
     id: &str,
@@ -865,6 +1030,19 @@ async fn handle_nonstream(
             );
             json_response(200, body, None)
         }
+        Protocol::Responses => {
+            let body = convert::build_responses_response(
+                &ctx.id,
+                &ctx.model,
+                &full_text,
+                if tool_calls.is_empty() { None } else { Some(&tool_calls) },
+                &finish_reason,
+                input,
+                output,
+                cached,
+            );
+            json_response(200, body, None)
+        }
     }
 }
 
@@ -883,7 +1061,7 @@ fn split_lines(buffer: &str) -> (Vec<String>, String) {
 
 fn nonstream_error(protocol: Protocol, status: u16, msg: &str, retry_after: Option<u64>) -> axum::response::Response {
     let (status, body) = match protocol {
-        Protocol::OpenAi => errors::openai_error(status, if status == 429 { "rate_limit_error" } else { "proxy_error" }, msg, retry_after),
+        Protocol::OpenAi | Protocol::Responses => errors::openai_error(status, if status == 429 { "rate_limit_error" } else { "proxy_error" }, msg, retry_after),
         Protocol::Anthropic => errors::anthropic_error(status, if status == 429 { "rate_limit_error" } else { "proxy_error" }, msg, retry_after),
     };
     json_response(status, body, retry_after)

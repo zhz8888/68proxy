@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-64748B?style=flat-square" alt="Platform">
 </p>
 
-**68PROXY** 是一款开箱即用的本地**反向代理 + 协议转换网关**：作为客户端与 Command Code 之间的一层中转，它把请求改写成 CC CLI 信封格式并代理至上游，同时对外暴露 OpenAI / Anthropic 兼容接口——让 Cursor、OpenCode、Cherry Studio 以及自研工具无需任何 SDK 适配即可直接接入。API Key 明文保存在本地配置文件中，一次配置、全局复用。
+**68PROXY** 是一款开箱即用的本地**反向代理 + 协议转换网关**：作为客户端与 Command Code 之间的一层中转，它把请求改写成 CC CLI 信封格式并代理至上游，同时对外暴露 OpenAI Chat Completions / Responses 与 Anthropic Messages 兼容接口——让 Cursor、OpenCode、Cherry Studio、Codex CLI 以及自研工具无需任何 SDK 适配即可直接接入。API Key 明文保存在本地配置文件中，一次配置、全局复用。
 
 ---
 
@@ -46,10 +46,10 @@
   <img src="./assets/readme/section-flow.svg" width="100%" alt="请求流程 Request Flow">
 </p>
 
-1. **兼容入口** — 对外暴露 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` 兼容端点，同时提供 `/v1/models` 模型列表与 `/health` 健康检查
-2. **协议转换** — 将请求包装成 Command Code CLI 信封格式：提取 system 提示、映射多轮消息、工具调用、多模态图片与 tool_choice 等参数
+1. **兼容入口** — 对外暴露 OpenAI `/v1/chat/completions`、OpenAI Responses `/v1/responses` 与 Anthropic `/v1/messages` 兼容端点，同时提供 `/v1/models` 模型列表与 `/health` 健康检查
+2. **协议转换** — 将请求包装成 Command Code CLI 信封格式：提取 system 提示、映射多轮消息、工具调用、多模态图片与 tool_choice 等参数；Responses 请求的 instructions、input 条目、function_call / function_call_output 回灌一并转换
 3. **上游转发** — 携带反检测特征（每 Key 独立会话与设备指纹、traceparent、假项目 slug、动态 CC 版本）转发至 `/alpha/generate`
-4. **流式翻译** — 把上游 NDJSON 流实时翻译为 OpenAI / Anthropic 的 SSE 或非流式 JSON，并处理错误码映射、超时、断连与零输出等边界情况
+4. **流式翻译** — 把上游 NDJSON 流实时翻译为 OpenAI / Responses / Anthropic 的 SSE 事件或非流式 JSON，并处理错误码映射、超时、断连与零输出等边界情况
 
 <p align="center">
   <img src="./assets/readme/section-quickstart.svg" width="100%" alt="快速开始 Quick Start">
@@ -74,7 +74,8 @@ pnpm tauri build
 **快速接入**：启动代理后，在任意 OpenAI / Anthropic 兼容客户端中配置：
 
 ```
-OpenAI 兼容 Base URL   http://127.0.0.1:3050/v1
+OpenAI 兼容 Base URL   http://127.0.0.1:3050/v1   （含 /v1/responses，
+                                                   Codex CLI 等 Responses 客户端同样适用）
 Anthropic Base URL     http://127.0.0.1:3050
 模型                   deepseek/deepseek-v4-flash 等（见「模型列表」）
 API Key                任意占位符即可（如 sk-placeholder），
@@ -111,7 +112,7 @@ API Key                任意占位符即可（如 sk-placeholder），
 │   │   ├── credentials.rs    # API Key 明文存取（本地配置文件）
 │   │   └── proxy/            # Rust 反向代理核心
 │   │       ├── server.rs     # axum 路由，流式 / 非流式转发
-│   │       ├── convert.rs    # OpenAI ↔ CC、Anthropic ↔ OpenAI 协议转换
+│   │       ├── convert.rs    # OpenAI / Responses / Anthropic ↔ CC 协议转换
 │   │       ├── cc_client.rs  # CC 上游客户端、会话 / 指纹、模型拉取
 │   │       ├── sse.rs        # NDJSON → SSE 翻译器
 │   │       ├── fingerprint.rs# 反检测设备指纹

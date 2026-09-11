@@ -11,7 +11,7 @@ use super::convert;
 use super::errors;
 use super::fingerprint;
 use super::server;
-use super::sse::{AnthropicTranslator, OpenAiTranslator};
+use super::sse::{AnthropicTranslator, OpenAiTranslator, ResponsesTranslator};
 use super::state::AppState;
 
 // ── 单元测试：请求转换 ────────────────────────────────
@@ -139,6 +139,88 @@ fn anthropic_to_openai_conversion() {
     assert_eq!(openai["tools"][0]["function"]["parameters"]["type"], "object");
 }
 
+#[test]
+fn responses_to_openai_conversion() {
+    // issue #2: Codex CLI 等 Responses 客户端 → Chat 格式（供 build_cc_request 复用）
+    let req = json!({
+        "model": "gpt-5-codex",
+        "instructions": "你是助手",
+        "max_output_tokens": 4096,
+        "reasoning": { "effort": "high" },
+        "tools": [
+            { "type": "web_search" },
+            { "type": "function", "name": "shell", "description": "执行命令", "parameters": { "type": "object" } },
+        ],
+        "tool_choice": "required",
+        "input": [
+            { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "你好" }] },
+            { "type": "reasoning", "id": "rs_1", "summary": [] },
+            { "type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{\"cmd\":\"ls\"}" },
+            { "type": "function_call_output", "call_id": "call_1", "output": [{ "type": "output_text", "text": "ok" }] },
+        ],
+    });
+    let openai = convert::convert_responses_to_openai(&req);
+    assert_eq!(openai["model"], "gpt-5-codex");
+    assert_eq!(openai["max_tokens"], 4096);
+    assert_eq!(openai["reasoning_effort"], "high");
+    let msgs = openai["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[0]["content"], "你是助手");
+    assert_eq!(msgs[1]["role"], "user");
+    assert_eq!(msgs[1]["content"][0]["text"], "你好");
+    // reasoning 条目不回灌
+    assert_eq!(msgs[2]["role"], "assistant");
+    assert_eq!(msgs[2]["tool_calls"][0]["id"], "call_1");
+    assert_eq!(msgs[2]["tool_calls"][0]["function"]["name"], "shell");
+    assert_eq!(msgs[3]["role"], "tool");
+    assert_eq!(msgs[3]["tool_call_id"], "call_1");
+    assert_eq!(msgs[3]["content"], "ok");
+    // 内置工具被过滤，仅保留 function 并嵌套
+    assert_eq!(openai["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(openai["tools"][0]["function"]["name"], "shell");
+    assert_eq!(openai["tools"][0]["function"]["parameters"]["type"], "object");
+    assert_eq!(openai["tool_choice"], "required");
+
+    // input 字符串形态 + developer role 归并为 system
+    let req2 = json!({
+        "model": "m",
+        "input": [
+            { "type": "message", "role": "developer", "content": "系统提示" },
+            "纯文本输入",
+        ],
+    });
+    let openai2 = convert::convert_responses_to_openai(&req2);
+    assert_eq!(openai2["messages"][0]["role"], "system");
+    assert_eq!(openai2["messages"][1]["role"], "user");
+    assert_eq!(openai2["messages"][1]["content"], "纯文本输入");
+    // 未知 tool_choice 归一为 auto
+    let req3 = json!({ "model": "m", "input": "x", "tool_choice": "custom" });
+    assert_eq!(convert::convert_responses_to_openai(&req3)["tool_choice"], "auto");
+}
+
+#[test]
+fn build_responses_response_shape() {
+    let tool_calls = vec![json!({
+        "id": "call_1", "type": "function",
+        "function": { "name": "shell", "arguments": "{\"cmd\":\"ls\"}" },
+    })];
+    let body = convert::build_responses_response("resp_1", "gpt-5-codex", "Hi", Some(&tool_calls), "tool_calls", 10, 5, 3);
+    assert_eq!(body["id"], "resp_1");
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["output"][0]["type"], "message");
+    assert_eq!(body["output"][0]["content"][0]["text"], "Hi");
+    assert_eq!(body["output"][1]["type"], "function_call");
+    assert_eq!(body["output"][1]["call_id"], "call_1");
+    assert_eq!(body["output"][1]["name"], "shell");
+    assert_eq!(body["usage"]["output_tokens"], 5);
+    assert_eq!(body["usage"]["input_tokens_details"]["cached_tokens"], 3);
+
+    let truncated = convert::build_responses_response("resp_2", "m", "abc", None, "length", 1, 2, 0);
+    assert_eq!(truncated["status"], "incomplete");
+    assert_eq!(truncated["incomplete_details"]["reason"], "max_output_tokens");
+}
+
 // ── 单元测试：SSE 翻译 ────────────────────────────────
 
 #[test]
@@ -183,6 +265,50 @@ fn anthropic_translator_blocks_and_finalize() {
     assert!(end.iter().any(|f| f.contains("message_delta")));
     assert!(end.iter().any(|f| f.contains("message_stop")));
     assert!(end.iter().any(|f| f.contains("\"output_tokens\":2")));
+}
+
+#[test]
+fn responses_translator_text_and_tool_events() {
+    let mut t = ResponsesTranslator::new("gpt-5-codex", "resp_test");
+    assert!(t.response_start().contains("response.created"));
+
+    let frames = t.process_line(r#"{"type":"text-delta","text":"Hello"}"#);
+    assert!(frames.iter().any(|f| f.contains("response.output_item.added")));
+    assert!(frames.iter().any(|f| f.contains("response.content_part.added")));
+    assert!(frames.iter().any(|f| f.contains("\"delta\":\"Hello\"")));
+
+    let frames = t.process_line(
+        r#"{"type":"tool-call","toolCallId":"call_1","toolName":"shell","input":{"cmd":"ls"}}"#,
+    );
+    // 文本条目先关闭，再发出 function_call 完整事件序列
+    assert!(frames.iter().any(|f| f.contains("response.output_text.done")));
+    assert!(frames.iter().any(|f| f.contains("response.function_call_arguments.done")));
+    assert!(frames.iter().any(|f| f.contains("\"name\":\"shell\"")));
+
+    t.process_line(
+        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":10,"outputTokens":5,"cachedInputTokens":3}}"#,
+    );
+    assert_eq!(t.output_tokens, 5);
+    let end = t.finalize();
+    assert!(end.iter().any(|f| f.contains("response.completed")));
+    assert!(end.iter().any(|f| f.contains("\"output_tokens\":5")));
+}
+
+#[test]
+fn responses_translator_zero_output_and_error() {
+    let mut t = ResponsesTranslator::new("m", "resp_1");
+    t.process_line(
+        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":50,"outputTokens":0,"cachedInputTokens":40}}"#,
+    );
+    let end = t.finalize();
+    assert!(end.iter().any(|f| f.contains("response.failed")));
+    assert!(end.iter().any(|f| f.contains("rate_limit_error")));
+
+    let mut t2 = ResponsesTranslator::new("m", "resp_2");
+    let frames = t2.process_line(r#"{"type":"error","error":{"message":"boom"}}"#);
+    assert!(t2.has_error);
+    assert!(frames.iter().any(|f| f.contains("response.failed") && f.contains("boom")));
+    assert!(t2.finalize().is_empty());
 }
 
 // ── 单元测试：错误映射 / Key 提取 / 指纹 / slug ────────
@@ -427,6 +553,79 @@ async fn models_and_health_and_401() {
         .await
         .unwrap();
     assert_eq!(res.status(), 401);
+    state.mark_stopped();
+}
+
+#[tokio::test]
+async fn responses_nonstream() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer user_test_key")
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "instructions": "你是助手",
+            "input": "hi",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["status"], "completed");
+    assert!(body["id"].as_str().unwrap().starts_with("resp_"));
+    assert_eq!(body["output"][0]["type"], "message");
+    assert_eq!(body["output"][0]["content"][0]["text"], "Hello");
+    assert_eq!(body["usage"]["output_tokens"], 5);
+    assert_eq!(body["usage"]["input_tokens_details"]["cached_tokens"], 3);
+    state.mark_stopped();
+}
+
+#[tokio::test]
+async fn responses_streaming() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer user_test_key")
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "input": [{ "type": "message", "role": "user", "content": "hi" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+    assert!(text.contains("event: response.created"));
+    assert!(text.contains("event: response.output_text.delta"));
+    assert!(text.contains("\"delta\":\"Hello\""));
+    assert!(text.contains("event: response.completed"));
+    assert!(text.contains("\"output_tokens\":5"));
+    state.mark_stopped();
+}
+
+#[tokio::test]
+async fn responses_zero_output_returns_429() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer user_test_key")
+        .json(&json!({
+            "model": "zero-output",
+            "input": "hi",
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 429);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "rate_limit_error");
     state.mark_stopped();
 }
 
