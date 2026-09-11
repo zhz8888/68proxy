@@ -107,6 +107,8 @@ pub struct AppState {
     pub client: reqwest::Client,
     /// 优雅停机信号发送端，serve() 的 with_graceful_shutdown 持有接收端。
     pub shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    /// token 用量统计数据库连接（setup 阶段初始化；代理层经此记录/查询）。
+    pub usage: Mutex<Option<rusqlite::Connection>>,
 }
 
 impl AppState {
@@ -130,6 +132,7 @@ impl AppState {
                 .build()
                 .expect("failed to build http client"),
             shutdown: Mutex::new(None),
+            usage: Mutex::new(None),
         })
     }
 
@@ -159,6 +162,25 @@ impl AppState {
         q.push_front(info);
         while q.len() > 500 {
             q.pop_back();
+        }
+    }
+
+    /// 记录一条 token 用量到统计库；数据库未初始化时静默忽略（不影响代理主流程）。
+    pub fn record_usage(&self, entry: &super::usage::UsageEntry) {
+        let mut guard = self.usage.lock().unwrap();
+        if let Some(conn) = guard.as_mut() {
+            if let Err(e) = super::usage::record_usage(conn, entry) {
+                super::log::warn(&format!("记录用量失败: {e}"));
+            }
+        }
+    }
+
+    /// 按保留天数清理超期用量数据，返回被清理的明细条数。
+    pub fn prune_usage(&self, retention_days: u32) -> Result<u64, String> {
+        let mut guard = self.usage.lock().unwrap();
+        match guard.as_mut() {
+            Some(conn) => super::usage::clear_before(conn, retention_days),
+            None => Ok(0),
         }
     }
 

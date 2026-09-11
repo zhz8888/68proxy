@@ -29,6 +29,7 @@ use super::errors;
 use super::log;
 use super::sse::{AnthropicTranslator, OpenAiTranslator, ResponsesTranslator};
 use super::state::{now_millis, now_secs, AppState, RequestInfo};
+use super::usage::UsageEntry;
 
 /// 请求体大小上限：10 MiB。
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -654,13 +655,13 @@ async fn handle_stream(
     tokio::spawn(async move {
         match protocol {
             Protocol::OpenAi => {
-                stream_openai(st2, upstream, tx, model, id).await;
+                stream_openai(st2, upstream, tx, model, id, "/v1/chat/completions").await;
             }
             Protocol::Anthropic => {
-                stream_anthropic(st2, upstream, tx, model, id).await;
+                stream_anthropic(st2, upstream, tx, model, id, "/v1/messages").await;
             }
             Protocol::Responses => {
-                stream_responses(st2, upstream, tx, model, id).await;
+                stream_responses(st2, upstream, tx, model, id, "/v1/responses").await;
             }
         }
     });
@@ -774,6 +775,7 @@ async fn stream_openai(
     tx: mpsc::Sender<Frame>,
     model: String,
     completion_id: String,
+    endpoint: &'static str,
 ) {
     let mut translator = OpenAiTranslator::new(&model, &completion_id);
     let mut stream = upstream.bytes_stream();
@@ -825,6 +827,7 @@ async fn stream_openai(
         }
     }
     update_ctx_tokens(&st, &completion_id, &translator.input_tokens, &translator.output_tokens, &translator.cached_tokens, &last_event);
+    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, 0, true);
     if translator.output_tokens == 0 {
         let _ = tx.send(Frame::Sse(translator.zero_output_error_frame())).await;
         let _ = tx.send(Frame::Done { zero_output: true }).await;
@@ -842,6 +845,7 @@ async fn stream_anthropic(
     tx: mpsc::Sender<Frame>,
     model: String,
     message_id: String,
+    endpoint: &'static str,
 ) {
     let mut translator = AnthropicTranslator::new(&model, &message_id);
     if tx.send(Frame::Sse(translator.message_start())).await.is_err() {
@@ -902,6 +906,16 @@ async fn stream_anthropic(
         }
     }
     update_ctx_tokens(&st, &message_id, &translator.input_tokens, &translator.output_tokens, &translator.cached_tokens, &last_event);
+    record_usage_entry(
+        &st,
+        &model,
+        endpoint,
+        translator.input_tokens,
+        translator.output_tokens,
+        translator.cached_tokens,
+        translator.cache_write_tokens.unwrap_or(0),
+        true,
+    );
     let _ = tx.send(Frame::Done { zero_output: zero }).await;
 }
 
@@ -913,6 +927,7 @@ async fn stream_responses(
     tx: mpsc::Sender<Frame>,
     model: String,
     response_id: String,
+    endpoint: &'static str,
 ) {
     let mut translator = ResponsesTranslator::new(&model, &response_id);
     if tx.send(Frame::Sse(translator.response_start())).await.is_err() {
@@ -973,6 +988,7 @@ async fn stream_responses(
         }
     }
     update_ctx_tokens(&st, &response_id, &translator.input_tokens, &translator.output_tokens, &translator.cached_tokens, &last_event);
+    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, 0, true);
     let _ = tx.send(Frame::Done { zero_output: zero }).await;
 }
 
@@ -991,6 +1007,48 @@ fn update_ctx_tokens(
         entry.output_tokens = *output;
         entry.cached_tokens = *cached;
         entry.last_event = last_event.to_string();
+    }
+}
+
+/// 记录一条成功的 token 用量到统计库（token 真实值出现点调用）。
+///
+/// 对齐 9router 的保存约定：输入/输出均为 0 的请求（如上游空响应）不记，
+/// 失败/超时/断连请求也不计入用量统计；成本由单价表实时估算。
+fn record_usage_entry(
+    st: &AppState,
+    model: &str,
+    endpoint: &str,
+    prompt: u64,
+    completion: u64,
+    cached: u64,
+    cache_write: u64,
+    stream: bool,
+) {
+    if prompt == 0 && completion == 0 {
+        return;
+    }
+    // 配置关闭统计时不再记录
+    let enabled = st.config.read().unwrap().usage_enabled;
+    if !enabled {
+        return;
+    }
+    st.record_usage(&UsageEntry {
+        ts: now_millis(),
+        model: model.to_string(),
+        endpoint: endpoint.to_string(),
+        status: "ok".into(),
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        cached_tokens: cached,
+        cache_write_tokens: cache_write,
+        stream,
+    });
+    // 保留策略：按天清理超期明细（0 表示永久保留，不执行）
+    let retention = st.config.read().unwrap().usage_retention_days;
+    if retention > 0 {
+        if let Err(e) = st.prune_usage(retention) {
+            log::warn(&format!("清理过期用量失败: {e}"));
+        }
     }
 }
 
@@ -1080,6 +1138,16 @@ async fn handle_nonstream(
         );
     }
     reset_timeouts(&st);
+    record_usage_entry(
+        &st,
+        &ctx.model,
+        ctx.path,
+        input,
+        output,
+        cached,
+        cache_write.unwrap_or(0),
+        false,
+    );
     finish_request(&st, &ctx, "ok");
 
     match protocol {

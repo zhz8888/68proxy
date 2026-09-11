@@ -33,6 +33,10 @@ pub struct Config {
     pub autostart: bool,
     /// 关闭窗口时隐藏到托盘而不是退出（仅桌面行为）。
     pub close_to_tray: bool,
+    /// 是否启用 token 用量统计（关闭后不再记录新用量，历史数据保留）。
+    pub usage_enabled: bool,
+    /// 用量明细保留天数，0 表示永久保留；超过部分在记录时自动清理。
+    pub usage_retention_days: u32,
     /// 本地明文保存的 API Key（user_ 开头），随配置文件读写。
     pub api_key: String,
 }
@@ -53,6 +57,8 @@ impl Default for Config {
             show_window_on_start: true,
             autostart: false,
             close_to_tray: true,
+            usage_enabled: true,
+            usage_retention_days: 0,
             api_key: String::new(),
         }
     }

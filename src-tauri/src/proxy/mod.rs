@@ -10,9 +10,11 @@ pub mod convert;
 pub mod errors;
 pub mod fingerprint;
 pub mod log;
+pub mod pricing;
 pub mod server;
 pub mod sse;
 pub mod state;
+pub mod usage;
 
 #[cfg(test)]
 mod tests;

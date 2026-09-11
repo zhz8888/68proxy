@@ -51,3 +51,23 @@ export async function copyText(text: string): Promise<boolean> {
     }
   }
 }
+
+/** 将较大的整数格式化为紧凑文本（1.2K / 1.3M / 987），用于图表坐标与摘要卡。 */
+export function formatCompactNumber(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n % 1000 === 0 ? 0 : 1)}K`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** 将整数 token 数格式化为带千分位分隔符的文本（12,345）。 */
+export function formatTokens(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+/** 将美元成本格式化为 $ 前缀的紧凑文本（$0.1234 / $12.34 / $1.2K）。 */
+export function formatCost(cost: number): string {
+  if (cost === 0) return "$0";
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  if (cost < 1000) return `$${cost.toFixed(2)}`;
+  return `$${formatCompactNumber(cost)}`;
+}

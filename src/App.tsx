@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  BarChart3,
   Boxes,
   Info,
   LayoutDashboard,
@@ -29,16 +30,18 @@ import { ConsoleView } from "@/views/ConsoleView";
 import { LogsView } from "@/views/LogsView";
 import { ModelsView } from "@/views/ModelsView";
 import { RelayView } from "@/views/RelayView";
+import { StatsView } from "@/views/StatsView";
 import { ToolsView } from "@/views/ToolsView";
 
 /** 应用主视图标识，与左侧导航项一一对应。 */
-type View = "console" | "logs" | "relay" | "config" | "models" | "tools" | "about";
+type View = "console" | "logs" | "relay" | "stats" | "config" | "models" | "tools" | "about";
 
 /** 左侧导航栏的菜单项配置：视图 id、显示文案与图标。 */
 const NAV: Array<{ id: View; label: string; icon: LucideIcon }> = [
   { id: "console", label: "控制台", icon: LayoutDashboard },
   { id: "logs", label: "调试日志", icon: Terminal },
   { id: "relay", label: "中继记录", icon: ListTree },
+  { id: "stats", label: "用量统计", icon: BarChart3 },
   { id: "models", label: "模型列表", icon: Boxes },
   { id: "tools", label: "工具接入", icon: Plug },
   { id: "config", label: "配置", icon: Settings2 },
@@ -195,16 +198,18 @@ function App() {
             </div>
           </header>
 
-          {/* 内容区：日志/模型/中继视图占满高度，其余视图可纵向滚动 */}
+          {/* 内容区：日志/模型/中继/统计视图占满高度，其余视图可纵向滚动 */}
           <div className="min-h-0 flex-1 overflow-hidden p-4">
-            {view === "logs" || view === "models" || view === "relay" ? (
+            {view === "logs" || view === "models" || view === "relay" || view === "stats" ? (
               <div className="h-full">
                 {view === "logs" ? (
                   <LogsView />
                 ) : view === "models" ? (
                   <ModelsView />
-                ) : (
+                ) : view === "relay" ? (
                   <RelayView />
+                ) : (
+                  <StatsView />
                 )}
               </div>
             ) : (

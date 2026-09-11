@@ -32,6 +32,8 @@ const DEFAULTS: Config = {
   show_window_on_start: true,
   autostart: false,
   close_to_tray: true,
+  usage_enabled: true,
+  usage_retention_days: 0,
 };
 
 /** 配置页通用区块卡片：标题 + 可选描述 + 内容。 */
@@ -275,6 +277,21 @@ export function ConfigView() {
                 onCheckedChange={(v) => update("show_window_on_start", v)}
               />
             </div>
+            <div className="flex items-center justify-between">
+              <Label>启用 token 用量统计</Label>
+              <Switch
+                checked={cfg.usage_enabled}
+                onCheckedChange={(v) => update("usage_enabled", v)}
+              />
+            </div>
+            <Field label="用量保留天数" hint="0 表示永久保留">
+              <Input
+                type="number"
+                min={0}
+                value={cfg.usage_retention_days}
+                onChange={(e) => update("usage_retention_days", Number(e.target.value))}
+              />
+            </Field>
           </Section>
 
           <Section title="日志" desc="日志级别与导出">

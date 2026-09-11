@@ -1,5 +1,11 @@
-# Logs
-logs
+# 依赖与构建产物
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# 日志（log_file 可指向任意路径，统一忽略常见日志文件）
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -7,25 +13,16 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
-
-# Rust / Tauri 构建产物
+# Rust / Tauri 构建产物（src-tauri/target 由 src-tauri/.gitignore 处理）
 target/
-/src-tauri/target/
 /tools/icon-render/target/
 
-# 桌面应用不需要的移动端图标（由 pnpm tauri icon 生成）
+# 桌面应用不需要的移动端资源（由 pnpm tauri icon 生成，本项目无移动端）
 /src-tauri/icons/android/
 /src-tauri/icons/ios/
 
-# Agent 相关（本地生成，不随仓库提交）
-.agents/
-.opencode/
-skills-lock.json
-AGENTS.md
+# 工具生成的本地文件（不随仓库提交）
+.zcode/
 
 # Editor directories and files
 .vscode/*

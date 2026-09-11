@@ -716,3 +716,72 @@ async fn anthropic_messages_nonstream() {
     assert_eq!(body["usage"]["output_tokens"], 5);
     state.mark_stopped();
 }
+
+/// 端到端：注入统计库后，一次非流式成功请求会被采集写入 SQLite，
+/// 查询 stats 能聚合出请求数与 token 用量。
+#[tokio::test]
+async fn usage_recorded_through_proxy() {
+    let (base, state) = start_proxy().await;
+    // 注入内存统计库
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    super::usage::init_usage_on(&conn).unwrap();
+    *state.usage.lock().unwrap() = Some(conn);
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer user_test_key")
+        .json(&json!({
+            "model": "deepseek/deepseek-v4-flash",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    // 请求已结束，采集应已落库
+    let guard = state.usage.lock().unwrap();
+    let conn = guard.as_ref().unwrap();
+    let stats = super::usage::get_stats(conn, super::usage::Period::All).unwrap();
+    assert_eq!(stats.total_requests, 1);
+    assert_eq!(stats.total_prompt_tokens, 10);
+    assert_eq!(stats.total_completion_tokens, 5);
+    assert_eq!(stats.total_cached_tokens, 3);
+    assert!(stats.total_cost > 0.0);
+    assert_eq!(stats.by_model.len(), 1);
+    assert_eq!(stats.by_model[0].key, "deepseek/deepseek-v4-flash");
+    assert_eq!(stats.recent_requests.len(), 1);
+    assert_eq!(stats.recent_requests[0].endpoint, "/v1/chat/completions");
+    drop(guard);
+    state.mark_stopped();
+}
+
+/// 端到端：零输出请求（429）不计入用量统计（token 为 0 不采集）。
+#[tokio::test]
+async fn zero_output_not_recorded() {
+    let (base, state) = start_proxy().await;
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    super::usage::init_usage_on(&conn).unwrap();
+    *state.usage.lock().unwrap() = Some(conn);
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer user_test_key")
+        .json(&json!({
+            "model": "zero-output",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 429);
+
+    let guard = state.usage.lock().unwrap();
+    let conn = guard.as_ref().unwrap();
+    let stats = super::usage::get_stats(conn, super::usage::Period::All).unwrap();
+    assert_eq!(stats.total_requests, 0);
+    drop(guard);
+    state.mark_stopped();
+}

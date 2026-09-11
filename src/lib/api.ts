@@ -16,6 +16,8 @@ export interface Config {
   show_window_on_start: boolean;
   autostart: boolean;
   close_to_tray: boolean;
+  usage_enabled: boolean;
+  usage_retention_days: number;
 }
 
 /** 代理运行状态：是否运行、监听地址、OpenAI/Anthropic 接入 URL、上游版本与运行时长。 */
@@ -64,6 +66,55 @@ export interface ApiKeyState {
   masked: string;
 }
 
+/** 用量分组行（按模型/按端点），含请求数、各 token 列与估算成本。 */
+export interface UsageGroupRow {
+  key: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+  cost: number;
+}
+
+/** 最近请求用量明细行。 */
+export interface UsageRecentRow {
+  ts: number;
+  model: string;
+  endpoint: string;
+  status: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  cache_write_tokens: number;
+  cost: number;
+  elapsed_ms: number;
+}
+
+/** token 用量汇总统计（stats_get 返回）。 */
+export interface UsageStats {
+  total_requests: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_cached_tokens: number;
+  total_cost: number;
+  by_model: UsageGroupRow[];
+  by_endpoint: UsageGroupRow[];
+  last_10_minutes: { requests: number; prompt_tokens: number; completion_tokens: number; cost: number }[];
+  recent_requests: UsageRecentRow[];
+}
+
+/** 趋势图数据点：label 为桶标签（HH:00 或 MM-DD）。 */
+export interface UsageChartPoint {
+  label: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost: number;
+}
+
+/** 用量统计时间范围，与后端 Period::parse 的取值一致。 */
+export type UsagePeriod = "today" | "24h" | "7d" | "30d" | "60d" | "all";
+
 /** 后端 Tauri 命令的类型化封装，前端所有 IPC 调用统一经由此对象。 */
 export const api = {
   // 代理生命周期：启动 / 停止 / 重启 / 查询状态，均返回最新 ProxyStatus
@@ -87,6 +138,13 @@ export const api = {
   logsExport: (path: string) => invoke<number>("logs_export", { path }),
   // 最近中继请求记录
   requestsGet: (limit = 20) => invoke<RequestInfo[]>("requests_get", { limit }),
+  // token 用量统计：汇总 / 趋势图 / 最近明细 / 清空
+  statsGet: (period: UsagePeriod = "all") =>
+    invoke<UsageStats>("stats_get", { period }),
+  statsChart: (period: UsagePeriod = "all") =>
+    invoke<UsageChartPoint[]>("stats_chart", { period }),
+  statsRecent: (limit = 20) => invoke<UsageRecentRow[]>("stats_recent", { limit }),
+  statsClearAll: () => invoke<{ cleared: number }>("stats_clear_all"),
   // 端口占用检查与释放（仅 Windows 支持结束占用进程）
   portCheck: (port: number) =>
     invoke<{ in_use: boolean; pid: number | null }>("port_check", { port }),
@@ -110,4 +168,9 @@ export async function onStatus(cb: (status: ProxyStatus) => void) {
 /** 订阅中继请求摘要事件，返回取消订阅函数。@param cb 每次请求更新时回调 */
 export async function onRequest(cb: (info: RequestInfo) => void) {
   return listen<RequestInfo>("proxy://request", (e) => cb(e.payload));
+}
+
+/** 订阅 token 用量更新事件，返回取消订阅函数。@param cb 用量变化时回调（节流后） */
+export async function onStats(cb: (payload: { updated: number }) => void) {
+  return listen<{ updated: number }>("proxy://stats", (e) => cb(e.payload));
 }

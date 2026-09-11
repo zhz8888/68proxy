@@ -17,6 +17,9 @@ const ScrollArea = React.forwardRef<
     <ScrollAreaPrimitive.Viewport className="h-full w-full rounded-[inherit]">
       {children}
     </ScrollAreaPrimitive.Viewport>
+    {/* 渲染滚动条后 Radix 才会把 Viewport 置为可滚动（overflowY: scroll），
+        否则内容超出时无法用鼠标滚轮滚动 */}
+    <ScrollBar />
     <ScrollAreaPrimitive.Corner />
   </ScrollAreaPrimitive.Root>
 ));
@@ -31,9 +34,10 @@ const ScrollBar = React.forwardRef<
     ref={ref}
     orientation={orientation}
     className={cn(
-      "flex touch-none select-none transition-colors",
-      orientation === "vertical" && "h-full w-2.5 border-l border-l-transparent p-[1px]",
-      orientation === "horizontal" && "h-2.5 flex-col border-t border-t-transparent p-[1px]",
+      // 保持渲染以启用 Radix 的滚轮滚动，但视觉上隐藏（项目风格：无可见滚动条）
+      "flex touch-none select-none opacity-0 transition-opacity",
+      orientation === "vertical" && "h-full w-0",
+      orientation === "horizontal" && "h-0 w-full flex-col",
       className,
     )}
     {...props}

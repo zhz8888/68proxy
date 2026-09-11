@@ -18,6 +18,7 @@ use tauri_plugin_autostart::ManagerExt;
 /// Tauri 托管状态：配置路径 + 代理共享状态。
 struct AppCtx {
     config_path: PathBuf,
+    usage_path: PathBuf,
     proxy_state: Arc<proxy::state::AppState>,
 }
 
@@ -150,6 +151,45 @@ fn logs_export(path: String) -> Result<usize, String> {
 fn requests_get(app: AppHandle, limit: Option<usize>) -> Value {
     let ctx = app.state::<AppCtx>();
     json!(ctx.proxy_state.recent_requests(limit.unwrap_or(20)))
+}
+
+/// 获取 token 用量汇总统计。`period` 取值 today / 24h / 7d / 30d / 60d / all。
+#[tauri::command]
+fn stats_get(app: AppHandle, period: String) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let period = proxy::usage::Period::parse(&period);
+    let conn = proxy::usage::open_usage(&ctx.usage_path)?;
+    let stats = proxy::usage::get_stats(&conn, period)?;
+    Ok(proxy::usage::stats_to_json(&stats))
+}
+
+/// 获取 token 用量趋势图数据。`period` 取值同 stats_get。
+#[tauri::command]
+fn stats_chart(app: AppHandle, period: String) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let period = proxy::usage::Period::parse(&period);
+    let conn = proxy::usage::open_usage(&ctx.usage_path)?;
+    let chart = proxy::usage::get_chart(&conn, period)?;
+    Ok(serde_json::to_value(chart).map_err(|e| format!("序列化趋势数据失败: {e}"))?)
+}
+
+/// 获取最近 `limit` 条用量明细（默认 20，新在前）。
+#[tauri::command]
+fn stats_recent(app: AppHandle, limit: Option<usize>) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let conn = proxy::usage::open_usage(&ctx.usage_path)?;
+    let recent = proxy::usage::query_recent(&conn, limit.unwrap_or(20))?;
+    Ok(serde_json::to_value(recent).map_err(|e| format!("序列化最近用量失败: {e}"))?)
+}
+
+/// 清空全部 token 用量统计，返回被清除的记录条数。
+#[tauri::command]
+fn stats_clear_all(app: AppHandle) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let conn = proxy::usage::open_usage(&ctx.usage_path)?;
+    let count = proxy::usage::clear_all(&conn)?;
+    proxy::log::info(&format!("用量统计已清空（{count} 条）"));
+    Ok(json!({ "cleared": count }))
 }
 
 /// 检查本机端口是否被占用：尝试绑定 127.0.0.1:port，返回 `{ in_use, pid }`（pid 仅 Windows 可解析）。
@@ -421,6 +461,10 @@ pub fn run() {
             logs_clear,
             logs_export,
             requests_get,
+            stats_get,
+            stats_chart,
+            stats_recent,
+            stats_clear_all,
             port_check,
             port_free,
             autostart_get,
@@ -450,12 +494,31 @@ pub fn run() {
             proxy::server::set_request_sink(move |info| {
                 let _ = h2.emit("proxy://request", info);
             });
+            // 用量更新 → 前端事件（节流 200ms，避免高频请求刷爆事件流）
+            let h3 = app.handle().clone();
+            let last_emit = std::sync::Arc::new(std::sync::Mutex::new(0u64));
+            let last_emit2 = last_emit.clone();
+            proxy::usage::set_usage_sink(move || {
+                let now = proxy::state::now_millis();
+                let mut last = last_emit2.lock().unwrap();
+                if now.saturating_sub(*last) >= 200 {
+                    *last = now;
+                    let _ = h3.emit("proxy://stats", serde_json::json!({ "updated": now }));
+                }
+            });
 
             let _ = credentials::load_api_key(&config_path);
 
+            // 初始化 token 用量统计库并注入代理状态
+            let usage_path = app.path().app_config_dir()?.join("usage.sqlite");
+            let usage_conn = proxy::usage::init_usage(&usage_path)?;
+            let proxy_state = proxy::state::AppState::new(cfg.clone());
+            *proxy_state.usage.lock().unwrap() = Some(usage_conn);
+
             app.manage(AppCtx {
                 config_path,
-                proxy_state: proxy::state::AppState::new(cfg.clone()),
+                usage_path,
+                proxy_state,
             });
 
             build_tray(app.handle())?;
