@@ -91,6 +91,14 @@ export interface UsageRecentRow {
   elapsed_ms: number;
 }
 
+/** 最近 10 分钟的一个分钟桶（新在前）。 */
+export interface UsageMinuteBucket {
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost: number;
+}
+
 /** token 用量汇总统计（stats_get 返回）。 */
 export interface UsageStats {
   total_requests: number;
@@ -100,7 +108,7 @@ export interface UsageStats {
   total_cost: number;
   by_model: UsageGroupRow[];
   by_endpoint: UsageGroupRow[];
-  last_10_minutes: { requests: number; prompt_tokens: number; completion_tokens: number; cost: number }[];
+  last_10_minutes: UsageMinuteBucket[];
   recent_requests: UsageRecentRow[];
 }
 

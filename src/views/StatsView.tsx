@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import { ModelLogo } from "@/components/ModelLogo";
 import { StatusLamp } from "@/components/StatusLamp";
+import { UsageMiniBars } from "@/components/UsageMiniBars";
 import { UsageTrendChart } from "@/components/UsageTrendChart";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -175,6 +176,17 @@ export function StatsView() {
             <SummaryCard title="输出 Tokens" value={formatTokens(stats?.total_completion_tokens ?? 0)} />
             <SummaryCard title="估算成本" value={formatCost(stats?.total_cost ?? 0)} hint="Estimated, not actual billing" />
           </div>
+
+          {/* 最近 10 分钟迷你柱状图卡片 */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">最近 10 分钟</CardTitle>
+              <CardDescription>按分钟聚合的 token 用量（输入 + 输出）</CardDescription>
+            </CardHeader>
+            <CardContent className="pt-0">
+              <UsageMiniBars buckets={stats?.last_10_minutes ?? []} />
+            </CardContent>
+          </Card>
 
           {/* 趋势图卡片 */}
           <Card>
