@@ -1,6 +1,11 @@
-name: Build & Release
+name: Release
 
 on:
+  # 推送 v* 标签即发版：版本自动取自标签（如 v1.0.0 → 1.0.0），无需手动改配置文件。
+  # tauri.conf.json 的 version 指向 ../package.json，CI 将标签版本写入 package.json 后打包。
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -11,6 +16,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # 标签推送时为标签名本身；手动触发时取输入的 tag
+  VERSION_TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -20,6 +29,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION_TAG }}
 
       - uses: pnpm/action-setup@v4
         with:
@@ -39,6 +50,11 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # 将标签版本（去掉 v 前缀）写入 package.json，tauri.conf.json 引用它作为应用版本
+      - name: Sync app version from tag
+        shell: bash
+        run: npm version --no-git-tag-version --allow-same-version "${VERSION_TAG#v}"
 
       - name: Frontend typecheck
         run: pnpm build
@@ -60,6 +76,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION_TAG }}
 
       - uses: pnpm/action-setup@v4
         with:
@@ -81,6 +99,11 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # 将标签版本（去掉 v 前缀）写入 package.json，tauri.conf.json 引用它作为应用版本
+      - name: Sync app version from tag
+        shell: bash
+        run: npm version --no-git-tag-version --allow-same-version "${VERSION_TAG#v}"
 
       - name: Frontend typecheck
         run: pnpm build
@@ -112,10 +135,10 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag }}
-          name: ${{ inputs.tag }}
+          tag_name: ${{ env.VERSION_TAG }}
+          name: ${{ env.VERSION_TAG }}
           body: |
-            68proxy ${{ inputs.tag }}
+            68proxy ${{ env.VERSION_TAG }}
 
             **下载说明**
             - 🖥️ `68proxy_<version>_x64-setup.exe` — 安装版（NSIS），含桌面快捷方式、开始菜单与卸载入口
