@@ -87,9 +87,14 @@ pub fn fake_project_slug(session_id: &str) -> String {
 /// 解析本次请求应使用的会话 ID。
 ///
 /// 优先透传下游客户端头 `x-session-id` / `x-claude-code-session-id` / `session_id`
-/// （长度 ≥8 才采信），其次是请求体的 prompt_cache_key，否则回退到本地为该 Key
-/// 维护的会话（见 ensure_session）。
-fn get_session_id(state: &AppState, headers: &HeaderMap, api_key: &str, prompt_cache_key: Option<&str>) -> String {
+/// （长度 ≥8 才采信），其次是请求体的 prompt_cache_key，否则回退到本地为该账户
+/// （按 userId）维护的会话（见 ensure_session）。
+fn get_session_id(
+    state: &AppState,
+    headers: &HeaderMap,
+    user_id: &str,
+    prompt_cache_key: Option<&str>,
+) -> String {
     for name in ["x-session-id", "x-claude-code-session-id", "session_id"] {
         if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
             if v.len() >= 8 {
@@ -102,13 +107,14 @@ fn get_session_id(state: &AppState, headers: &HeaderMap, api_key: &str, prompt_c
             return k.to_string();
         }
     }
-    ensure_session(state, api_key)
+    ensure_session(state, user_id)
 }
 
-/// 取该 API Key 当前有效会话；不存在或已过期时生成新 UUID 会话并按 12h+抖动 设置过期。
-fn ensure_session(state: &AppState, api_key: &str) -> String {
+/// 取该账户（按 userId 标识）当前有效会话；不存在或已过期时生成新 UUID 会话并
+/// 按 12h+抖动 设置过期。以 userId 为键，同一账户重新登录换 key 时会话延续。
+fn ensure_session(state: &AppState, user_id: &str) -> String {
     let now = now_millis();
-    if let Some(entry) = state.sessions.lock().unwrap().get(api_key) {
+    if let Some(entry) = state.sessions.lock().unwrap().get(user_id) {
         if now < entry.expires_at {
             return entry.session_id.clone();
         }
@@ -117,31 +123,32 @@ fn ensure_session(state: &AppState, api_key: &str) -> String {
     let jitter = rng.gen_range(0..AppState::session_jitter_ms());
     let session_id = uuid::Uuid::new_v4().to_string();
     state.sessions.lock().unwrap().insert(
-        api_key.to_string(),
+        user_id.to_string(),
         SessionEntry {
             session_id: session_id.clone(),
             expires_at: now + AppState::session_duration_ms() + jitter,
         },
     );
-    log::info(&format!("Session created for key {}", &api_key[..api_key.len().min(8)]));
+    log::info(&format!("Session created for user {}", &user_id[..user_id.len().min(8)]));
     session_id
 }
 
-/// 取该 API Key 的伪装状态；首次访问时优先从磁盘恢复指纹（同一 Key 跨重启
-/// 复用同一设备身份），无记录或读取失败时新生成并写盘。未注入路径则仅存内存。
-fn get_or_create_key_state(state: &AppState, api_key: &str) -> KeyState {
+/// 取该账户（按 userId 标识）的伪装状态；首次访问时优先从磁盘恢复指纹
+/// （同一 userId 跨重启复用同一设备身份，换 key 也延续），无记录或读取失败时
+/// 新生成并写盘。未注入路径则仅存内存。
+fn get_or_create_key_state(state: &AppState, user_id: &str) -> KeyState {
     let mut states = state.key_states.lock().unwrap();
-    if let Some(s) = states.get(api_key) {
+    if let Some(s) = states.get(user_id) {
         return s.clone();
     }
     let path = state.fingerprint_path.lock().unwrap().clone();
-    let id = fingerprint::key_id(api_key);
+    let id = fingerprint::key_id(user_id);
     let fingerprint = match path
         .as_deref()
         .and_then(|p| fingerprint::load_store(p).remove(&id))
     {
         Some(fp) => {
-            log::info("Fingerprint restored for key");
+            log::info("Fingerprint restored for user");
             fp
         }
         None => {
@@ -151,7 +158,7 @@ fn get_or_create_key_state(state: &AppState, api_key: &str) -> KeyState {
                     log::warn(&format!("指纹持久化失败，本次仅存内存: {e}"));
                 }
             }
-            log::info("Fingerprint generated for key");
+            log::info("Fingerprint generated for user");
             fp
         }
     };
@@ -159,14 +166,14 @@ fn get_or_create_key_state(state: &AppState, api_key: &str) -> KeyState {
         fingerprint,
         next_init_at: 0,
     };
-    states.insert(api_key.to_string(), ks.clone());
+    states.insert(user_id.to_string(), ks.clone());
     ks
 }
 
-/// 测试用：暴露指定 Key 的指纹（触发一次「恢复或生成」逻辑）。
+/// 测试用：暴露指定 userId 的指纹（触发一次「恢复或生成」逻辑）。
 #[cfg(test)]
-pub fn key_fingerprint_for_test(state: &AppState, api_key: &str) -> fingerprint::Fingerprint {
-    get_or_create_key_state(state, api_key).fingerprint
+pub fn key_fingerprint_for_test(state: &AppState, user_id: &str) -> fingerprint::Fingerprint {
+    get_or_create_key_state(state, user_id).fingerprint
 }
 /// 读取当前模拟的 command-code CLI 版本号。
 pub fn cc_version(state: &AppState) -> String {
@@ -174,9 +181,10 @@ pub fn cc_version(state: &AppState) -> String {
 }
 
 /// 初始化预请求（fingerprint/record + lifecycle-events），8h + 2h 抖动刷新。
-pub async fn ensure_initialized(state: &AppState, api_key: &str) {
+/// `api_key` 用于构造请求头，`user_id` 用于键控初始化状态（换 key 不重置）。
+pub async fn ensure_initialized(state: &AppState, api_key: &str, user_id: &str) {
     let now = now_millis();
-    let next = get_or_create_key_state(state, api_key).next_init_at;
+    let next = get_or_create_key_state(state, user_id).next_init_at;
     if now < next {
         return;
     }
@@ -263,6 +271,8 @@ fn base_headers(state: &AppState, api_key: &str) -> reqwest::header::HeaderMap {
 /// 转发到 CC API /alpha/generate。
 ///
 /// - `body`：已由 convert 模块构造好的 CLI 信封请求体；
+/// - `api_key`：上游账户 key（构造 Bearer 与伪造头）；
+/// - `user_id`：账户唯一标识（会话键控，换 key 时会话延续）；
 /// - `incoming_headers`：下游客户端请求头，用于透传会话 ID 与 zdr 开关；
 /// - `prompt_cache_key`：请求体的 prompt_cache_key（兼作会话 ID 候选）；
 /// - 返回上游原始 `Response`（调用方负责读取 NDJSON 流与状态码）。
@@ -270,12 +280,13 @@ pub async fn forward_to_cc(
     state: &AppState,
     body: &Value,
     api_key: &str,
+    user_id: &str,
     incoming_headers: &HeaderMap,
     prompt_cache_key: Option<&str>,
 ) -> Result<Response, reqwest::Error> {
     let cfg = state.config.read().unwrap().clone();
     let url = format!("{}/alpha/generate", cfg.api_base);
-    let session_id = get_session_id(state, incoming_headers, api_key, prompt_cache_key);
+    let session_id = get_session_id(state, incoming_headers, user_id, prompt_cache_key);
     let slug = fake_project_slug(&session_id);
 
     // 在公共头基础上补齐 CLI 会话/项目/链路追踪等伪装头

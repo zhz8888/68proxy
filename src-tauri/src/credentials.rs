@@ -6,6 +6,7 @@
 //! - **本地转发 key**（`sk_` 开头）：仅本机服务鉴权用，客户端统一用它接入本地代理，
 //!   可一键随机生成；该 key 不会发送给 CC 上游。
 
+use crate::proxy::config::Account;
 use rand::Rng;
 use rusqlite::Connection;
 use std::sync::atomic::Ordering;
@@ -58,34 +59,52 @@ pub fn generate_local_key() -> String {
     format!("sk-{hex}")
 }
 
-/// 从设置库读取 CC 账户 key 列表（去空白、过滤空值）。
-pub fn load_accounts(conn: &Connection) -> Result<Vec<String>, String> {
+/// 从设置库读取 CC 账户列表（去空白、过滤空 key）。
+pub fn load_accounts(conn: &Connection) -> Result<Vec<Account>, String> {
     Ok(super::proxy::settings::load_config(conn)
         .cc_accounts
         .into_iter()
-        .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty())
+        .map(|a| Account {
+            key: a.key.trim().to_string(),
+            ..a
+        })
+        .filter(|a| !a.key.is_empty())
         .collect())
 }
 
-/// 新增一个 CC 账户 key（去空白后写入账户列表并落库）；已存在时静默跳过。
-/// 返回更新后的账户列表（调用方负责同步到 AppState.config）。
-pub fn add_account(conn: &Connection, key: &str) -> Result<Vec<String>, String> {
-    let key = key.trim().to_string();
+/// 新增一个 CC 账户：以 `user_id` 为唯一标识，同 userId 已存在时更新其 key 与显示名
+/// （视为同一账户重新登录/换 key），否则追加。落库后返回更新后的账户列表
+/// （调用方负责同步到 AppState.config）。
+pub fn add_account(conn: &Connection, acct: &Account) -> Result<Vec<Account>, String> {
+    let key = acct.key.trim().to_string();
     if key.is_empty() {
         return Err("账户 key 不能为空".into());
     }
     let mut accounts = load_accounts(conn)?;
-    if !accounts.contains(&key) {
-        accounts.push(key);
-        save_accounts(conn, &accounts)?;
+    if let Some(existing) = accounts.iter_mut().find(|a| !a.user_id.is_empty() && a.user_id == acct.user_id) {
+        existing.key = key;
+        if !acct.user_name.is_empty() {
+            existing.user_name = acct.user_name.clone();
+        }
+        if acct.source == "oauth" {
+            existing.source = "oauth".into();
+        }
+    } else if !accounts.iter().any(|a| a.key == key) {
+        accounts.push(Account {
+            key,
+            user_id: acct.user_id.clone(),
+            user_name: acct.user_name.clone(),
+            source: acct.source.clone(),
+            added_at: acct.added_at,
+        });
     }
+    save_accounts(conn, &accounts)?;
     Ok(accounts)
 }
 
-/// 移除指定下标的 CC 账户 key（0 起）；下标越界时返回错误。
+/// 移除指定下标的 CC 账户（0 起）；下标越界时返回错误。
 /// 返回更新后的账户列表（调用方负责同步到 AppState.config）。
-pub fn remove_account_at(conn: &Connection, index: usize) -> Result<Vec<String>, String> {
+pub fn remove_account_at(conn: &Connection, index: usize) -> Result<Vec<Account>, String> {
     let mut accounts = load_accounts(conn)?;
     if index >= accounts.len() {
         return Err(format!("账户下标越界: {index}"));
@@ -95,15 +114,31 @@ pub fn remove_account_at(conn: &Connection, index: usize) -> Result<Vec<String>,
     Ok(accounts)
 }
 
+/// 更新指定 userId 账户的自定义显示名；未找到时返回错误。
+/// 返回更新后的账户列表（调用方负责同步到 AppState.config）。
+pub fn rename_account(conn: &Connection, user_id: &str, user_name: &str) -> Result<Vec<Account>, String> {
+    let name = user_name.trim().to_string();
+    if name.is_empty() {
+        return Err("显示名不能为空".into());
+    }
+    let mut accounts = load_accounts(conn)?;
+    let Some(existing) = accounts.iter_mut().find(|a| a.user_id == user_id) else {
+        return Err(format!("未找到 userId 为 {user_id} 的账户"));
+    };
+    existing.user_name = name;
+    save_accounts(conn, &accounts)?;
+    Ok(accounts)
+}
+
 /// 把账户列表写入设置库（add/remove 落库用）。
-fn save_accounts(conn: &Connection, accounts: &[String]) -> Result<(), String> {
+fn save_accounts(conn: &Connection, accounts: &[Account]) -> Result<(), String> {
     let mut cfg = super::proxy::settings::load_config(conn);
     cfg.cc_accounts = accounts.to_vec();
     super::proxy::settings::save_config(conn, &cfg)
 }
 
 /// 从 AppState 的配置读取 CC 账户列表。
-pub fn accounts_from_state(state: &crate::proxy::state::AppState) -> Vec<String> {
+pub fn accounts_from_state(state: &crate::proxy::state::AppState) -> Vec<Account> {
     state.config.read().unwrap().cc_accounts.clone()
 }
 
@@ -116,11 +151,11 @@ pub fn mask_key(key: &str) -> String {
     }
 }
 
-/// 从账户列表轮询取下一个账户 key：游标递增取模，多账户交替使用。
+/// 从账户列表轮询取下一个账户：游标递增取模，多账户交替使用。
 ///
 /// 账户列表为空时返回 None，单账户时恒返回该账户。游标为进程级静态计数，
 /// 不同 AppState 实例（如测试）各自基于自己的列表取模，互不影响。
-pub fn next_account(state: &crate::proxy::state::AppState) -> Option<String> {
+pub fn next_account(state: &crate::proxy::state::AppState) -> Option<Account> {
     let accounts = accounts_from_state(state);
     if accounts.is_empty() {
         return None;
@@ -131,6 +166,55 @@ pub fn next_account(state: &crate::proxy::state::AppState) -> Option<String> {
 
 /// 进程级轮询游标（静态计数，递增取模即得账户下标）。
 static ROUND_ROBIN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 用 API Key 调用上游 `/alpha/whoami` 验证有效性并取回账户身份（userId/userName）。
+///
+/// 成功返回 `(userId, userName)`；401 表示 key 无效，其他状态/网络错误给出中文描述。
+pub async fn verify_account_key(api_base: &str, api_key: &str) -> Result<(String, String), String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("构建请求客户端失败: {e}"))?;
+    let url = format!("{api_base}/alpha/whoami");
+    let res = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        client
+            .get(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .send()
+            .await
+    })
+    .await
+    .map_err(|_| "验证请求超时，请检查网络".to_string())?
+    .map_err(|e| format!("验证请求失败: {e}"))?;
+
+    match res.status().as_u16() {
+        200 => {
+            let v: serde_json::Value = res
+                .json()
+                .await
+                .map_err(|e| format!("解析 whoami 响应失败: {e}"))?;
+            let user_id = v
+                .pointer("/user/id")
+                .and_then(|x| x.as_str())
+                .or_else(|| v.get("id").and_then(|x| x.as_str()))
+                .unwrap_or("")
+                .to_string();
+            let user_name = v
+                .pointer("/user/userName")
+                .and_then(|x| x.as_str())
+                .or_else(|| v.pointer("/user/name").and_then(|x| x.as_str()))
+                .unwrap_or("")
+                .to_string();
+            if user_id.is_empty() {
+                return Err("whoami 响应缺少用户 id，请重试或改用浏览器登录".into());
+            }
+            Ok((user_id, user_name))
+        }
+        401 => Err("该 API Key 无效（未授权），请检查是否正确".into()),
+        s => Err(format!("上游验证失败（HTTP {s}），请稍后重试")),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -171,27 +255,95 @@ mod tests {
     fn accounts_roundtrip() {
         let conn = temp_conn();
         assert!(load_accounts(&conn).unwrap().is_empty());
-        add_account(&conn, "user_one").unwrap();
-        add_account(&conn, "user_two").unwrap();
-        add_account(&conn, "user_one").unwrap(); // 重复添加被跳过
+        add_account(
+            &conn,
+            &Account {
+                key: "user_one".into(),
+                user_id: "id_1".into(),
+                user_name: "One".into(),
+                source: "manual".into(),
+                added_at: 1,
+            },
+        )
+        .unwrap();
+        add_account(
+            &conn,
+            &Account {
+                key: "user_two".into(),
+                user_id: "id_2".into(),
+                user_name: "Two".into(),
+                source: "oauth".into(),
+                added_at: 2,
+            },
+        )
+        .unwrap();
+        // 同 userId 重新添加：更新 key 与显示名，不新增条目
+        add_account(
+            &conn,
+            &Account {
+                key: "user_one_new".into(),
+                user_id: "id_1".into(),
+                user_name: "One Renamed".into(),
+                source: "oauth".into(),
+                added_at: 3,
+            },
+        )
+        .unwrap();
         let list = load_accounts(&conn).unwrap();
-        assert_eq!(list, vec!["user_one".to_string(), "user_two".to_string()]);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].key, "user_one_new");
+        assert_eq!(list[0].user_name, "One Renamed");
+        assert_eq!(list[0].source, "oauth");
+        assert_eq!(list[1].key, "user_two");
         remove_account_at(&conn, 0).unwrap();
-        assert_eq!(load_accounts(&conn).unwrap(), vec!["user_two".to_string()]);
+        let list = load_accounts(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].key, "user_two");
         assert!(remove_account_at(&conn, 5).is_err()); // 越界报错
     }
 
     #[test]
+    fn rename_account_by_user_id() {
+        let conn = temp_conn();
+        add_account(
+            &conn,
+            &Account {
+                key: "user_one".into(),
+                user_id: "id_1".into(),
+                user_name: "One".into(),
+                source: "manual".into(),
+                added_at: 1,
+            },
+        )
+        .unwrap();
+        let list = rename_account(&conn, "id_1", "  我的名字  ").unwrap();
+        assert_eq!(list[0].user_name, "我的名字");
+        assert!(rename_account(&conn, "missing_id", "x").is_err());
+        assert!(rename_account(&conn, "id_1", "   ").is_err()); // 空白名拒绝
+    }
+
+    #[test]
     fn round_robin_rotates() {
-        // 构造带两个账户的 state：a → b → a → b
+        // 构造带两个账户的 state：a → b → a → b（按 key 断言）
         let state = AppState::new(Config::default());
         *state.config.write().unwrap() = Config {
-            cc_accounts: vec!["user_a".into(), "user_b".into()],
+            cc_accounts: vec![
+                Account {
+                    key: "user_a".into(),
+                    user_id: "id_a".into(),
+                    ..Account::default()
+                },
+                Account {
+                    key: "user_b".into(),
+                    user_id: "id_b".into(),
+                    ..Account::default()
+                },
+            ],
             ..Config::default()
         };
         let mut got = Vec::new();
         for _ in 0..4 {
-            got.push(next_account(&state).unwrap());
+            got.push(next_account(&state).unwrap().key);
         }
         assert_eq!(got, vec!["user_a", "user_b", "user_a", "user_b"]);
     }
@@ -200,5 +352,15 @@ mod tests {
     fn round_robin_empty() {
         let state = AppState::new(Config::default());
         assert_eq!(next_account(&state), None);
+    }
+
+    #[test]
+    fn legacy_string_account_deser() {
+        // 旧版纯字符串 key 数组应反序列化为 Account（user_id 为派生占位）
+        let cfg: Config = serde_json::from_str(r#"{"cc_accounts":["user_abc"]}"#).unwrap();
+        assert_eq!(cfg.cc_accounts.len(), 1);
+        assert_eq!(cfg.cc_accounts[0].key, "user_abc");
+        assert!(cfg.cc_accounts[0].user_id.starts_with("legacy-"));
+        assert_eq!(cfg.cc_accounts[0].source, "manual");
     }
 }

@@ -4,7 +4,10 @@ import {
   Download,
   Eye,
   EyeOff,
+  ExternalLink,
   KeyRound,
+  Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Save,
@@ -15,9 +18,18 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -111,6 +123,14 @@ export function ConfigView() {
   const [accounts, setAccounts] = useState<AccountEntry[]>([]);
   const [accountInput, setAccountInput] = useState("");
   const [showAccountInput, setShowAccountInput] = useState(false);
+  // 浏览器授权登录弹窗状态
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginUrl, setLoginUrl] = useState("");
+  const [loginStatus, setLoginStatus] = useState<"idle" | "pending" | "success" | "denied" | "failed">("idle");
+  const [loginError, setLoginError] = useState("");
+  // 账户改名状态（editingId 为正在改名的 userId）
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const [portInUse, setPortInUse] = useState<{ in_use: boolean; pid: number | null }>({
     in_use: false,
     pid: null,
@@ -248,6 +268,96 @@ export function ConfigView() {
       await api.accountRemove(index);
       setAccounts((await api.accountList()).accounts);
       toast.success("CC 账户已移除");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }
+
+  /** 打开授权登录弹窗：启动 loopback 服务器并获取授权 URL。 */
+  async function openLoginDialog() {
+    setLoginOpen(true);
+    setLoginStatus("idle");
+    setLoginError("");
+    setLoginUrl("");
+    try {
+      const { url } = await api.authLoginStart();
+      setLoginUrl(url);
+      setLoginStatus("pending");
+    } catch (e) {
+      setLoginError(String(e));
+      setLoginStatus("failed");
+    }
+  }
+
+  /** 在系统浏览器中打开授权 URL。 */
+  async function openAuthBrowser() {
+    if (!loginUrl) return;
+    try {
+      await openUrl(loginUrl);
+    } catch (e) {
+      toast.error(`打开浏览器失败：${String(e)}`);
+    }
+  }
+
+  /** 关闭登录弹窗并取消进行中的登录。 */
+  async function closeLoginDialog() {
+    setLoginOpen(false);
+    try {
+      await api.authLoginCancel();
+    } catch {
+      /* 忽略取消失败 */
+    }
+  }
+
+  // 弹窗打开且状态为 pending 时轮询登录结果
+  useEffect(() => {
+    if (!loginOpen || loginStatus !== "pending") return;
+    const timer = setInterval(async () => {
+      try {
+        const r = await api.authLoginPoll();
+        if (r.status === "success") {
+          setLoginStatus("success");
+          clearInterval(timer);
+          // 成功后自动关弹窗并刷新列表
+          setTimeout(() => {
+            setLoginOpen(false);
+            setAccounts([]);
+            api.accountList().then((a) => setAccounts(a.accounts)).catch(() => {});
+            toast.success("CC 账户登录成功");
+          }, 600);
+        } else if (r.status === "denied") {
+          setLoginStatus("denied");
+          clearInterval(timer);
+        } else if (r.status === "failed") {
+          setLoginError(r.error ?? "登录失败");
+          setLoginStatus("failed");
+          clearInterval(timer);
+        }
+      } catch {
+        /* 轮询失败则下一轮再试 */
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [loginOpen, loginStatus]);
+
+  /** 进入账户改名模式。 */
+  function startRename(a: AccountEntry) {
+    setRenameId(a.userId);
+    setRenameValue(a.userName);
+  }
+
+  /** 保存账户自定义显示名。 */
+  async function saveRename(userId: string) {
+    const name = renameValue.trim();
+    if (!name) {
+      toast.error("显示名不能为空");
+      return;
+    }
+    try {
+      await api.accountRename(userId, name);
+      setRenameId(null);
+      setAccounts((await api.accountList()).accounts);
+      toast.success("账户显示名已更新");
     } catch (e) {
       toast.error(String(e));
     }
@@ -444,7 +554,7 @@ export function ConfigView() {
           </div>
         </Section>
 
-        <Section title="CC 账户" desc="user_ 开头的 Command Code 上游 Key；可配置多个，请求按轮询自动切换，分散单账户限流/配额压力">
+        <Section title="CC 账户" desc="user_ 开头的 Command Code 上游账户；可配置多个，请求按轮询自动切换。支持浏览器授权登录或手动粘贴 Key">
           <div className="space-y-3">
             {accounts.length === 0 ? (
               <p className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -454,8 +564,47 @@ export function ConfigView() {
             ) : (
               <ul className="space-y-2">
                 {accounts.map((a) => (
-                  <li key={a.index} className="flex items-center justify-between rounded-md border px-3 py-2">
-                    <span className="font-mono text-xs text-muted-foreground">{a.masked}</span>
+                  <li key={a.index} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
+                    <div className="flex min-w-0 flex-col gap-0.5">
+                      <div className="flex items-center gap-2">
+                        {renameId === a.userId ? (
+                          <div className="flex items-center gap-1.5">
+                            <Input
+                              value={renameValue}
+                              onChange={(e) => setRenameValue(e.target.value)}
+                              className="h-6 w-40 font-mono text-xs"
+                              autoFocus
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") saveRename(a.userId);
+                                if (e.key === "Escape") setRenameId(null);
+                              }}
+                            />
+                            <Button size="sm" variant="ghost" className="h-6 px-1.5" onClick={() => saveRename(a.userId)}>
+                              <Save className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        ) : (
+                          <>
+                            <span className="truncate text-sm font-medium text-foreground">
+                              {a.userName || a.masked}
+                            </span>
+                            <Button size="sm" variant="ghost" className="h-5 px-1 text-muted-foreground" onClick={() => startRename(a)}>
+                              <Pencil className="h-3 w-3" />
+                            </Button>
+                          </>
+                        )}
+                        <span
+                          className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                            a.source === "oauth"
+                              ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                              : "bg-muted text-muted-foreground"
+                          }`}
+                        >
+                          {a.source === "oauth" ? "OAuth" : "手动"}
+                        </span>
+                      </div>
+                      <span className="truncate font-mono text-xs text-muted-foreground">{a.masked}</span>
+                    </div>
                     <Button variant="ghost" size="sm" onClick={() => removeAccount(a.index)}>
                       <Trash2 />
                       移除
@@ -464,27 +613,79 @@ export function ConfigView() {
                 ))}
               </ul>
             )}
-            {showAccountInput ? (
-              <div className="flex gap-2">
-                <Input
-                  value={accountInput}
-                  onChange={(e) => setAccountInput(e.target.value)}
-                  placeholder="user_xxxxxxxxx"
-                  className="font-mono"
-                />
-                <Button onClick={addAccount}>添加</Button>
-                <Button variant="ghost" onClick={() => { setAccountInput(""); setShowAccountInput(false); }}>
-                  取消
-                </Button>
-              </div>
-            ) : (
-              <Button variant="outline" size="sm" onClick={() => setShowAccountInput(true)}>
-                <Plus />
-                添加账户
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" onClick={openLoginDialog}>
+                <ExternalLink />
+                通过浏览器登录
               </Button>
-            )}
+              {showAccountInput ? (
+                <div className="flex gap-2">
+                  <Input
+                    value={accountInput}
+                    onChange={(e) => setAccountInput(e.target.value)}
+                    placeholder="user_xxxxxxxxx"
+                    className="font-mono"
+                  />
+                  <Button onClick={addAccount}>添加</Button>
+                  <Button variant="ghost" onClick={() => { setAccountInput(""); setShowAccountInput(false); }}>
+                    取消
+                  </Button>
+                </div>
+              ) : (
+                <Button variant="outline" size="sm" onClick={() => setShowAccountInput(true)}>
+                  <Plus />
+                  添加账户
+                </Button>
+              )}
+            </div>
           </div>
         </Section>
+
+        {/* 浏览器授权登录弹窗 */}
+        <Dialog open={loginOpen} onOpenChange={(open) => { if (!open) closeLoginDialog(); }}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>登录 Command Code 账户</DialogTitle>
+              <DialogDescription>
+                {loginStatus === "pending"
+                  ? "将在浏览器中打开授权页面，请完成登录后返回本窗口。"
+                  : loginStatus === "success"
+                    ? "授权成功，正在添加账户…"
+                    : "通过浏览器授权登录 Command Code，无需手动粘贴 Key。"}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex flex-col items-center gap-4 py-4">
+              {loginStatus === "pending" && (
+                <>
+                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                  <p className="text-center text-sm text-muted-foreground">
+                    已启动授权回调服务器（127.0.0.1 随机端口），等待你在浏览器中完成授权…
+                  </p>
+                  <Button onClick={openAuthBrowser}>
+                    <ExternalLink />
+                    打开浏览器授权
+                  </Button>
+                </>
+              )}
+              {loginStatus === "success" && (
+                <p className="text-center text-sm text-emerald-600 dark:text-emerald-400">
+                  登录成功，账户已添加。
+                </p>
+              )}
+              {loginStatus === "denied" && (
+                <p className="text-center text-sm text-amber-600 dark:text-amber-400">
+                  授权被拒绝，你可以关闭弹窗后重试。
+                </p>
+              )}
+              {loginStatus === "failed" && (
+                <p className="text-center text-sm text-destructive">授权失败：{loginError || "未知错误"}</p>
+              )}
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" onClick={closeLoginDialog}>关闭</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <Separator />
 

@@ -104,6 +104,7 @@ pub fn migrate_from_config(conn: &Connection, config_path: &std::path::Path) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::config::Account;
     use rusqlite::Connection;
 
     fn temp_conn() -> Connection {
@@ -119,7 +120,13 @@ mod tests {
         cfg.port = 3999;
         cfg.host = "127.0.0.1".into();
         cfg.zdr = true;
-        cfg.cc_accounts = vec!["user_test_key".into()];
+        cfg.cc_accounts = vec![Account {
+            key: "user_test_key".into(),
+            user_id: "id_test".into(),
+            user_name: "Test".into(),
+            source: "oauth".into(),
+            added_at: 9,
+        }];
         cfg.local_api_key = "sk_local_key".into();
         save_config(&conn, &cfg).unwrap();
 
@@ -127,7 +134,16 @@ mod tests {
         assert_eq!(got.port, 3999);
         assert_eq!(got.host, "127.0.0.1");
         assert!(got.zdr);
-        assert_eq!(got.cc_accounts, vec!["user_test_key".to_string()]);
+        assert_eq!(
+            got.cc_accounts,
+            vec![Account {
+                key: "user_test_key".into(),
+                user_id: "id_test".into(),
+                user_name: "Test".into(),
+                source: "oauth".into(),
+                added_at: 9,
+            }]
+        );
         assert_eq!(got.local_api_key, "sk_local_key");
         // 未显式写入的字段走默认值
         assert_eq!(got.max_inflight, 0);
@@ -163,9 +179,11 @@ mod tests {
         )
         .unwrap();
 
-        // 读取时迁移到 cc_accounts
+        // 读取时迁移到 cc_accounts（旧 api_key → Account）
         let cfg = load_config(&conn);
-        assert_eq!(cfg.cc_accounts, vec!["user_old_key".to_string()]);
+        assert_eq!(cfg.cc_accounts.len(), 1);
+        assert_eq!(cfg.cc_accounts[0].key, "user_old_key");
+        assert!(cfg.cc_accounts[0].user_id.starts_with("legacy-"));
 
         // 清理旧行后，再次读取不会重复迁移（例如用户之后删光账户）
         purge_legacy_api_key(&conn).unwrap();

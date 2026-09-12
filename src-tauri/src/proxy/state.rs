@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 
 use super::config::Config;
 use super::fingerprint::Fingerprint;
+use super::auth_login::AuthLoginSession;
 
 /// 当前 Unix 毫秒时间戳（系统时钟异常时返回 0）。
 pub fn now_millis() -> u64 {
@@ -113,6 +114,8 @@ pub struct AppState {
     pub usage: Mutex<Option<rusqlite::Connection>>,
     /// 指纹持久化文件路径（setup 阶段注入；None 时指纹仅存内存）。
     pub fingerprint_path: Mutex<Option<std::path::PathBuf>>,
+    /// 浏览器授权登录会话（进行中或已完成；None 表示无进行中登录）。
+    pub auth_login: Mutex<Option<AuthLoginSession>>,
 }
 
 impl AppState {
@@ -139,6 +142,7 @@ impl AppState {
             shutdown: Mutex::new(None),
             usage: Mutex::new(None),
             fingerprint_path: Mutex::new(None),
+            auth_login: Mutex::new(None),
         })
     }
 

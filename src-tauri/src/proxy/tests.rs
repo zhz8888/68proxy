@@ -816,9 +816,25 @@ async fn start_proxy_impl(
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         super::settings::init_settings_on(&conn).unwrap();
         crate::credentials::save_local_key(&conn, TEST_LOCAL_KEY).unwrap();
-        crate::credentials::add_account(&conn, "user_test_account").unwrap();
+        crate::credentials::add_account(
+            &conn,
+            &crate::proxy::config::Account {
+                key: "user_test_account".into(),
+                user_id: "test_user_id".into(),
+                user_name: "Test".into(),
+                source: "manual".into(),
+                added_at: 0,
+            },
+        )
+        .unwrap();
         // 账户列表以 AppState.config 为内存真相源，需同步
-        state.config.write().unwrap().cc_accounts = vec!["user_test_account".into()];
+        state.config.write().unwrap().cc_accounts = vec![crate::proxy::config::Account {
+            key: "user_test_account".into(),
+            user_id: "test_user_id".into(),
+            user_name: "Test".into(),
+            source: "manual".into(),
+            added_at: 0,
+        }];
         *state.usage.lock().unwrap() = Some(conn);
     }
 
@@ -1217,7 +1233,17 @@ async fn usage_recorded_through_proxy() {
     super::settings::init_settings_on(&conn).unwrap();
     super::usage::init_usage_on(&conn).unwrap();
     crate::credentials::save_local_key(&conn, TEST_LOCAL_KEY).unwrap();
-    crate::credentials::add_account(&conn, "user_test_account").unwrap();
+    crate::credentials::add_account(
+            &conn,
+            &crate::proxy::config::Account {
+                key: "user_test_account".into(),
+                user_id: "test_user_id".into(),
+                user_name: "Test".into(),
+                source: "manual".into(),
+                added_at: 0,
+            },
+        )
+        .unwrap();
     *state.usage.lock().unwrap() = Some(conn);
 
     let client = reqwest::Client::new();
@@ -1258,7 +1284,17 @@ async fn zero_output_not_recorded() {
     super::settings::init_settings_on(&conn).unwrap();
     super::usage::init_usage_on(&conn).unwrap();
     crate::credentials::save_local_key(&conn, TEST_LOCAL_KEY).unwrap();
-    crate::credentials::add_account(&conn, "user_test_account").unwrap();
+    crate::credentials::add_account(
+            &conn,
+            &crate::proxy::config::Account {
+                key: "user_test_account".into(),
+                user_id: "test_user_id".into(),
+                user_name: "Test".into(),
+                source: "manual".into(),
+                added_at: 0,
+            },
+        )
+        .unwrap();
     *state.usage.lock().unwrap() = Some(conn);
 
     let client = reqwest::Client::new();

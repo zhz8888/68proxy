@@ -492,12 +492,13 @@ async fn read_json_body(
 /// 流程：
 /// 1. 从请求头提取本地转发 Key（sk- 开头），必须与本地已生成的 key 一致，否则 401；
 ///    未配置本地 key 时同样 401（提示先生成）。
-/// 2. 鉴权通过后从 CC 账户列表按轮询取下一个账户 key 返回（供上游转发）。
+/// 2. 鉴权通过后从 CC 账户列表按轮询取下一个账户，返回 `(api_key, user_id)` 供上游转发
+///    （api_key 用于 Bearer/伪造头，user_id 用于会话/指纹/初始化键控）。
 ///    未配置任何账户时 401（提示先添加账户）。
 async fn api_key_or_401(
     st: &AppState,
     headers: &HeaderMap,
-) -> Result<String, axum::response::Response> {
+) -> Result<(String, String), axum::response::Response> {
     // 本地 key 必须已生成，且请求头携带的必须与本地一致（sk- 开头，防止任意 sk- 直过）
     let local = crate::credentials::cached_local_key();
     let Some(expected) = local else {
@@ -537,9 +538,9 @@ async fn api_key_or_401(
         ));
     }
 
-    // 鉴权通过：轮询取下一个 CC 账户 key 供上游转发
+    // 鉴权通过：轮询取下一个 CC 账户供上游转发
     match crate::credentials::next_account(st) {
-        Some(k) => Ok(k),
+        Some(a) => Ok((a.key, a.user_id)),
         None => Err(json_response(
             401,
             json!({
@@ -573,7 +574,7 @@ async fn chat_completions(
             )
         }
     };
-    let api_key = match api_key_or_401(&st, &headers).await {
+    let (api_key, user_id) = match api_key_or_401(&st, &headers).await {
         Ok(k) => k,
         Err(r) => return r,
     };
@@ -603,8 +604,8 @@ async fn chat_completions(
 
     let empty_placeholder = st.config.read().unwrap().empty_system_placeholder;
     let cc_body = convert::build_cc_request(&req, empty_placeholder);
-    cc_client::ensure_initialized(&st, &api_key).await;
-    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &headers, prompt_cache_key).await {
+    cc_client::ensure_initialized(&st, &api_key, &user_id).await;
+    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &user_id, &headers, prompt_cache_key).await {
         Ok(r) => r,
         Err(e) => {
             log::error(&format!("Upstream error: {e}"));
@@ -659,7 +660,7 @@ async fn messages(
             )
         }
     };
-    let api_key = match api_key_or_401(&st, &headers).await {
+    let (api_key, user_id) = match api_key_or_401(&st, &headers).await {
         Ok(k) => k,
         Err(_) => {
             return json_response(
@@ -698,8 +699,8 @@ async fn messages(
     let openai_req = convert::convert_anthropic_to_openai(&req);
     let empty_placeholder = st.config.read().unwrap().empty_system_placeholder;
     let cc_body = convert::build_cc_request(&openai_req, empty_placeholder);
-    cc_client::ensure_initialized(&st, &api_key).await;
-    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &headers, None).await {
+    cc_client::ensure_initialized(&st, &api_key, &user_id).await;
+    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &user_id, &headers, None).await {
         Ok(r) => r,
         Err(e) => {
             log::error(&format!("Upstream error: {e}"));
@@ -762,7 +763,7 @@ async fn responses(
             )
         }
     };
-    let api_key = match api_key_or_401(&st, &headers).await {
+    let (api_key, user_id) = match api_key_or_401(&st, &headers).await {
         Ok(k) => k,
         Err(r) => return r,
     };
@@ -804,8 +805,8 @@ async fn responses(
     let openai_req = convert::convert_responses_to_openai(&req);
     let empty_placeholder = st.config.read().unwrap().empty_system_placeholder;
     let cc_body = convert::build_cc_request(&openai_req, empty_placeholder);
-    cc_client::ensure_initialized(&st, &api_key).await;
-    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &headers, prompt_cache_key).await {
+    cc_client::ensure_initialized(&st, &api_key, &user_id).await;
+    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &user_id, &headers, prompt_cache_key).await {
         Ok(r) => r,
         Err(e) => {
             log::error(&format!("Upstream error: {e}"));
@@ -1571,7 +1572,9 @@ async fn models(
     headers: HeaderMap,
 ) -> axum::response::Response {
     let _ = headers;
-    let account_key = crate::credentials::accounts_from_state(&st).first().cloned();
+    let account_key = crate::credentials::accounts_from_state(&st)
+        .first()
+        .map(|a| a.key.clone());
     let (list, _) = cc_client::fetch_models(&st, account_key.as_deref()).await;
     Json(json!({
         "object": "list",

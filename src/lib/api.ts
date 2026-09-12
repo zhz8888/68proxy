@@ -80,10 +80,21 @@ export interface ApiKeyState {
   masked: string;
 }
 
-/** CC 账户列表条目（仅掩码展示 + 下标，不含完整 Key）。 */
+/** CC 账户列表条目：掩码 key、userId（唯一标识）、显示名、来源与下标。 */
 export interface AccountEntry {
   index: number;
   masked: string;
+  userId: string;
+  userName: string;
+  source: string; // "oauth" | "manual"
+}
+
+/** 浏览器授权登录的轮询结果。 */
+export interface AuthLoginPoll {
+  status: "idle" | "pending" | "success" | "denied" | "failed";
+  port?: number;
+  account?: { key: string; userId: string; userName: string };
+  error?: string;
 }
 
 /** 用量分组行（按模型/按端点），含请求数、各 token 列与估算成本。 */
@@ -158,10 +169,17 @@ export const api = {
   localKeySet: (key: string) => invoke<void>("local_key_set", { key }),
   localKeyGenerate: () => invoke<{ key: string; masked: string }>("local_key_generate"),
   localKeyDelete: () => invoke<void>("local_key_delete"),
-  // CC 账户：列表（掩码）/ 新增 / 按下标删除
+  // CC 账户：列表 / 新增（whoami 验证补全，可选自定义显示名）/ 重命名 / 按下标删除
   accountList: () => invoke<{ accounts: AccountEntry[] }>("account_list"),
-  accountAdd: (key: string) => invoke<void>("account_add", { key }),
+  accountAdd: (key: string, userName?: string) =>
+    invoke<void>("account_add", { key, userName }),
+  accountRename: (userId: string, userName: string) =>
+    invoke<void>("account_rename", { userId, userName }),
   accountRemove: (index: number) => invoke<void>("account_remove", { index }),
+  // 浏览器授权登录：启动（返回授权 URL）/ 轮询结果 / 取消
+  authLoginStart: () => invoke<{ url: string; port: number }>("auth_login_start"),
+  authLoginPoll: () => invoke<AuthLoginPoll>("auth_login_poll"),
+  authLoginCancel: () => invoke<void>("auth_login_cancel"),
   // 模型列表：force 为 true 时忽略缓存强制向上游拉取；fallback 表示是否使用兜底列表
   modelsGet: (force = false) =>
     invoke<{ data: ModelInfo[]; fallback: boolean }>("models_get", { force }),

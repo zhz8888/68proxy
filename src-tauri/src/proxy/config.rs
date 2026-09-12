@@ -1,7 +1,107 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
 
 use super::log;
+
+/// CC 上游账户。`user_id` 为唯一标识（whoami/OAuth 回传），同名账户重新登录换 key 时
+/// 视为同一账户并更新 key；`user_name` 为显示名，可自定义，默认取 API 回传值。
+///
+/// 反序列化兼容旧格式：既接受 `{key, user_id, user_name, source, added_at}` 对象，
+/// 也接受旧版纯字符串 key（迁成 `Account{ key, user_id: 派生占位, source: "manual" }`）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(default)]
+pub struct Account {
+    /// 上游 API key（user_ 开头），转发 Bearer 与伪造头用。
+    pub key: String,
+    /// 账户唯一标识（whoami 的 user.id / OAuth 回传 userId），运行时键控键。
+    pub user_id: String,
+    /// 显示名（可自定义，默认 API 回传 userName）。
+    pub user_name: String,
+    /// 来源：oauth / manual。
+    pub source: String,
+    /// 添加时间（Unix 秒）。
+    pub added_at: u64,
+}
+
+impl Default for Account {
+    fn default() -> Self {
+        Self {
+            key: String::new(),
+            user_id: String::new(),
+            user_name: String::new(),
+            source: "manual".into(),
+            added_at: 0,
+        }
+    }
+}
+
+/// 由 key 派生一个稳定的占位 user_id（用于旧版 key 迁移后，尚未 whoami 补全时）。
+pub fn legacy_user_id(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(key.as_bytes());
+    let hex = h.finalize();
+    format!("legacy-{}", &hex[..8].iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+impl<'de> Deserialize<'de> for Account {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Str(String),
+            Obj {
+                key: String,
+                #[serde(default)]
+                user_id: String,
+                #[serde(default)]
+                user_name: String,
+                #[serde(default = "default_source")]
+                source: String,
+                #[serde(default)]
+                added_at: u64,
+            },
+        }
+        fn default_source() -> String {
+            "manual".into()
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Str(k) => {
+                let id = legacy_user_id(&k);
+                Ok(Account {
+                    key: k,
+                    user_id: id,
+                    user_name: String::new(),
+                    source: "manual".into(),
+                    added_at: 0,
+                })
+            }
+            Raw::Obj {
+                key,
+                user_id,
+                user_name,
+                source,
+                added_at,
+            } => {
+                let resolved_user_id = if user_id.is_empty() {
+                    legacy_user_id(&key)
+                } else {
+                    user_id
+                };
+                Ok(Account {
+                    key,
+                    user_id: resolved_user_id,
+                    user_name,
+                    source,
+                    added_at,
+                })
+            }
+        }
+    }
+}
 
 /// 代理配置，支持环境变量覆写。
 ///
@@ -39,8 +139,8 @@ pub struct Config {
     pub usage_enabled: bool,
     /// 用量明细保留天数，0 表示永久保留；超过部分在记录时自动清理。
     pub usage_retention_days: u32,
-    /// CC 上游账户 key 列表（user_ 开头），请求按轮询切换使用；可空但启动代理需至少一个。
-    pub cc_accounts: Vec<String>,
+    /// CC 上游账户列表（user_ 开头），请求按轮询切换使用；可空但启动代理需至少一个。
+    pub cc_accounts: Vec<Account>,
     /// 本地转发鉴权 key（sk_ 开头，仅本机服务鉴权用，不发给 CC 上游）。
     pub local_api_key: String,
     /// 无 system prompt 时是否发空格占位（阻止 CC 上游注入默认提示词）。
@@ -133,7 +233,12 @@ impl Config {
     pub fn migrate_legacy(&mut self, legacy_api_key: Option<&str>) {
         if self.cc_accounts.is_empty() {
             if let Some(k) = legacy_api_key.filter(|k| !k.trim().is_empty()) {
-                self.cc_accounts.push(k.trim().to_string());
+                let k = k.trim().to_string();
+                self.cc_accounts.push(Account {
+                    user_id: legacy_user_id(&k),
+                    key: k,
+                    ..Account::default()
+                });
             }
         }
     }
@@ -196,5 +301,55 @@ impl Config {
                 self.max_inflight = p;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_string_and_object_deser() {
+        // 旧版纯字符串 key 数组 → Account（user_id 派生占位）
+        let cfg: Config = serde_json::from_str(r#"{"cc_accounts":["user_abc"]}"#).unwrap();
+        assert_eq!(cfg.cc_accounts.len(), 1);
+        assert_eq!(cfg.cc_accounts[0].key, "user_abc");
+        assert!(cfg.cc_accounts[0].user_id.starts_with("legacy-"));
+        assert_eq!(cfg.cc_accounts[0].source, "manual");
+
+        // 新版对象 → 原样反序列化
+        let cfg2: Config = serde_json::from_str(
+            r#"{"cc_accounts":[{"key":"user_xyz","user_id":"id_1","user_name":"小明","source":"oauth","added_at":123}]}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg2.cc_accounts[0].user_id, "id_1");
+        assert_eq!(cfg2.cc_accounts[0].user_name, "小明");
+        assert_eq!(cfg2.cc_accounts[0].source, "oauth");
+        assert_eq!(cfg2.cc_accounts[0].added_at, 123);
+    }
+
+    #[test]
+    fn legacy_api_key_migrates_to_account() {
+        let mut cfg: Config = serde_json::from_str(r#"{"api_key":"user_legacy"}"#).unwrap();
+        cfg.migrate_legacy(Some("user_legacy"));
+        assert_eq!(cfg.cc_accounts.len(), 1);
+        assert_eq!(cfg.cc_accounts[0].key, "user_legacy");
+        assert!(cfg.cc_accounts[0].user_id.starts_with("legacy-"));
+        assert_eq!(cfg.cc_accounts[0].source, "manual");
+        // 已有账户时不迁移旧 key
+        let mut cfg2: Config = serde_json::from_str(
+            r#"{"cc_accounts":[{"key":"user_a","user_id":"id_a"}]}"#,
+        )
+        .unwrap();
+        cfg2.migrate_legacy(Some("user_legacy"));
+        assert_eq!(cfg2.cc_accounts.len(), 1);
+        assert_eq!(cfg2.cc_accounts[0].key, "user_a");
+    }
+
+    #[test]
+    fn legacy_user_id_stable() {
+        assert_eq!(legacy_user_id("user_abc"), legacy_user_id("user_abc"));
+        assert_ne!(legacy_user_id("user_abc"), legacy_user_id("user_def"));
+        assert!(legacy_user_id("user_abc").starts_with("legacy-"));
     }
 }

@@ -146,7 +146,7 @@ fn local_key_delete(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 查询 CC 账户列表：返回掩码后的展示列表（不含完整 Key），条目带下标供删除。
+/// 查询 CC 账户列表：返回掩码 key、userId、显示名与来源，条目带下标供删除。
 #[tauri::command]
 fn account_list(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
@@ -159,19 +159,55 @@ fn account_list(app: AppHandle) -> Result<Value, String> {
         "accounts": accounts
             .iter()
             .enumerate()
-            .map(|(i, k)| json!({ "index": i, "masked": credentials::mask_key(k) }))
+            .map(|(i, a)| json!({
+                "index": i,
+                "masked": credentials::mask_key(&a.key),
+                "userId": a.user_id,
+                "userName": a.user_name,
+                "source": a.source,
+            }))
             .collect::<Vec<_>>(),
     }))
 }
 
-/// 新增一个 CC 账户 Key（user_ 开头），已存在时静默跳过；落库后同步内存配置。
+/// 新增一个 CC 账户：先调用上游 whoami 验证 key 并补全 userId/userName，再入库。
+/// 可选 `user_name` 作为自定义显示名（缺省用 whoami 返回的 userName）。
 #[tauri::command]
-fn account_add(app: AppHandle, key: String) -> Result<(), String> {
+async fn account_add(app: AppHandle, key: String, user_name: Option<String>) -> Result<(), String> {
+    let key = key.trim().to_string();
+    if !key.starts_with("user_") {
+        return Err("CC 账户 Key 必须以 user_ 开头".into());
+    }
+    let ctx = app.state::<AppCtx>();
+    let api_base = ctx.proxy_state.config.read().unwrap().api_base.clone();
+    let (user_id, default_name) = credentials::verify_account_key(&api_base, &key).await?;
+    let display = user_name.unwrap_or(default_name);
+    let accounts = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        credentials::add_account(
+            conn,
+            &proxy::config::Account {
+                key: key.clone(),
+                user_id: user_id.clone(),
+                user_name: display.clone(),
+                source: "manual".into(),
+                added_at: proxy::state::now_secs(),
+            },
+        )?
+    };
+    ctx.proxy_state.config.write().unwrap().cc_accounts = accounts;
+    Ok(())
+}
+
+/// 更新指定 userId 账户的自定义显示名；落库后同步内存配置。
+#[tauri::command]
+fn account_rename(app: AppHandle, user_id: String, user_name: String) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
     let accounts = {
         let guard = ctx.proxy_state.usage.lock().unwrap();
         let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
-        credentials::add_account(conn, &key)?
+        credentials::rename_account(conn, &user_id, &user_name)?
     };
     ctx.proxy_state.config.write().unwrap().cc_accounts = accounts;
     Ok(())
@@ -190,6 +226,59 @@ fn account_remove(app: AppHandle, index: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// 启动浏览器授权登录：后端起 loopback 回调服务器，返回授权 URL 供前端打开浏览器。
+#[tauri::command]
+async fn auth_login_start(app: AppHandle) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let url = proxy::auth_login::start_auth_login(&ctx.proxy_state).await?;
+    let port = ctx
+        .proxy_state
+        .auth_login
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.port)
+        .unwrap_or(0);
+    Ok(json!({ "url": url, "port": port }))
+}
+
+/// 查询浏览器授权登录结果：`pending`（等待中）/ `success`（含账户信息）/ `denied` / `failed` / `idle`。
+/// success 时按 userId 去重入库并同步内存配置。
+#[tauri::command]
+async fn auth_login_poll(app: AppHandle) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let value = proxy::auth_login::poll_auth_login(&ctx.proxy_state);
+    if value.get("status").and_then(|v| v.as_str()) == Some("success") {
+        let api_key = value["account"]["key"].as_str().unwrap_or("").to_string();
+        let user_id = value["account"]["userId"].as_str().unwrap_or("").to_string();
+        let user_name = value["account"]["userName"].as_str().unwrap_or("").to_string();
+        let accounts = {
+            let guard = ctx.proxy_state.usage.lock().unwrap();
+            let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+            credentials::add_account(
+                conn,
+                &proxy::config::Account {
+                    key: api_key,
+                    user_id: user_id.clone(),
+                    user_name,
+                    source: "oauth".into(),
+                    added_at: proxy::state::now_secs(),
+                },
+            )?
+        };
+        ctx.proxy_state.config.write().unwrap().cc_accounts = accounts;
+    }
+    Ok(value)
+}
+
+/// 取消进行中的浏览器授权登录。
+#[tauri::command]
+fn auth_login_cancel(app: AppHandle) -> Result<(), String> {
+    let ctx = app.state::<AppCtx>();
+    proxy::auth_login::cancel_auth_login(&ctx.proxy_state);
+    Ok(())
+}
+
 /// 获取可用模型列表。`force` 为 true 时先清空缓存再向上游拉取；
 /// 返回 `{ data: 模型列表, fallback: 是否使用兜底列表 }`。
 #[tauri::command]
@@ -201,7 +290,9 @@ async fn models_get(app: AppHandle, force: bool) -> Result<Value, String> {
             fetched_at: 0,
         };
     }
-    let account_key = credentials::accounts_from_state(&ctx.proxy_state).first().cloned();
+    let account_key = credentials::accounts_from_state(&ctx.proxy_state)
+        .first()
+        .map(|a| a.key.clone());
     let (list, fallback) = proxy::cc_client::fetch_models(&ctx.proxy_state, account_key.as_deref())
         .await;
     Ok(json!({ "data": list, "fallback": fallback }))
@@ -550,7 +641,11 @@ pub fn run() {
             local_key_delete,
             account_list,
             account_add,
+            account_rename,
             account_remove,
+            auth_login_start,
+            auth_login_poll,
+            auth_login_cancel,
             models_get,
             logs_get,
             logs_clear,
