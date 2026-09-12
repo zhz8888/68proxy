@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, Eraser, Search } from "lucide-react";
 import { toast } from "sonner";
-import { save } from "@tauri-apps/plugin-dialog";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import { api, onLog, type LogEntry } from "@/lib/api";
+import { pickSavePath } from "@/lib/platform";
 import { formatLogTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -71,10 +71,7 @@ export function LogsView() {
   /** 弹出保存对话框，把后端日志导出到用户选择的文件。 */
   async function exportLogs() {
     try {
-      const path = await save({
-        defaultPath: "68proxy-logs.log",
-        filters: [{ name: "日志文件", extensions: ["log", "txt"] }],
-      });
+      const path = await pickSavePath("68proxy-logs.log", ["log", "txt"]);
       if (!path) return;
       const count = await api.logsExport(path);
       toast.success(`已导出 ${count} 条日志`);

@@ -16,8 +16,6 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { getVersion } from "@tauri-apps/api/app";
 
 import { StatusLamp } from "@/components/StatusLamp";
 import { Toaster } from "@/components/ui/sonner";
@@ -26,6 +24,7 @@ import { UrlRow } from "@/components/UrlRow";
 import { Button } from "@/components/ui/button";
 import { api, onStatus, type ProxyStatus } from "@/lib/api";
 import { DEFAULT_PORT } from "@/lib/constants";
+import { appVersion, appWindow } from "@/lib/platform";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { AboutView } from "@/views/AboutView";
@@ -63,22 +62,20 @@ const NAV: Array<{ id: View; label: string; icon: LucideIcon }> = [
   { id: "about", label: "关于", icon: Info },
 ];
 
-/** 当前 Tauri 窗口句柄，用于拖动、最小化、最大化、关闭等窗口操作。 */
-const win = getCurrentWindow();
-
 /** 应用主框架：左侧导航栏 + 顶部状态栏 + 按当前视图切换的内容区。 */
 function App() {
   const [view, setView] = useState<View>("console");
   const [status, setStatus] = useState<ProxyStatus | null>(null);
   const [busy, setBusy] = useState<"start" | "stop" | null>(null);
   const [maximized, setMaximized] = useState(false);
-  const [appVersion, setAppVersion] = useState("");
+  const [version, setVersion] = useState("");
   // 当前主题模式：供系统明暗变化时判断是否需要跟随重设
   const themeRef = useRef<ThemeMode>("system");
 
   useEffect(() => {
-    // 读取应用版本（来自 tauri.conf.json ← package.json，随发版 tag 自动联动）
-    getVersion().then(setAppVersion).catch(() => {});
+    // 读取应用版本（来自 tauri.conf.json ← package.json，随发版 tag 自动联动）；
+    // 浏览器调试环境下无版本信息，返回空串（界面已按空串省略显示）
+    appVersion().then(setVersion).catch(() => {});
     // 主题以后端配置为准：加载后应用一次；index.html 内联脚本已按缓存值预先设过类，
     // 无缓存（首次运行）时此处补上，避免默认落在浅色。
     let mounted = true;
@@ -97,7 +94,7 @@ function App() {
     const timer = setInterval(() => {
       api.proxyStatus().then(setStatus).catch(() => {});
     }, 3000);
-    win.isMaximized().then(setMaximized).catch(() => {});
+    appWindow.isMaximized().then(setMaximized).catch(() => {});
     // 卸载时清除轮询定时器并取消事件订阅，避免泄漏
     return () => {
       mounted = false;
@@ -124,13 +121,8 @@ function App() {
 
   /** 切换窗口最大化/还原状态，并同步本地 maximized 标记以更新按钮提示。 */
   async function toggleMaximize() {
-    const isMax = await win.isMaximized();
-    if (isMax) {
-      await win.unmaximize();
-    } else {
-      await win.maximize();
-    }
-    setMaximized(!isMax);
+    const isMax = await appWindow.toggleMaximize();
+    setMaximized(isMax);
   }
 
   // 代理是否运行中，控制状态灯、文案与启停按钮样式
@@ -174,7 +166,7 @@ function App() {
             <p className="font-mono text-[10px] leading-relaxed text-muted-foreground/70">
               by 6ix8ight · fork by zhz8888
               <br />
-              {appVersion ? `V${appVersion}` : ""}
+              {version ? `V${version}` : ""}
             </p>
           </div>
         </aside>
@@ -209,7 +201,7 @@ function App() {
 
             <div className="flex items-center">
               <button
-                onClick={() => win.minimize()}
+                onClick={() => appWindow.minimize()}
                 className="flex h-8 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
                 title="最小化"
               >
@@ -223,7 +215,7 @@ function App() {
                 <Square className="h-3.5 w-3.5" />
               </button>
               <button
-                onClick={() => win.close()}
+                onClick={() => appWindow.close()}
                 className="flex h-8 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground hover:text-background"
                 title="关闭"
               >

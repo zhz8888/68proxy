@@ -78,6 +78,8 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
+> **浏览器调试前端**：开发模式下除 `pnpm tauri dev` 打开桌面窗口外，也可用浏览器直接访问 Vite 服务（默认 <http://localhost:1420>），界面同样能调用 Rust 后端——只需同时运行 `pnpm tauri dev`（或 `cargo run`），前端会自动检测并经由本机调试桥接（`127.0.0.1:1431`）转发命令与事件，便于使用浏览器 DevTools 调试。该桥接仅在 debug 构建存在，release 构建完全不包含，端口可用 `CC_DEV_BRIDGE_PORT` 覆写。
+
 **快速接入**：启动代理前，先在「配置」随机生成一个本地转发 Key（`sk-` 开头），并在「账户」页添加至少一个 CC 账户 Key（`user_` 开头）。然后启动代理，在任意 OpenAI / Anthropic 兼容客户端中配置：
 
 ```

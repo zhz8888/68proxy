@@ -16,7 +16,6 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -33,6 +32,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, type ApiKeyState, type Config } from "@/lib/api";
+import { pickSavePath } from "@/lib/platform";
 import { applyTheme, type ThemeMode } from "@/lib/theme";
 
 // 配置项默认值，字段与后端 config.json 一一对应
@@ -260,10 +260,7 @@ export function ConfigView() {
   /** 弹出保存对话框，把最近日志导出到用户选择的文件。 */
   async function exportLogs() {
     try {
-      const path = await saveDialog({
-        defaultPath: "68proxy-logs.log",
-        filters: [{ name: "日志文件", extensions: ["log", "txt"] }],
-      });
+      const path = await pickSavePath("68proxy-logs.log", ["log", "txt"]);
       if (!path) return;
       const count = await api.logsExport(path);
       toast.success(`已导出 ${count} 条日志`);

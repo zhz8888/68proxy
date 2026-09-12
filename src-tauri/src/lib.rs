@@ -5,6 +5,10 @@
 mod credentials;
 mod proxy;
 
+/// 开发调试桥接：仅在 debug 构建编译，让浏览器直连前端页面时也能调用后端命令。
+#[cfg(debug_assertions)]
+mod dev_bridge;
+
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -602,7 +606,10 @@ fn status_value(app: &AppHandle) -> Value {
 /// 向所有前端窗口广播 `proxy://status` 状态变更事件。
 fn emit_status(app: &AppHandle) {
     let value = status_value(app);
-    let _ = app.emit("proxy://status", value);
+    let _ = app.emit("proxy://status", value.clone());
+    // 调试桥接：让浏览器直连的页面也能收到状态推送
+    #[cfg(debug_assertions)]
+    dev_bridge::publish("proxy://status", value);
 }
 
 /// 启动代理的内部实现：校验配置与 API Key、绑定监听端口、在后台任务中运行服务，
@@ -916,11 +923,21 @@ pub fn run() {
             let h = app.handle().clone();
             proxy::log::set_sink(move |entry| {
                 let _ = h.emit("proxy://log", entry);
+                #[cfg(debug_assertions)]
+                dev_bridge::publish(
+                    "proxy://log",
+                    serde_json::to_value(entry).unwrap_or(serde_json::Value::Null),
+                );
             });
             // 请求摘要 → 前端事件
             let h2 = app.handle().clone();
             proxy::server::set_request_sink(move |info| {
                 let _ = h2.emit("proxy://request", info);
+                #[cfg(debug_assertions)]
+                dev_bridge::publish(
+                    "proxy://request",
+                    serde_json::to_value(info).unwrap_or(serde_json::Value::Null),
+                );
             });
             // 用量更新 → 前端事件（节流 200ms，避免高频请求刷爆事件流）
             let h3 = app.handle().clone();
@@ -931,7 +948,10 @@ pub fn run() {
                 let mut last = last_emit2.lock().unwrap();
                 if now.saturating_sub(*last) >= 200 {
                     *last = now;
-                    let _ = h3.emit("proxy://stats", serde_json::json!({ "updated": now }));
+                    let payload = serde_json::json!({ "updated": now });
+                    let _ = h3.emit("proxy://stats", payload.clone());
+                    #[cfg(debug_assertions)]
+                    dev_bridge::publish("proxy://stats", payload);
                 }
             });
 
@@ -948,6 +968,10 @@ pub fn run() {
                 usage_path,
                 proxy_state,
             });
+
+            // 启动开发调试桥接（仅 debug 构建），使浏览器直连前端页面也能调用后端命令
+            #[cfg(debug_assertions)]
+            dev_bridge::start(app.handle().clone());
 
             build_tray(app.handle())?;
 

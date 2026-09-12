@@ -3,10 +3,10 @@ import type { IconType } from "react-icons";
 import { FaFile } from "react-icons/fa6";
 import { SiReact, SiRust, SiTauri, SiTypescript, SiVite } from "react-icons/si";
 import { toast } from "sonner";
-import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { openExternal } from "@/lib/platform";
 
 // 代理实现逻辑的四个步骤，按顺序展示
 const LOGIC_STEPS = [
@@ -39,7 +39,7 @@ const TECH_STACK: Array<{ icons: IconType[]; name: string; desc: string }> = [
 /** 用系统默认浏览器打开外部链接，失败时弹出错误提示。 */
 async function openLink(url: string) {
   try {
-    await openUrl(url);
+    await openExternal(url);
   } catch (e) {
     toast.error(String(e));
   }

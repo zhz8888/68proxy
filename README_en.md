@@ -78,6 +78,8 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
+> **Debugging the frontend in a browser**: in dev mode you can also open the Vite server directly (default <http://localhost:1420>) instead of the Tauri window — the UI still reaches the Rust backend. Just keep `pnpm tauri dev` (or `cargo run`) running: the frontend detects it is not inside Tauri and routes commands and events through a local debug bridge (`127.0.0.1:1431`), which makes DevTools-based debugging convenient. The bridge only exists in debug builds — release builds exclude it entirely; override the port with `CC_DEV_BRIDGE_PORT`.
+
 **Quick connect:** before starting the proxy, generate a local forwarding Key (`sk-` prefixed) under **Settings**, and add at least one CC account Key (`user_` prefixed) on the **Accounts** page. Then start the proxy and configure any OpenAI / Anthropic compatible client:
 
 ```

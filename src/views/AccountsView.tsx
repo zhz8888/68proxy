@@ -11,7 +11,6 @@ import {
   UserRound,
 } from "lucide-react";
 import { toast } from "sonner";
-import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -41,6 +40,7 @@ import {
   type AccountRouting,
   type LimitWindow,
 } from "@/lib/api";
+import { openExternal } from "@/lib/platform";
 import { formatCost } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -275,7 +275,7 @@ export function AccountsView() {
   async function openAuthBrowser() {
     if (!loginUrl) return;
     try {
-      await openUrl(loginUrl);
+      await openExternal(loginUrl);
     } catch (e) {
       toast.error(`打开浏览器失败：${String(e)}`);
     }

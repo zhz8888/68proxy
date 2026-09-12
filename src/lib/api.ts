@@ -1,6 +1,7 @@
-// Tauri IPC 封装：以类型化的方式调用后端命令并订阅后端推送事件
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+// Tauri IPC 封装：以类型化的方式调用后端命令并订阅后端推送事件。
+// 实际传输由 lib/ipc.ts 适配：Tauri 窗口内走官方 IPC，浏览器直连开发页面时走调试桥接。
+
+import { invoke, listen } from "@/lib/ipc";
 
 import type { ThemeMode } from "@/lib/theme";
 
