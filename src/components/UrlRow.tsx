@@ -32,7 +32,7 @@ export function UrlRow({
       {label && (
         <span className="text-xs text-muted-foreground whitespace-nowrap">{label}</span>
       )}
-      <code className="select-text flex-1 truncate rounded-md border border-border bg-muted/50 px-2.5 py-1.5 font-mono text-[12.5px] text-foreground">
+      <code className="select-text flex-1 truncate rounded-md border border-border bg-muted/50 px-2.5 py-1.5 font-mono text-xs text-foreground">
         {url}
       </code>
       <Button variant="ghost" size="icon" className="h-7 w-7" onClick={handleCopy} title={t("common.copyAddress")}>

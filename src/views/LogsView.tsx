@@ -119,7 +119,7 @@ export function LogsView() {
             {t("logs.export")}
           </Button>
           <Button
-            variant="ghost"
+            variant="destructive-ghost"
             size="sm"
             onClick={() => {
               api.logsClear();
@@ -133,7 +133,7 @@ export function LogsView() {
       </div>
 
       <ScrollArea className="flex-1 rounded-lg border border-border bg-card/60">
-        <div className="select-text p-3 font-mono text-[12.5px] leading-6">
+        <div className="select-text p-3 font-mono text-xs leading-6">
           {filtered.length === 0 ? (
             <p className="px-2 py-8 text-center text-muted-foreground">
               {keyword || level !== "all" ? t("logs.noMatch") : t("logs.empty")}
@@ -141,7 +141,7 @@ export function LogsView() {
           ) : (
             filtered.map((l) => (
               <div key={l.seq} className="flex gap-3 whitespace-pre-wrap break-all px-2 hover:bg-secondary/40">
-                <span className="shrink-0 text-muted-foreground/70">{formatLogTime(l.ts)}</span>
+                <span className="shrink-0 text-muted-foreground">{formatLogTime(l.ts)}</span>
                 <span className={cn("mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full", LEVEL_DOT[l.level] ?? "bg-muted-foreground")} />
                 <span className={LEVEL_COLOR[l.level] ?? "text-foreground"}>{l.msg}</span>
               </div>

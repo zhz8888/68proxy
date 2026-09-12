@@ -12,7 +12,11 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default: "bg-primary text-primary-foreground shadow hover:bg-primary/90",
+        // 危险操作（删除/清空/停止/结束进程）统一红色强调：--destructive 已是真正的红，
+        // 文字色随明暗自翻转（浅色白字 / 深色黑字），与 --primary 同一逻辑。
         destructive: "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
+        // 无底红字：用于列表行内等轻量删除操作，保留 ghost 的轻量感但以红色提示破坏性
+        "destructive-ghost": "text-destructive hover:bg-destructive/10 hover:text-destructive",
         outline: "border border-input bg-transparent shadow-sm hover:bg-accent hover:text-accent-foreground",
         secondary: "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
         ghost: "hover:bg-accent hover:text-accent-foreground",

@@ -135,7 +135,9 @@
     "modeNonStream": "非流式",
     "fieldStatus": "状态",
     "fieldElapsed": "耗时",
-    "fieldLastEvent": "最后事件"
+    "fieldLastEvent": "最后事件",
+    "tokenSummary": "输入 {{p0}} / 输出 {{p1}} / 缓存 {{p2}}",
+    "fieldTokens": "Token"
   },
   "usageMiniBars": {
     "empty": "最近 10 分钟暂无请求",
@@ -212,7 +214,10 @@
     "noRecentRequests": "暂无最近请求记录。请求完成且产出 token 后显示在此。",
     "clearDialogTitle": "清空用量统计",
     "clearDialogDesc": "将删除全部历史用量记录与趋势数据，且不可恢复。确认继续？",
-    "confirmClear": "确认清空"
+    "confirmClear": "确认清空",
+    "tokenIn": "输入 {{p0}}",
+    "tokenOut": "输出 {{p0}}",
+    "tokenCached": "缓存 {{p0}}"
   },
   "models": {
     "filter": {
@@ -241,7 +246,9 @@
       "vision": "视觉",
       "reasoning": "思考"
     },
-    "unavailableShort": "套餐不可用"
+    "unavailableShort": "套餐不可用",
+    "pricePerM": "输入 {{p0}} / 输出 {{p1}} · 每 1M",
+    "contextTokens": "上下文 {{p0}}"
   },
   "tools": {
     "title": "工具接入",

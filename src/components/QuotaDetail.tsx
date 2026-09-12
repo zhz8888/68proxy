@@ -131,7 +131,7 @@ export function QuotaDetail({ quota }: { quota: AccountQuota }) {
       {/* 5 小时 / 周窗口限额 */}
       {(quota.five_hour || quota.weekly) && (
         <div className="space-y-2 border-t pt-2">
-          <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
+          <div className="text-2xs uppercase tracking-wide text-muted-foreground">
             {t("quotaDetail.windowLimits")}
           </div>
           {quota.five_hour && <LimitWindowRow label={t("quotaDetail.fiveHour")} win={quota.five_hour} />}
@@ -142,7 +142,7 @@ export function QuotaDetail({ quota }: { quota: AccountQuota }) {
       {/* 组织级消费限额 */}
       {quota.org_limits.length > 0 && (
         <div className="space-y-2 border-t pt-2">
-          <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
+          <div className="text-2xs uppercase tracking-wide text-muted-foreground">
             {t("quotaDetail.orgLimits")}
           </div>
           {quota.org_limits.map((o) => (

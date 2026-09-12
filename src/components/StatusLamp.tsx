@@ -7,7 +7,7 @@ export type LampState = "running" | "stopped" | "streaming" | "ok" | "error" | "
 const LAMP_CLASS: Record<LampState, string> = {
   running: "bg-signal-success shadow-[0_0_8px_rgba(63,182,139,0.8)]",
   streaming: "bg-signal-warn shadow-[0_0_10px_rgba(245,165,36,0.9)]",
-  stopped: "bg-muted-foreground/50",
+  stopped: "bg-muted-foreground",
   ok: "bg-signal-success",
   error: "bg-signal-error shadow-[0_0_8px_rgba(229,83,75,0.7)]",
   timeout: "bg-signal-warn",

@@ -143,11 +143,13 @@ function App() {
             onDoubleClick={toggleMaximize}
             className="flex h-11 shrink-0 select-none items-center gap-2 border-b border-border px-4"
           >
-            <span className="font-display text-[14px] font-semibold tracking-[0.22em] text-primary">
+            <span className="font-display text-sm font-semibold tracking-[0.22em] text-primary">
               68PROXY
             </span>
           </div>
-          <nav className="flex flex-col gap-1 p-3">
+          {/* min-h-0 + overflow-y-auto：窗口高度不足时让导航自身滚动，
+              避免导航把底部作者信息挤出可视区（侧栏外层是 overflow-hidden，溢出即被裁切） */}
+          <nav className="flex min-h-0 flex-col gap-1 overflow-y-auto p-3">
             {NAV.map((item) => {
               const Icon = item.icon;
               return (
@@ -167,11 +169,19 @@ function App() {
               );
             })}
           </nav>
-          <div className="mt-auto p-4">
-            <p className="font-mono text-[10px] leading-relaxed text-muted-foreground/70">
-              by 6ix8ight · fork by zhz8888
+          {/* shrink-0：底部信息区固定高度，任何窗口高度下都完整可见 */}
+          <div className="mt-auto shrink-0 p-4">
+            <p className="font-mono text-2xs leading-relaxed text-muted-foreground">
+              Develop by 6ix8ight
               <br />
-              {version ? `V${version}` : ""}
+              fork by zhz8888
+              {/* 版本号独占一行；浏览器调试环境无版本信息时整行省略，避免留下空行 */}
+              {version && (
+                <>
+                  <br />
+                  {`V${version}`}
+                </>
+              )}
             </p>
           </div>
         </aside>

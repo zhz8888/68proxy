@@ -27,12 +27,18 @@
   --muted-foreground: #737373;
   --accent: #f5f5f5;
   --accent-foreground: #171717;
-  --destructive: #171717;
-  --destructive-foreground: #fafafa;
-  --success: #171717;
+  /* 破坏性/成功是语义色，必须真的是红与绿，否则「错误提示」「已复制」无法靠颜色表意。
+     取值与下方 --signal-error / --signal-success 一致；明暗两套会各自翻转文字色
+     （与 --primary 的行为一致：浅色白字、深色黑字）。 */
+  --destructive: #c0342c;
+  --destructive-foreground: #ffffff;
+  --success: #0f7a52;
   --border: #e5e5e5;
-  --input: #e5e5e5;
-  --ring: #a3a3a3;
+  /* 输入框等可交互控件的边界：需与非文本对比度 ≥3:1 才能被识别。
+     取值需同时满足落在白底与卡片(#fafafa) 上——故按卡片（更差的一侧）取。 */
+  --input: #8c8c8c;
+  /* 焦点环：≥3:1（WCAG 2.2 焦点指示器） */
+  --ring: #8c8c8c;
 
   /* 语义信号色（状态灯/日志级别/中继轨道）：浅色下取较深的值以保证对比度 */
   --signal-success: #0f7a52;
@@ -65,48 +71,14 @@
   --muted-foreground: #a3a3a3;
   --accent: #1a1a1a;
   --accent-foreground: #fafafa;
-  --destructive: #fafafa;
+  --destructive: #e5534b;
   --destructive-foreground: #0a0a0a;
-  --success: #fafafa;
+  --success: #3fb68b;
   --border: #262626;
-  --input: #262626;
+  --input: #6b6b6b;
   --ring: #fafafa;
 
   /* 语义信号色（状态灯/日志级别/中继轨道） */
-  --signal-success: #3fb68b;
-  --signal-warn: #f5a524;
-  --signal-error: #e5534b;
-  --signal-info: #6fb3e0;
-}
-
-.dark {
-  --radius: 0.625rem;
-  --app-radius-sm: calc(var(--radius) - 4px);
-  --app-radius-md: calc(var(--radius) - 2px);
-  --app-radius-lg: var(--radius);
-  --app-radius-xl: calc(var(--radius) + 4px);
-
-  --background: #000000;
-  --foreground: #fafafa;
-  --card: #0d0d0d;
-  --card-foreground: #fafafa;
-  --popover: #0d0d0d;
-  --popover-foreground: #fafafa;
-  --primary: #fafafa;
-  --primary-foreground: #0a0a0a;
-  --secondary: #1a1a1a;
-  --secondary-foreground: #e5e5e5;
-  --muted: #141414;
-  --muted-foreground: #a3a3a3;
-  --accent: #1a1a1a;
-  --accent-foreground: #fafafa;
-  --destructive: #fafafa;
-  --destructive-foreground: #0a0a0a;
-  --success: #fafafa;
-  --border: #262626;
-  --input: #262626;
-  --ring: #fafafa;
-
   --signal-success: #3fb68b;
   --signal-warn: #f5a524;
   --signal-error: #e5534b;
@@ -145,6 +117,11 @@
   --radius-lg: var(--app-radius-lg);
   --radius-xl: var(--app-radius-xl);
 
+  /* 字号阶梯：在 tailwind 默认（xs 12 / sm 14）之下补一档最小字。
+     界面所有文字只用 2xs / xs / sm / lg，不再逐处写任意 px。 */
+  --text-2xs: 11px;
+  --text-2xs--line-height: 1.45;
+
   --font-sans:
     "PingFang SC", "Microsoft YaHei UI", "Noto Sans SC", system-ui, -apple-system, sans-serif;
   --font-display:
@@ -154,7 +131,14 @@
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border outline-ring;
+  }
+  /* 全局键盘焦点指示：原生 button/a 等未声明焦点的元素也可见。
+     shadcn 组件自带 focus-visible:ring-* 并显式 outline-none，工具类优先级更高，
+     故不会与它们叠加（两者视觉一致，均使用 --ring）。 */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
   }
   /* 隐藏滚动条但保留滚动能力 */
   * {

@@ -72,12 +72,12 @@ export function AboutView() {
         <CardContent className="space-y-3 pt-0">
           {LOGIC_STEPS.map((step, i) => (
             <div key={step.titleKey} className="flex gap-3">
-              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-foreground font-mono text-[10px] font-bold text-background">
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-foreground font-mono text-2xs font-bold text-background">
                 {i + 1}
               </span>
               <div className="space-y-0.5">
                 <p className="text-sm font-medium text-foreground">{translate(step.titleKey)}</p>
-                <p className="text-[13px] leading-5 text-muted-foreground">{translate(step.descKey)}</p>
+                <p className="text-sm leading-5 text-muted-foreground">{translate(step.descKey)}</p>
               </div>
             </div>
           ))}
@@ -100,11 +100,11 @@ export function AboutView() {
                     <Icon key={i} className="h-4 w-4 shrink-0 text-muted-foreground" />
                   ))}
                 </span>
-                <p className="font-mono text-[12px] font-semibold text-foreground">
+                <p className="font-mono text-xs font-semibold text-foreground">
                   {tech.nameKey ? translate(tech.nameKey) : tech.name}
                 </p>
               </div>
-              <p className="mt-1 text-[12px] leading-5 text-muted-foreground">{translate(tech.descKey)}</p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">{translate(tech.descKey)}</p>
             </div>
           ))}
         </CardContent>
@@ -136,7 +136,7 @@ export function AboutView() {
                 >
                   <Icon className="h-4 w-4 text-muted-foreground group-hover:text-foreground" />
                   <span className="w-20 shrink-0 text-xs text-muted-foreground">{translate(l.labelKey)}</span>
-                  <span className="min-w-0 truncate font-mono text-[13px] text-foreground">{l.value}</span>
+                  <span className="min-w-0 truncate font-mono text-sm text-foreground">{l.value}</span>
                 </button>
               );
             })}

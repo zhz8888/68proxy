@@ -135,7 +135,9 @@
     "modeNonStream": "Non-streaming",
     "fieldStatus": "Status",
     "fieldElapsed": "Elapsed",
-    "fieldLastEvent": "Last event"
+    "fieldLastEvent": "Last event",
+    "tokenSummary": "in {{p0}} / out {{p1}} / cached {{p2}}",
+    "fieldTokens": "Tokens"
   },
   "usageMiniBars": {
     "empty": "No requests in the last 10 minutes",
@@ -212,7 +214,10 @@
     "noRecentRequests": "No recent request records. They appear here once a request completes and produces tokens.",
     "clearDialogTitle": "Clear usage stats",
     "clearDialogDesc": "This will delete all historical usage records and trend data and cannot be undone. Continue?",
-    "confirmClear": "Confirm clear"
+    "confirmClear": "Confirm clear",
+    "tokenIn": "in {{p0}}",
+    "tokenOut": "out {{p0}}",
+    "tokenCached": "cached {{p0}}"
   },
   "models": {
     "filter": {
@@ -241,7 +246,9 @@
       "vision": "Vision",
       "reasoning": "Reasoning"
     },
-    "unavailableShort": "Plan unavailable"
+    "unavailableShort": "Plan unavailable",
+    "pricePerM": "in {{p0}} / out {{p1}} per 1M",
+    "contextTokens": "ctx {{p0}}"
   },
   "tools": {
     "title": "Tool Integration",

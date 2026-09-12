@@ -61,7 +61,7 @@ export function RelayView() {
                 className="flex items-center gap-3 rounded-md border border-border/70 bg-secondary/30 px-3 py-2"
               >
                 <ModelLogo model={r.model} size={16} className="!p-0.5" />
-                <span className="w-24 shrink-0 select-text font-mono text-xs text-muted-foreground/80">
+                <span className="w-24 shrink-0 select-text font-mono text-xs text-muted-foreground">
                   {formatLogTime(r.started_at)}
                 </span>
                 <span className="min-w-0 truncate select-text font-mono text-sm text-foreground/90">{r.model}</span>

@@ -509,7 +509,7 @@ export function ConfigView() {
                 {t("config.generate")}
               </Button>
               {localKey.has_key && (
-                <Button variant="ghost" onClick={deleteLocalKey}>
+                <Button variant="destructive-ghost" onClick={deleteLocalKey}>
                   <Trash2 />
                   {t("common.delete")}
                 </Button>

@@ -22,7 +22,7 @@ import { cn } from "@/lib/utils";
 
 /** 中继轨道上的一个节点（客户端/代理/上游）。
  * @param left 节点在轨道内的水平位置（CSS 定位表达式）
- * @param accent 高亮配色：amber 强调代理节点、blue 强调上游节点
+ * @param accent 高亮配色：warn 强调代理节点、info 强调上游节点
  */
 function Node({
   label,
@@ -34,19 +34,19 @@ function Node({
   label: string;
   sub?: string;
   icon?: ReactNode;
-  accent?: "amber" | "blue";
+  accent?: "warn" | "info";
   left: string;
 }) {
   const boxClass =
-    accent === "amber"
+    accent === "warn"
       ? "border-signal-warn/60 bg-signal-warn/15 text-signal-warn shadow-[0_0_10px_rgba(245,165,36,0.25)]"
-      : accent === "blue"
+      : accent === "info"
         ? "border-signal-info/60 bg-signal-info/15 text-signal-info shadow-[0_0_10px_rgba(111,179,224,0.25)]"
         : "border-border bg-card text-muted-foreground";
   const labelClass =
-    accent === "amber"
+    accent === "warn"
       ? "text-signal-warn"
-      : accent === "blue"
+      : accent === "info"
         ? "text-signal-info"
         : "text-muted-foreground";
   return (
@@ -57,11 +57,11 @@ function Node({
       <div className={cn("flex h-8 w-8 items-center justify-center rounded-full border", boxClass)}>
         {icon ?? <Server className="h-4 w-4" />}
       </div>
-      <span className={cn("whitespace-nowrap text-[11px] leading-none", labelClass)}>
+      <span className={cn("whitespace-nowrap text-2xs leading-none", labelClass)}>
         {label}
       </span>
       {sub && (
-        <span className="max-w-[88px] truncate whitespace-nowrap font-mono text-[8px] leading-none text-muted-foreground/70">
+        <span className="max-w-[104px] truncate whitespace-nowrap font-mono text-2xs leading-none text-muted-foreground">
           {sub}
         </span>
       )}
@@ -116,8 +116,8 @@ export function RelayRail({
             <span className="rail-dot-reverse absolute top-[19px] -mt-0.5 h-1.5 w-1.5 rounded-full bg-signal-info shadow-[0_0_8px_rgba(111,179,224,0.9)]" />
           )}
           <Node left="1rem" label={t("relayRail.client")} icon={<AppWindow className="h-4 w-4" />} />
-          <Node left="calc(50% - 16px)" label={t("relayRail.proxy")} sub={`127.0.0.1:${port}`} accent="amber" icon={<Server className="h-4 w-4" />} />
-          <Node left="calc(100% - 1rem)" label={t("relayRail.upstream")} sub="commandcode.ai" accent="blue" icon={<Cloud className="h-4 w-4" />} />
+          <Node left="calc(50% - 16px)" label={t("relayRail.proxy")} sub={`127.0.0.1:${port}`} accent="warn" icon={<Server className="h-4 w-4" />} />
+          <Node left="calc(100% - 1rem)" label={t("relayRail.upstream")} sub="commandcode.ai" accent="info" icon={<Cloud className="h-4 w-4" />} />
         </div>
 
         <div className="mt-2 space-y-1.5">
@@ -162,7 +162,14 @@ export function RelayRail({
               <Row k={t("relayRail.fieldMode")} v={detail.stream ? t("relayRail.modeStream") : t("relayRail.modeNonStream")} />
               <Row k={t("relayRail.fieldStatus")} v={translate(statusLabel(detail.status))} />
               <Row k={t("relayRail.fieldElapsed")} v={formatDuration(detail.elapsed_ms)} />
-              <Row k="Token" v={`in ${detail.input_tokens} / out ${detail.output_tokens} / cached ${detail.cached_tokens}`} />
+              <Row
+                k={t("relayRail.fieldTokens")}
+                v={t("relayRail.tokenSummary", {
+                  p0: detail.input_tokens,
+                  p1: detail.output_tokens,
+                  p2: detail.cached_tokens,
+                })}
+              />
               <Row k={t("relayRail.fieldLastEvent")} v={detail.last_event || "—"} />
             </div>
           )}

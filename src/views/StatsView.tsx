@@ -46,7 +46,7 @@ function SummaryCard({ title, value, hint }: { title: string; value: string; hin
       </CardHeader>
       <CardContent className="pt-0">
         <span className="block truncate font-mono text-lg font-semibold">{value}</span>
-        {hint && <span className="text-[10px] text-muted-foreground/70">{hint}</span>}
+        {hint && <span className="text-2xs text-muted-foreground">{hint}</span>}
       </CardContent>
     </Card>
   );
@@ -85,11 +85,11 @@ function QuotaRow({ q }: { q: AccountQuota }) {
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-sm font-medium text-foreground">{q.user_name}</span>
-          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-2xs text-muted-foreground">
             {q.plan_name}
           </span>
           {q.status && (
-            <span className={cn("shrink-0 text-[10px]", q.status === "active" ? "text-signal-success" : "text-signal-warn")}>
+            <span className={cn("shrink-0 text-2xs", q.status === "active" ? "text-signal-success" : "text-signal-warn")}>
               {q.status}
             </span>
           )}
@@ -110,7 +110,7 @@ function QuotaRow({ q }: { q: AccountQuota }) {
       ) : (
         <>
           <MeterBar pct={q.usage_percent} />
-          <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+          <div className="flex items-center gap-3 text-2xs text-muted-foreground">
             <span>{t("stats.monthlyRemaining")} <span className="font-mono text-foreground/80">{formatCost(q.monthly_remaining)}</span></span>
             <span>{t("stats.purchasedRemaining")} <span className="font-mono text-foreground/80">{formatCost(q.purchased_remaining)}</span></span>
             <span>{t("stats.freeRemaining")} <span className="font-mono text-foreground/80">{formatCost(q.free_remaining)}</span></span>
@@ -253,7 +253,7 @@ export function StatsView() {
         )}
         <div className="flex-1" />
         <Button
-          variant="secondary"
+          variant="destructive"
           size="sm"
           className="h-8 px-2.5"
           onClick={() => setConfirmClear(true)}
@@ -357,7 +357,7 @@ export function StatsView() {
               ) : (
                 <div className="space-y-1">
                   {/* 表头 */}
-                  <div className="flex items-center gap-3 px-3 pb-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                  <div className="flex items-center gap-3 px-3 pb-1 text-2xs uppercase tracking-wide text-muted-foreground">
                     <span className="w-4 shrink-0" />
                     <span className="min-w-0 flex-1 truncate">{groupBy === "model" ? t("stats.model") : t("stats.endpoint")}</span>
                     <span className="w-14 text-right">{t("stats.requests")}</span>
@@ -393,7 +393,7 @@ export function StatsView() {
                       className="flex items-center gap-3 rounded-md border border-border/70 bg-secondary/30 px-3 py-2"
                     >
                       <ModelLogo model={r.model} size={16} className="!p-0.5" />
-                      <span className="w-20 shrink-0 select-text font-mono text-xs text-muted-foreground/80">
+                      <span className="w-20 shrink-0 select-text font-mono text-xs text-muted-foreground">
                         {formatLogTime(r.ts)}
                       </span>
                       <span className="min-w-0 flex-1 truncate select-text font-mono text-sm text-foreground/90">
@@ -402,10 +402,10 @@ export function StatsView() {
                       <span className="min-w-0 truncate text-xs text-muted-foreground">{r.endpoint}</span>
                       <StatusLamp state={lampForStatus(r.status)} />
                       <span className="w-14 text-right font-mono text-xs text-muted-foreground">
-                        in {formatTokens(r.prompt_tokens)}
+                        {t("stats.tokenIn", { p0: formatTokens(r.prompt_tokens) })}
                       </span>
                       <span className="w-14 text-right font-mono text-xs text-muted-foreground">
-                        out {formatTokens(r.completion_tokens)}
+                        {t("stats.tokenOut", { p0: formatTokens(r.completion_tokens) })}
                       </span>
                       <span
                         className={cn(
@@ -413,7 +413,7 @@ export function StatsView() {
                           r.cached_tokens > 0 ? "text-signal-info" : "text-muted-foreground",
                         )}
                       >
-                        cached {formatTokens(r.cached_tokens)}
+                        {t("stats.tokenCached", { p0: formatTokens(r.cached_tokens) })}
                       </span>
                     </div>
                   ))}

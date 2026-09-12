@@ -192,14 +192,14 @@ export function ToolsView() {
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center text-sm">
             {t("tools.installPromptTitle")}
-            <span className="ml-2 rounded-md border border-border bg-muted/50 px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
+            <span className="ml-2 rounded-md border border-border bg-muted/50 px-2 py-0.5 font-mono text-2xs text-muted-foreground">
               {t("tools.portBadge", { p0: port, p1: summary })}
             </span>
           </CardTitle>
         </CardHeader>
         <CardContent className="pt-0">
           <div className="relative">
-            <pre className="select-text max-h-80 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-4 font-mono text-[12px] leading-6 text-foreground/90">
+            <pre className="select-text max-h-80 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-4 font-mono text-xs leading-6 text-foreground/90">
               {prompt}
             </pre>
             <Button
@@ -229,7 +229,7 @@ export function ToolsView() {
         </CardHeader>
         <CardContent className="pt-0">
           <div className="relative">
-            <pre className="select-text max-h-80 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-4 font-mono text-[12px] leading-6 text-foreground/90">
+            <pre className="select-text max-h-80 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-4 font-mono text-xs leading-6 text-foreground/90">
               {removePrompt}
             </pre>
             <Button

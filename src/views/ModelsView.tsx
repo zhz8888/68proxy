@@ -278,12 +278,12 @@ export function ModelsView() {
                 <div className="flex items-center gap-3">
                   <ModelLogo model={m.id} size={22} />
                   <div className="min-w-0 flex-1">
-                    <p className="select-text truncate font-mono text-[12.5px]" title={m.id}>
+                    <p className="select-text truncate font-mono text-xs" title={m.id}>
                       {m.id}
                     </p>
                     <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                       {provider && (
-                        <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">
+                        <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-2xs">
                           {provider}
                         </Badge>
                       )}
@@ -306,29 +306,29 @@ export function ModelsView() {
                   {unavailable && (
                     <Badge
                       variant="outline"
-                      className="shrink-0 border-destructive/40 px-1.5 py-0 text-[10px] text-destructive"
+                      className="shrink-0 border-destructive/40 px-1.5 py-0 text-2xs text-destructive"
                     >
                       {accessHint}
                     </Badge>
                   )}
                   {free && (
-                    <Badge className="shrink-0 bg-signal-success/15 px-1.5 py-0 text-[10px] text-signal-success">
+                    <Badge className="shrink-0 bg-signal-success/15 px-1.5 py-0 text-2xs text-signal-success">
                       {t("models.free")}
                     </Badge>
                   )}
                   {discount > 0 && (
-                    <Badge className="shrink-0 bg-signal-warn/15 px-1.5 py-0 text-[10px] text-signal-warn">
+                    <Badge className="shrink-0 bg-signal-warn/15 px-1.5 py-0 text-2xs text-signal-warn">
                       -{discount}%
                     </Badge>
                   )}
                   {pricing?.caps.vision && (
-                    <Badge variant="outline" className="shrink-0 gap-0.5 px-1.5 py-0 text-[10px]">
+                    <Badge variant="outline" className="shrink-0 gap-0.5 px-1.5 py-0 text-2xs">
                       <Eye className="h-2.5 w-2.5" />
                       {t("models.caps.vision")}
                     </Badge>
                   )}
                   {pricing?.caps.reasoning && (
-                    <Badge variant="outline" className="shrink-0 gap-0.5 px-1.5 py-0 text-[10px]">
+                    <Badge variant="outline" className="shrink-0 gap-0.5 px-1.5 py-0 text-2xs">
                       <Sparkles className="h-2.5 w-2.5" />
                       {t("models.caps.reasoning")}
                     </Badge>
@@ -336,14 +336,16 @@ export function ModelsView() {
                 </div>
 
                 {/* 价格概览：按 1M tokens 的输入/输出单价；免费或未收录时给出对应说明 */}
-                <div className="flex items-center justify-between text-[10.5px] text-muted-foreground">
+                <div className="flex items-center justify-between text-2xs text-muted-foreground">
                   {rates ? (
                     free ? (
                       <span className="text-signal-success">{t("models.freeLimited")}</span>
                     ) : (
                       <span className="font-mono">
-                        {formatPrice(rates.input)} in / {formatPrice(rates.output)} out
-                        <span className="ml-1 opacity-70">per 1M</span>
+                        {t("models.pricePerM", {
+                          p0: formatPrice(rates.input),
+                          p1: formatPrice(rates.output),
+                        })}
                       </span>
                     )
                   ) : (
@@ -357,7 +359,11 @@ export function ModelsView() {
                       </span>
                     )}
                     {pricing?.contextWindow && (
-                      <span>ctx {formatContextTokens(pricing.contextWindow)}</span>
+                      <span>
+                        {t("models.contextTokens", {
+                          p0: formatContextTokens(pricing.contextWindow),
+                        })}
+                      </span>
                     )}
                   </span>
                 </div>

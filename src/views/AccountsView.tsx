@@ -50,26 +50,17 @@ import { translate } from "@/i18n";
 /** 下拉框中「自动选择」选项的哨兵值（Radix Select 不允许空字符串作为 value）。 */
 const AUTO_ACCOUNT = "__auto__";
 
-/** 套餐徽标配色：不同档位用不同色调区分（未收录的套餐回退中性灰）。 */
+/** 套餐档位（由低到高）→ 徽标强调等级。
+ *  套餐本身是有序阶梯，故用中性灰度由浅到深表达档位，而不是七彩上色——
+ *  后者会与信号色语义冲突（amber 已是「警告」、rose 近「错误」）。 */
+const PLAN_TIER_HIGH = new Set(["Max", "Ultra"]);
+const PLAN_TIER_MID = new Set(["Pro", "Provider", "Teams Pro"]);
+
+/** 套餐徽标配色：按档位分三档（实心 → 浅底 → 描边），未收录的套餐回退描边档。 */
 function planBadgeClass(planName: string): string {
-  switch (planName) {
-    case "Go":
-      return "bg-teal-500/15 text-teal-600 dark:text-teal-400";
-    case "GOAT":
-      return "bg-amber-500/15 text-amber-600 dark:text-amber-400";
-    case "Pro":
-      return "bg-sky-500/15 text-sky-600 dark:text-sky-400";
-    case "Max":
-      return "bg-violet-500/15 text-violet-600 dark:text-violet-400";
-    case "Ultra":
-      return "bg-rose-500/15 text-rose-600 dark:text-rose-400";
-    case "Provider":
-      return "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400";
-    case "Teams Pro":
-      return "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400";
-    default:
-      return "bg-muted text-muted-foreground";
-  }
+  if (PLAN_TIER_HIGH.has(planName)) return "bg-primary text-primary-foreground";
+  if (PLAN_TIER_MID.has(planName)) return "bg-secondary text-secondary-foreground";
+  return "border border-border text-muted-foreground";
 }
 
 /** 限额窗口 → 已用百分比；窗口缺失（未开通/不限）时返回 null 以便渲染「—」。 */
@@ -82,9 +73,9 @@ function windowPct(win: LimitWindow | null): number | null {
 function UsageCell({ label, pct, title }: { label: string; pct: number | null; title?: string }) {
   return (
     <div className="min-w-0 flex-1" title={title}>
-      <div className="flex items-baseline justify-between gap-1 text-[10px]">
+      <div className="flex items-baseline justify-between gap-1 text-2xs">
         <span className="truncate text-muted-foreground">{label}</span>
-        <span className={cn("shrink-0 font-mono", pct != null ? usageColor(pct) : "text-muted-foreground/50")}>
+        <span className={cn("shrink-0 font-mono", pct != null ? usageColor(pct) : "text-muted-foreground")}>
           {pct != null ? `${pct.toFixed(0)}%` : "—"}
         </span>
       </div>
@@ -471,16 +462,16 @@ export function AccountsView() {
                           {/* 订阅类型徽标（Go / GOAT / Pro / Max …），额度未取到时占位「—」 */}
                           <span
                             className={cn(
-                              "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
-                              planName ? planBadgeClass(planName) : "bg-muted text-muted-foreground",
+                              "shrink-0 rounded px-1.5 py-0.5 text-2xs font-medium",
+                              planName ? planBadgeClass(planName) : "border border-border text-muted-foreground",
                             )}
                           >
                             {planName ?? (q ? t("plan.noSubscription") : "—")}
                           </span>
                           <span
-                            className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                            className={`shrink-0 rounded px-1.5 py-0.5 text-2xs font-medium ${
                               a.source === "oauth"
-                                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                                ? "bg-signal-success/15 text-signal-success"
                                 : "bg-muted text-muted-foreground"
                             }`}
                           >
@@ -495,7 +486,7 @@ export function AccountsView() {
                         <Button variant="ghost" size="sm" onClick={() => openAccountDetail(a)}>
                           {t("accounts.quotaDetail")}
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => removeAccount(a.index)}>
+                        <Button variant="destructive-ghost" size="sm" onClick={() => removeAccount(a.index)}>
                           <Trash2 />
                           {t("accounts.remove")}
                         </Button>
@@ -505,7 +496,7 @@ export function AccountsView() {
                     {/* 用量概览：5 小时 / 周窗口限额 + 月配额用量 */}
                     <div className="flex items-center gap-3 border-t pt-2">
                       {q?.error ? (
-                        <span className="text-[10px] text-destructive">
+                        <span className="text-2xs text-destructive">
                           {t("quota.fetchFailedPrefix", {
                             p0: translate(`quota.error.${q.error}`, { defaultValue: q.error }),
                           })}
@@ -540,7 +531,7 @@ export function AccountsView() {
                           />
                         </>
                       ) : (
-                        <span className="text-[10px] text-muted-foreground">
+                        <span className="text-2xs text-muted-foreground">
                           {quotaLoading ? t("accounts.loadingUsage") : t("accounts.noBillingData")}
                         </span>
                       )}
@@ -649,12 +640,12 @@ export function AccountsView() {
               </>
             )}
             {loginStatus === "success" && (
-              <p className="text-center text-sm text-emerald-600 dark:text-emerald-400">
+              <p className="text-center text-sm text-signal-success">
                 {t("accounts.loginSuccessMessage")}
               </p>
             )}
             {loginStatus === "denied" && (
-              <p className="text-center text-sm text-amber-600 dark:text-amber-400">
+              <p className="text-center text-sm text-signal-warn">
                 {t("accounts.loginDenied")}
               </p>
             )}
