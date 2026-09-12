@@ -9,6 +9,8 @@ use super::log;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    // 注意：旧版配置字段 `api_key` 已拆分为「CC 账户列表」与「本地转发 key」两部分，
+    // 由 `migrate_legacy` 在反序列化后迁移，详见该函数。
     /// 本地代理监听端口。
     pub port: u16,
     /// 监听地址（IP，如 0.0.0.0 / 127.0.0.1）。
@@ -37,8 +39,10 @@ pub struct Config {
     pub usage_enabled: bool,
     /// 用量明细保留天数，0 表示永久保留；超过部分在记录时自动清理。
     pub usage_retention_days: u32,
-    /// 本地明文保存的 API Key（user_ 开头），随配置文件读写。
-    pub api_key: String,
+    /// CC 上游账户 key 列表（user_ 开头），请求按轮询切换使用；可空但启动代理需至少一个。
+    pub cc_accounts: Vec<String>,
+    /// 本地转发鉴权 key（sk_ 开头，仅本机服务鉴权用，不发给 CC 上游）。
+    pub local_api_key: String,
     /// 无 system prompt 时是否发空格占位（阻止 CC 上游注入默认提示词）。
     pub empty_system_placeholder: bool,
     /// 是否启用 ZDR 模式（向 CC 上游发送 x-cmd-zdr: 1 请求头）。
@@ -69,7 +73,8 @@ impl Default for Config {
             close_to_tray: true,
             usage_enabled: true,
             usage_retention_days: 0,
-            api_key: String::new(),
+            cc_accounts: Vec::new(),
+            local_api_key: String::new(),
             empty_system_placeholder: true,
             zdr: false,
             max_body_mb: 10,
@@ -103,11 +108,33 @@ impl Config {
     /// 用于 SQLite 首次迁移，避免环境变量值被写入设置表。
     pub fn load_file(path: &Path) -> Config {
         match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str::<Config>(&text).unwrap_or_else(|e| {
-                log::warn(&format!("配置解析失败，使用默认值: {e}"));
-                Config::default()
-            }),
+            Ok(text) => {
+                let v: serde_json::Value =
+                    serde_json::from_str(&text).unwrap_or_else(|e| {
+                        log::warn(&format!("配置解析失败，使用默认值: {e}"));
+                        serde_json::json!({})
+                    });
+                let legacy = v
+                    .get("api_key")
+                    .and_then(|k| k.as_str())
+                    .map(|s| s.to_string());
+                let mut cfg: Config = serde_json::from_value(v).unwrap_or_default();
+                cfg.migrate_legacy(legacy.as_deref());
+                cfg
+            }
             Err(_) => Config::default(),
+        }
+    }
+
+    /// 兼容旧版配置迁移：旧字段 `api_key`（单个 user_ key）已拆分为账户列表 + 本地 key。
+    ///
+    /// 若账户列表为空且旧 key 非空，则把旧 key 作为首个 CC 账户迁入；本地 key 不迁移
+    /// （由 UI 随机生成）。调用方（settings::load_config / load_file）在反序列化后调用。
+    pub fn migrate_legacy(&mut self, legacy_api_key: Option<&str>) {
+        if self.cc_accounts.is_empty() {
+            if let Some(k) = legacy_api_key.filter(|k| !k.trim().is_empty()) {
+                self.cc_accounts.push(k.trim().to_string());
+            }
         }
     }
 

@@ -18,6 +18,10 @@ export interface Config {
   close_to_tray: boolean;
   usage_enabled: boolean;
   usage_retention_days: number;
+  /** CC 上游账户 key 列表（user_ 开头），请求按轮询切换使用。 */
+  cc_accounts: string[];
+  /** 本地转发鉴权 key（sk- 开头，仅本机服务鉴权用，不发给 CC 上游）。 */
+  local_api_key: string;
   /** 无 system prompt 时发空格占位（阻止上游注入默认提示词）。 */
   empty_system_placeholder: boolean;
   /** ZDR 模式：向 CC 上游发送 x-cmd-zdr: 1 请求头。 */
@@ -70,9 +74,15 @@ export interface RequestInfo {
   last_event: string;
 }
 
-/** API Key 的存储状态：是否已保存 Key 及掩码后的展示文本。 */
+/** 本地转发 Key 的存储状态：是否已生成及掩码后的展示文本。 */
 export interface ApiKeyState {
   has_key: boolean;
+  masked: string;
+}
+
+/** CC 账户列表条目（仅掩码展示 + 下标，不含完整 Key）。 */
+export interface AccountEntry {
+  index: number;
   masked: string;
 }
 
@@ -143,10 +153,15 @@ export const api = {
   // 配置读写：保存时返回是否需要重启代理生效
   configGet: () => invoke<Config>("config_get"),
   configSave: (config: Config) => invoke<{ needs_restart: boolean }>("config_save", { config }),
-  // API Key 管理：读取（掩码）/ 保存 / 删除
-  apiKeyGet: () => invoke<ApiKeyState>("api_key_get"),
-  apiKeySet: (key: string) => invoke<void>("api_key_set", { key }),
-  apiKeyDelete: () => invoke<void>("api_key_delete"),
+  // 本地转发 Key：读取（掩码）/ 保存 / 随机生成 / 删除
+  localKeyGet: () => invoke<ApiKeyState>("local_key_get"),
+  localKeySet: (key: string) => invoke<void>("local_key_set", { key }),
+  localKeyGenerate: () => invoke<{ key: string; masked: string }>("local_key_generate"),
+  localKeyDelete: () => invoke<void>("local_key_delete"),
+  // CC 账户：列表（掩码）/ 新增 / 按下标删除
+  accountList: () => invoke<{ accounts: AccountEntry[] }>("account_list"),
+  accountAdd: (key: string) => invoke<void>("account_add", { key }),
+  accountRemove: (index: number) => invoke<void>("account_remove", { index }),
   // 模型列表：force 为 true 时忽略缓存强制向上游拉取；fallback 表示是否使用兜底列表
   modelsGet: (force = false) =>
     invoke<{ data: ModelInfo[]; fallback: boolean }>("models_get", { force }),

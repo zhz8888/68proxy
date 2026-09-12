@@ -40,12 +40,12 @@ const TIMEOUT_REDUCE_CONTEXT_THRESHOLD: u32 = 3;
 /// Anthropic 流式静默超过该时长时主动发 ping 事件保活（覆盖上游排队/长思考窗口）。
 const ANTHROPIC_PING_IDLE: Duration = Duration::from_secs(15);
 
-/// 合法 API Key 的正则（OnceLock 惰性编译一次，避免每次请求重复构建）。
+/// 合法本地转发 Key 的正则（OnceLock 惰性编译一次，避免每次请求重复构建）。
 static KEY_RE: OnceLock<regex::Regex> = OnceLock::new();
 
-/// 获取已编译的 API Key 匹配正则 `user_[A-Za-z0-9_-]+`。
+/// 获取已编译的本地转发 Key 匹配正则 `sk-[A-Za-z0-9_-]+`。
 fn key_re() -> &'static regex::Regex {
-    KEY_RE.get_or_init(|| regex::Regex::new(r"user_[A-Za-z0-9_-]+").unwrap())
+    KEY_RE.get_or_init(|| regex::Regex::new(r"sk-[A-Za-z0-9_-]+").unwrap())
 }
 
 /// 请求事件转发器（Tauri 注入，供前端中继轨道展示）。
@@ -66,7 +66,7 @@ fn emit_request(info: &RequestInfo) {
     }
 }
 
-/// 从请求头提取合法 API Key（user_ 前缀片段）。
+/// 从请求头提取本地转发 Key（sk_ 前缀片段）。
 ///
 /// 优先 `Authorization: Bearer <key>`（OpenAI SDK 风格），回退 `x-api-key` 头
 /// （Anthropic SDK 风格）；无效返回 None。
@@ -487,24 +487,70 @@ async fn read_json_body(
     serde_json::from_slice(&bytes).map_err(|_| (400, "invalid_request_error", "Invalid JSON body"))
 }
 
-/// 鉴权：优先取请求头中的 API Key，其次用本地缓存的 Key；都没有则返回 401 响应。
-async fn api_key_or_401(headers: &HeaderMap) -> Result<String, axum::response::Response> {
-    if let Some(k) = extract_api_key(headers) {
-        return Ok(k);
+/// 鉴权并选出本次转发的 CC 账户 key。
+///
+/// 流程：
+/// 1. 从请求头提取本地转发 Key（sk- 开头），必须与本地已生成的 key 一致，否则 401；
+///    未配置本地 key 时同样 401（提示先生成）。
+/// 2. 鉴权通过后从 CC 账户列表按轮询取下一个账户 key 返回（供上游转发）。
+///    未配置任何账户时 401（提示先添加账户）。
+async fn api_key_or_401(
+    st: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, axum::response::Response> {
+    // 本地 key 必须已生成，且请求头携带的必须与本地一致（sk- 开头，防止任意 sk- 直过）
+    let local = crate::credentials::cached_local_key();
+    let Some(expected) = local else {
+        return Err(json_response(
+            401,
+            json!({
+                "error": {
+                    "message": "本地转发 Key 未生成，请先在「配置 → 凭据」随机生成 sk- 开头的 Key",
+                    "type": "auth_error",
+                }
+            }),
+            None,
+        ));
+    };
+    let Some(sent) = extract_api_key(headers) else {
+        return Err(json_response(
+            401,
+            json!({
+                "error": {
+                    "message": "Missing API key. Send in Authorization: Bearer <key> header",
+                    "type": "auth_error",
+                }
+            }),
+            None,
+        ));
+    };
+    if sent != expected {
+        return Err(json_response(
+            401,
+            json!({
+                "error": {
+                    "message": "Invalid API key",
+                    "type": "auth_error",
+                }
+            }),
+            None,
+        ));
     }
-    if let Some(k) = crate::credentials::cached_key() {
-        return Ok(k);
+
+    // 鉴权通过：轮询取下一个 CC 账户 key 供上游转发
+    match crate::credentials::next_account(st) {
+        Some(k) => Ok(k),
+        None => Err(json_response(
+            401,
+            json!({
+                "error": {
+                    "message": "未配置 CC 账户，请先在「配置 → 凭据」添加 user_ 开头的账户 Key",
+                    "type": "auth_error",
+                }
+            }),
+            None,
+        )),
     }
-    Err(json_response(
-        401,
-        json!({
-            "error": {
-                "message": "Missing API key. Send in Authorization: Bearer <key> header",
-                "type": "auth_error",
-            }
-        }),
-        None,
-    ))
 }
 
 // ── OpenAI /v1/chat/completions ─────────────────────────
@@ -527,7 +573,7 @@ async fn chat_completions(
             )
         }
     };
-    let api_key = match api_key_or_401(&headers).await {
+    let api_key = match api_key_or_401(&st, &headers).await {
         Ok(k) => k,
         Err(r) => return r,
     };
@@ -613,7 +659,7 @@ async fn messages(
             )
         }
     };
-    let api_key = match api_key_or_401(&headers).await {
+    let api_key = match api_key_or_401(&st, &headers).await {
         Ok(k) => k,
         Err(_) => {
             return json_response(
@@ -716,7 +762,7 @@ async fn responses(
             )
         }
     };
-    let api_key = match api_key_or_401(&headers).await {
+    let api_key = match api_key_or_401(&st, &headers).await {
         Ok(k) => k,
         Err(r) => return r,
     };
@@ -1518,14 +1564,15 @@ fn parse_ndjson_line(
 
 // ── 其他路由 ──────────────────────────────────────────
 
-/// GET /v1/models：返回模型列表（OpenAI list 格式），Key 缺失时仍可回退硬编码列表。
+/// GET /v1/models：返回模型列表（OpenAI list 格式），用第一个 CC 账户拉取；
+/// 无账户或拉取失败时回退硬编码列表。
 async fn models(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let api_key = extract_api_key(&headers)
-        .or_else(crate::credentials::cached_key);
-    let (list, _) = cc_client::fetch_models(&st, api_key.as_deref()).await;
+    let _ = headers;
+    let account_key = crate::credentials::accounts_from_state(&st).first().cloned();
+    let (list, _) = cc_client::fetch_models(&st, account_key.as_deref()).await;
     Json(json!({
         "object": "list",
         "data": list

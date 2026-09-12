@@ -1,5 +1,18 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Download, Eye, EyeOff, KeyRound, RefreshCw, Save, Trash2, XCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  Download,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Plus,
+  RefreshCw,
+  Save,
+  Trash2,
+  UserRound,
+  Wand2,
+  XCircle,
+} from "lucide-react";
 import { toast } from "sonner";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
@@ -16,7 +29,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { api, type ApiKeyState, type Config } from "@/lib/api";
+import { api, type AccountEntry, type ApiKeyState, type Config } from "@/lib/api";
 
 // 配置项默认值，字段与后端 config.json 一一对应
 const DEFAULTS: Config = {
@@ -34,6 +47,8 @@ const DEFAULTS: Config = {
   close_to_tray: true,
   usage_enabled: true,
   usage_retention_days: 0,
+  cc_accounts: [],
+  local_api_key: "",
   empty_system_placeholder: true,
   zdr: false,
   max_body_mb: 10,
@@ -89,20 +104,25 @@ function Field({
 export function ConfigView() {
   const [cfg, setCfg] = useState<Config>(DEFAULTS);
   const [loaded, setLoaded] = useState(false);
-  const [apiKey, setApiKey] = useState<ApiKeyState>({ has_key: false, masked: "" });
-  const [keyInput, setKeyInput] = useState("");
-  const [showKey, setShowKey] = useState(false);
+  // 本地转发 Key（sk-）与 CC 账户（user_）的凭据状态
+  const [localKey, setLocalKey] = useState<ApiKeyState>({ has_key: false, masked: "" });
+  const [localKeyInput, setLocalKeyInput] = useState("");
+  const [showLocalKey, setShowLocalKey] = useState(false);
+  const [accounts, setAccounts] = useState<AccountEntry[]>([]);
+  const [accountInput, setAccountInput] = useState("");
+  const [showAccountInput, setShowAccountInput] = useState(false);
   const [portInUse, setPortInUse] = useState<{ in_use: boolean; pid: number | null }>({
     in_use: false,
     pid: null,
   });
   const [freeing, setFreeing] = useState(false);
 
-  // 挂载时并行加载配置与 API Key 状态，loaded 用于区分“初始加载完成”
+  // 挂载时并行加载配置、本地 Key 与账户列表，loaded 用于区分“初始加载完成”
   useEffect(() => {
-    Promise.all([api.configGet(), api.apiKeyGet()]).then(([c, k]) => {
+    Promise.all([api.configGet(), api.localKeyGet(), api.accountList()]).then(([c, k, a]) => {
       setCfg(c);
-      setApiKey(k);
+      setLocalKey(k);
+      setAccounts(a.accounts);
       setLoaded(true);
     });
   }, []);
@@ -158,32 +178,76 @@ export function ConfigView() {
     return () => clearTimeout(t);
   }, [cfg, loaded]);
 
-  /** 校验并保存 API Key（必须以 user_ 开头）到本地配置文件。 */
-  async function saveKey() {
-    if (!keyInput.trim()) {
-      toast.error("请输入 API Key");
+  /** 校验并保存本地转发 Key（必须以 sk- 开头）。 */
+  async function saveLocalKey() {
+    if (!localKeyInput.trim()) {
+      toast.error("请输入本地转发 Key");
       return;
     }
-    if (!keyInput.startsWith("user_")) {
-      toast.error("API Key 必须以 user_ 开头");
+    if (!localKeyInput.trim().startsWith("sk-")) {
+      toast.error("本地转发 Key 必须以 sk- 开头");
       return;
     }
     try {
-      await api.apiKeySet(keyInput.trim());
-      setApiKey(await api.apiKeyGet());
-      setKeyInput("");
-      toast.success("API Key 已保存到本地配置文件");
+      await api.localKeySet(localKeyInput.trim());
+      setLocalKey(await api.localKeyGet());
+      setLocalKeyInput("");
+      toast.success("本地转发 Key 已保存");
     } catch (e) {
       toast.error(String(e));
     }
   }
 
-  /** 删除已保存的 API Key 并刷新凭据状态。 */
-  async function deleteKey() {
+  /** 随机生成一个新的本地转发 Key 并保存。 */
+  async function generateLocalKey() {
     try {
-      await api.apiKeyDelete();
-      setApiKey({ has_key: false, masked: "" });
-      toast.success("API Key 已删除");
+      const r = await api.localKeyGenerate();
+      setLocalKey({ has_key: true, masked: r.masked });
+      setLocalKeyInput("");
+      toast.success("已随机生成新的本地转发 Key");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }
+
+  /** 删除已保存的本地转发 Key 并刷新状态。 */
+  async function deleteLocalKey() {
+    try {
+      await api.localKeyDelete();
+      setLocalKey({ has_key: false, masked: "" });
+      toast.success("本地转发 Key 已删除");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }
+
+  /** 校验并新增一个 CC 账户 Key（必须以 user_ 开头）。 */
+  async function addAccount() {
+    if (!accountInput.trim()) {
+      toast.error("请输入 CC 账户 Key");
+      return;
+    }
+    if (!accountInput.trim().startsWith("user_")) {
+      toast.error("CC 账户 Key 必须以 user_ 开头");
+      return;
+    }
+    try {
+      await api.accountAdd(accountInput.trim());
+      setAccounts((await api.accountList()).accounts);
+      setAccountInput("");
+      setShowAccountInput(false);
+      toast.success("CC 账户已添加");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  }
+
+  /** 按下标删除一个 CC 账户并刷新列表。 */
+  async function removeAccount(index: number) {
+    try {
+      await api.accountRemove(index);
+      setAccounts((await api.accountList()).accounts);
+      toast.success("CC 账户已移除");
     } catch (e) {
       toast.error(String(e));
     }
@@ -342,37 +406,83 @@ export function ConfigView() {
           </Section>
         </div>
 
-        <Section title="凭据" desc="API Key 以明文保存在本地配置文件（config.json）中，请勿分享给他人">
+        <Section title="本地转发 Key" desc="客户端接入本地代理时统一填写的 sk- 开头 Key；该 Key 只用于本机服务鉴权，不会发送给 CC 上游">
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <KeyRound className="h-3.5 w-3.5" />
-              {apiKey.has_key ? `已保存：${apiKey.masked}` : "尚未保存 API Key（也可每次请求时通过 Authorization 头传入）"}
+              {localKey.has_key ? `当前：${localKey.masked}` : "尚未生成本地转发 Key（客户端将无法接入）"}
             </div>
             <div className="flex gap-2">
               <div className="relative flex-1">
                 <Input
-                  type={showKey ? "text" : "password"}
-                  value={keyInput}
-                  onChange={(e) => setKeyInput(e.target.value)}
-                  placeholder="user_xxxxxxxxx"
+                  type={showLocalKey ? "text" : "password"}
+                  value={localKeyInput}
+                  onChange={(e) => setLocalKeyInput(e.target.value)}
+                  placeholder="sk-xxxxxxxx…"
                   className="pr-9 font-mono"
                 />
                 <button
                   type="button"
-                  onClick={() => setShowKey((v) => !v)}
+                  onClick={() => setShowLocalKey((v) => !v)}
                   className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                 >
-                  {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  {showLocalKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
-              <Button onClick={saveKey}>保存 Key</Button>
-              {apiKey.has_key && (
-                <Button variant="ghost" onClick={deleteKey}>
+              <Button onClick={saveLocalKey}>保存</Button>
+              <Button variant="outline" onClick={generateLocalKey}>
+                <Wand2 />
+                随机生成
+              </Button>
+              {localKey.has_key && (
+                <Button variant="ghost" onClick={deleteLocalKey}>
                   <Trash2 />
                   删除
                 </Button>
               )}
             </div>
+          </div>
+        </Section>
+
+        <Section title="CC 账户" desc="user_ 开头的 Command Code 上游 Key；可配置多个，请求按轮询自动切换，分散单账户限流/配额压力">
+          <div className="space-y-3">
+            {accounts.length === 0 ? (
+              <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                <UserRound className="h-3.5 w-3.5" />
+                尚未添加 CC 账户（需至少一个才能启动代理）
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {accounts.map((a) => (
+                  <li key={a.index} className="flex items-center justify-between rounded-md border px-3 py-2">
+                    <span className="font-mono text-xs text-muted-foreground">{a.masked}</span>
+                    <Button variant="ghost" size="sm" onClick={() => removeAccount(a.index)}>
+                      <Trash2 />
+                      移除
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {showAccountInput ? (
+              <div className="flex gap-2">
+                <Input
+                  value={accountInput}
+                  onChange={(e) => setAccountInput(e.target.value)}
+                  placeholder="user_xxxxxxxxx"
+                  className="font-mono"
+                />
+                <Button onClick={addAccount}>添加</Button>
+                <Button variant="ghost" onClick={() => { setAccountInput(""); setShowAccountInput(false); }}>
+                  取消
+                </Button>
+              </div>
+            ) : (
+              <Button variant="outline" size="sm" onClick={() => setShowAccountInput(true)}>
+                <Plus />
+                添加账户
+              </Button>
+            )}
           </div>
         </Section>
 

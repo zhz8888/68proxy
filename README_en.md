@@ -77,18 +77,17 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
-**Quick connect:** after starting the proxy, configure any OpenAI / Anthropic compatible client:
+**Quick connect:** before starting the proxy, generate a local forwarding Key (`sk-` prefixed) under **Config → Credentials**, and add at least one CC account Key (`user_` prefixed). Then start the proxy and configure any OpenAI / Anthropic compatible client:
 
 ```
 OpenAI-compatible Base URL   http://127.0.0.1:3050/v1
 Anthropic Base URL           http://127.0.0.1:3050
 Model                        deepseek/deepseek-v4-flash etc. (see Models)
-API Key                      any placeholder (e.g. sk-placeholder) — the proxy
-                             reuses the real key saved on this machine;
-                             a user_-prefixed key is also accepted (header wins)
+API Key                      the local forwarding Key (sk- prefixed, see
+                             Config → Credentials); multiple clients can share it
 ```
 
-> The API key is stored in plaintext in the local config file (`config.json`) — visible only on this machine; don't share the config file with others.
+> The local forwarding Key (`sk-`) is only used for local proxy auth and is never sent to the CC upstream. CC account Keys (`user_`) are managed under Config → Credentials; you can add several and requests are rotated across them round-robin. Both are stored in plaintext in the local config file (`config.json`) — visible only on this machine; don't share the config file with others.
 
 <p align="center">
   <img src="./assets/readme/section-tech.svg" width="100%" alt="Tech Stack">

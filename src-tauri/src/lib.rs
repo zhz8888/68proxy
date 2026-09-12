@@ -49,12 +49,14 @@ fn proxy_status(app: AppHandle) -> Value {
     status_value(&app)
 }
 
-/// 读取应用配置。出于安全考虑返回前会清空 api_key 字段（Key 由专用命令管理）。
+/// 读取应用配置。出于安全考虑返回前会清空本地转发 Key 与 CC 账户列表
+/// （均由专用命令管理）。
 #[tauri::command]
 fn config_get(app: AppHandle) -> proxy::config::Config {
     let ctx = app.state::<AppCtx>();
     let mut cfg = ctx.proxy_state.config.read().unwrap().clone();
-    cfg.api_key = String::new();
+    cfg.local_api_key = String::new();
+    cfg.cc_accounts = Vec::new();
     cfg
 }
 
@@ -65,9 +67,11 @@ fn config_get(app: AppHandle) -> proxy::config::Config {
 fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Value, String> {
     config.validate()?;
     let ctx = app.state::<AppCtx>();
-    // API Key 由 api_key_set / api_key_delete 管理，config_save 不接收该字段，保存前保留原值
+    // 本地转发 Key 与 CC 账户由 local_key_* / account_* 管理，config_save 不接收，
+    // 保存前保留原值
     let stored = ctx.proxy_state.config.read().unwrap().clone();
-    config.api_key = stored.api_key;
+    config.local_api_key = stored.local_api_key;
+    config.cc_accounts = stored.cc_accounts;
     // 主存 SQLite settings 表
     {
         let guard = ctx.proxy_state.usage.lock().unwrap();
@@ -86,14 +90,14 @@ fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Valu
     Ok(json!({ "needs_restart": needs_restart }))
 }
 
-/// 查询 API Key 存储状态：返回是否已保存（has_key）与掩码后的展示文本（masked）。
+/// 查询本地转发 Key 状态：返回是否已生成（has_key）与掩码后的展示文本（masked）。
 #[tauri::command]
-fn api_key_get(app: AppHandle) -> Result<Value, String> {
+fn local_key_get(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
     let key = {
         let guard = ctx.proxy_state.usage.lock().unwrap();
         let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
-        credentials::load_api_key(conn)?
+        credentials::load_local_key(conn)?
     };
     Ok(json!({
         "has_key": key.is_some(),
@@ -101,22 +105,89 @@ fn api_key_get(app: AppHandle) -> Result<Value, String> {
     }))
 }
 
-/// 保存上游 API Key 到设置库并刷新内存缓存。入参为完整的 Key 字符串。
+/// 保存本地转发 Key（sk_ 开头）到设置库并刷新内存缓存；同步内存配置。入参为完整的 Key。
 #[tauri::command]
-fn api_key_set(app: AppHandle, key: String) -> Result<(), String> {
+fn local_key_set(app: AppHandle, key: String) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
-    let guard = ctx.proxy_state.usage.lock().unwrap();
-    let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
-    credentials::save_api_key(conn, &key)
+    {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        credentials::save_local_key(conn, &key)?;
+    }
+    ctx.proxy_state.config.write().unwrap().local_api_key = key.trim().to_string();
+    Ok(())
 }
 
-/// 删除已保存的 API Key（清空设置库字段与内存缓存）。
+/// 随机生成一个新的本地转发 Key（sk- + 32 位随机 hex）并保存，返回掩码展示文本。
 #[tauri::command]
-fn api_key_delete(app: AppHandle) -> Result<(), String> {
+fn local_key_generate(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
-    let guard = ctx.proxy_state.usage.lock().unwrap();
-    let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
-    credentials::delete_api_key(conn)
+    let key = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let key = credentials::generate_local_key();
+        credentials::save_local_key(conn, &key)?;
+        key
+    };
+    ctx.proxy_state.config.write().unwrap().local_api_key = key.clone();
+    Ok(json!({ "key": key, "masked": credentials::mask_key(&key) }))
+}
+
+/// 删除已保存的本地转发 Key（清空设置库字段、内存缓存与内存配置）。
+#[tauri::command]
+fn local_key_delete(app: AppHandle) -> Result<(), String> {
+    let ctx = app.state::<AppCtx>();
+    {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        credentials::delete_local_key(conn)?;
+    }
+    ctx.proxy_state.config.write().unwrap().local_api_key = String::new();
+    Ok(())
+}
+
+/// 查询 CC 账户列表：返回掩码后的展示列表（不含完整 Key），条目带下标供删除。
+#[tauri::command]
+fn account_list(app: AppHandle) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let accounts = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        credentials::load_accounts(conn)?
+    };
+    Ok(json!({
+        "accounts": accounts
+            .iter()
+            .enumerate()
+            .map(|(i, k)| json!({ "index": i, "masked": credentials::mask_key(k) }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+/// 新增一个 CC 账户 Key（user_ 开头），已存在时静默跳过；落库后同步内存配置。
+#[tauri::command]
+fn account_add(app: AppHandle, key: String) -> Result<(), String> {
+    let ctx = app.state::<AppCtx>();
+    let accounts = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        credentials::add_account(conn, &key)?
+    };
+    ctx.proxy_state.config.write().unwrap().cc_accounts = accounts;
+    Ok(())
+}
+
+/// 移除指定下标的 CC 账户（0 起），下标越界时返回错误；落库后同步内存配置。
+#[tauri::command]
+fn account_remove(app: AppHandle, index: usize) -> Result<(), String> {
+    let ctx = app.state::<AppCtx>();
+    let accounts = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        credentials::remove_account_at(conn, index)?
+    };
+    ctx.proxy_state.config.write().unwrap().cc_accounts = accounts;
+    Ok(())
 }
 
 /// 获取可用模型列表。`force` 为 true 时先清空缓存再向上游拉取；
@@ -130,9 +201,9 @@ async fn models_get(app: AppHandle, force: bool) -> Result<Value, String> {
             fetched_at: 0,
         };
     }
-    let (list, fallback) =
-        proxy::cc_client::fetch_models(&ctx.proxy_state, credentials::cached_key().as_deref())
-            .await;
+    let account_key = credentials::accounts_from_state(&ctx.proxy_state).first().cloned();
+    let (list, fallback) = proxy::cc_client::fetch_models(&ctx.proxy_state, account_key.as_deref())
+        .await;
     Ok(json!({ "data": list, "fallback": fallback }))
 }
 
@@ -286,14 +357,12 @@ async fn start_proxy_inner(app: &AppHandle) -> Result<Value, String> {
     if ctx.proxy_state.is_running() {
         return Ok(status_value(app));
     }
-    // 需要已保存的 API Key 才能启动代理
-    let stored_key = {
-        let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
-        credentials::load_api_key(conn).map_err(|e| format!("读取 API Key 失败: {e}"))?
-    };
-    if stored_key.is_none() {
-        return Err("未保存 API Key：请先在「配置 → 凭据」保存 user_ 开头的 Key 后再启动代理".into());
+    // 需要已生成本地转发 Key 且至少一个 CC 账户才能启动代理（与运行时鉴权使用同一内存源）
+    if credentials::cached_local_key().is_none() {
+        return Err("本地转发 Key 未生成：请先在「配置 → 凭据」随机生成 sk- 开头的 Key 后再启动代理".into());
+    }
+    if credentials::accounts_from_state(&ctx.proxy_state).is_empty() {
+        return Err("未配置 CC 账户：请先在「配置 → 凭据」添加至少一个 user_ 开头的账户 Key".into());
     }
     let cfg = ctx.proxy_state.config.read().unwrap().clone();
     cfg.validate()?;
@@ -475,9 +544,13 @@ pub fn run() {
             proxy_status,
             config_get,
             config_save,
-            api_key_get,
-            api_key_set,
-            api_key_delete,
+            local_key_get,
+            local_key_set,
+            local_key_generate,
+            local_key_delete,
+            account_list,
+            account_add,
+            account_remove,
             models_get,
             logs_get,
             logs_clear,
@@ -500,6 +573,8 @@ pub fn run() {
             let usage_conn = proxy::usage::init_usage(&usage_path)?;
             // 首次启动：config.json 存在且 settings 表为空时迁移到 SQLite
             proxy::settings::migrate_from_config(&usage_conn, &config_path)?;
+            // 旧版 api_key 行迁移到 cc_accounts 后清理，避免每次启动重复迁移
+            let _ = proxy::settings::purge_legacy_api_key(&usage_conn);
             // 从 SQLite 加载配置（缺字段走默认），再应用环境变量覆写
             let mut cfg = proxy::settings::load_config(&usage_conn);
             cfg.apply_env();
@@ -544,11 +619,11 @@ pub fn run() {
                 }
             });
 
-            // 预热 API Key 内存缓存（设置库）
+            // 预热本地转发 Key 内存缓存（账户列表随 AppState.config 走，无需预热）
             {
                 let guard = proxy_state.usage.lock().unwrap();
                 if let Some(conn) = guard.as_ref() {
-                    let _ = credentials::load_api_key(conn);
+                    let _ = credentials::load_local_key(conn);
                 }
             }
 

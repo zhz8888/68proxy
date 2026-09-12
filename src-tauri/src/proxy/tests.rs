@@ -21,6 +21,9 @@ use super::server;
 use super::sse::{AnthropicTranslator, OpenAiTranslator, ResponsesTranslator};
 use super::state::AppState;
 
+/// 集成测试固定使用的本地转发 Key（与 start_proxy_impl 注入的设置库一致）。
+const TEST_LOCAL_KEY: &str = "sk-test-local-key-123";
+
 // ── 单元测试：请求转换 ────────────────────────────────
 
 /// 验证基础 OpenAI 请求转换出的 CC 信封：model/system 提取、user 消息转 text parts、
@@ -570,32 +573,32 @@ fn error_mapping() {
     assert_eq!(s, 502);
 }
 
-/// 验证 API Key 提取：无 Authorization 头返回 None；Bearer 值中匹配 user_ 前缀片段；
-/// 非 user_ 前缀（如 sk-）的 Key 不被采信。
+/// 验证本地转发 Key 提取：无 Authorization 头返回 None；Bearer 值中匹配 sk- 前缀片段；
+/// 非 sk- 前缀（如 user_）的 Key 不被采信。
 #[test]
 fn api_key_extraction() {
     let mut headers = HeaderMap::new();
     assert!(server::extract_api_key(&headers).is_none());
     headers.insert(
         axum::http::header::AUTHORIZATION,
-        "Bearer token_user_abc123_def".parse().unwrap(),
+        "Bearer token_sk-abc123_def".parse().unwrap(),
     );
-    assert_eq!(server::extract_api_key(&headers).unwrap(), "user_abc123_def");
+    assert_eq!(server::extract_api_key(&headers).unwrap(), "sk-abc123_def");
     headers.insert(
         axum::http::header::AUTHORIZATION,
-        "Bearer sk-abc123".parse().unwrap(),
+        "Bearer user_abc123".parse().unwrap(),
     );
     assert!(server::extract_api_key(&headers).is_none());
 }
 
-/// 验证 API Key 提取的 x-api-key 回退（Anthropic SDK 风格）：无 Authorization 头时
-/// 从 x-api-key 提取 user_ 前缀片段；无效则返回 None。
+/// 验证本地转发 Key 提取的 x-api-key 回退（Anthropic SDK 风格）：无 Authorization 头时
+/// 从 x-api-key 提取 sk- 前缀片段；无效则返回 None。
 #[test]
 fn api_key_extraction_x_api_key_fallback() {
     let mut headers = HeaderMap::new();
-    headers.insert("x-api-key", "Bearer token_user_xyz_789".parse().unwrap());
-    assert_eq!(server::extract_api_key(&headers).unwrap(), "user_xyz_789");
-    headers.insert("x-api-key", "sk-abc".parse().unwrap());
+    headers.insert("x-api-key", "Bearer token_sk-xyz_789".parse().unwrap());
+    assert_eq!(server::extract_api_key(&headers).unwrap(), "sk-xyz_789");
+    headers.insert("x-api-key", "user_abc".parse().unwrap());
     assert!(server::extract_api_key(&headers).is_none());
 }
 
@@ -807,6 +810,18 @@ async fn start_proxy_impl(
     };
     adjust(&mut cfg);
     let state = AppState::new(cfg);
+
+    // 注入内存设置库：生成本地转发 Key（sk-）并配置一个 CC 账户，使鉴权路径可用
+    {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        super::settings::init_settings_on(&conn).unwrap();
+        crate::credentials::save_local_key(&conn, TEST_LOCAL_KEY).unwrap();
+        crate::credentials::add_account(&conn, "user_test_account").unwrap();
+        // 账户列表以 AppState.config 为内存真相源，需同步
+        state.config.write().unwrap().cc_accounts = vec!["user_test_account".into()];
+        *state.usage.lock().unwrap() = Some(conn);
+    }
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -846,7 +861,7 @@ async fn max_inflight_caps_concurrency() {
     let slow_handle = tokio::spawn(async move {
         client2
             .post(format!("{slow_base}/v1/chat/completions"))
-            .header("Authorization", "Bearer user_test_key")
+            .header("Authorization", "Bearer sk-test-local-key-123")
             .json(&json!({
                 "model": "slow",
                 "messages": [{ "role": "user", "content": "hi" }],
@@ -861,7 +876,7 @@ async fn max_inflight_caps_concurrency() {
     // 第二个业务请求超限 → 503
     let second = client
         .post(format!("{base}/v1/chat/completions"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "deepseek/deepseek-v4-flash",
             "messages": [{ "role": "user", "content": "hi" }],
@@ -888,7 +903,7 @@ async fn chat_completions_nonstream() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/chat/completions"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "deepseek/deepseek-v4-flash",
             "messages": [{ "role": "user", "content": "hi" }],
@@ -911,7 +926,7 @@ async fn chat_completions_streaming() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/chat/completions"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "deepseek/deepseek-v4-flash",
             "messages": [{ "role": "user", "content": "hi" }],
@@ -936,7 +951,7 @@ async fn chat_completions_zero_output_returns_429() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/chat/completions"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "zero-output",
             "messages": [{ "role": "user", "content": "hi" }],
@@ -958,7 +973,7 @@ async fn upstream_error_mapped() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/chat/completions"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "upstream-error",
             "messages": [{ "role": "user", "content": "hi" }],
@@ -984,7 +999,7 @@ async fn empty_system_placeholder_and_zdr_header() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/chat/completions"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "deepseek/deepseek-v4-flash",
             "messages": [{ "role": "user", "content": "hi" }],
@@ -1012,7 +1027,7 @@ async fn models_and_health_and_401() {
 
     let res = client
         .get(format!("{base}/v1/models"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .send()
         .await
         .unwrap();
@@ -1046,7 +1061,7 @@ async fn responses_previous_response_id_rejected() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/responses"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "gpt-5-codex",
             "previous_response_id": "resp_prev",
@@ -1070,7 +1085,7 @@ async fn responses_nonstream() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/responses"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "gpt-5-codex",
             "instructions": "你是助手",
@@ -1099,7 +1114,7 @@ async fn responses_streaming() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/responses"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "gpt-5-codex",
             "input": [{ "type": "message", "role": "user", "content": "hi" }],
@@ -1126,7 +1141,7 @@ async fn responses_zero_output_returns_429() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/responses"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "zero-output",
             "input": "hi",
@@ -1149,7 +1164,7 @@ async fn anthropic_messages_nonstream() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/messages"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "claude-sonnet-4-6",
             "max_tokens": 1000,
@@ -1175,7 +1190,7 @@ async fn anthropic_nonstream_content_without_usage() {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/messages"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "no-usage",
             "max_tokens": 1000,
@@ -1197,15 +1212,18 @@ async fn anthropic_nonstream_content_without_usage() {
 #[tokio::test]
 async fn usage_recorded_through_proxy() {
     let (base, state) = start_proxy().await;
-    // 注入内存统计库
+    // 注入内存统计库（连同设置表：本地 Key + CC 账户，保证鉴权路径可用）
     let conn = rusqlite::Connection::open_in_memory().unwrap();
+    super::settings::init_settings_on(&conn).unwrap();
     super::usage::init_usage_on(&conn).unwrap();
+    crate::credentials::save_local_key(&conn, TEST_LOCAL_KEY).unwrap();
+    crate::credentials::add_account(&conn, "user_test_account").unwrap();
     *state.usage.lock().unwrap() = Some(conn);
 
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/chat/completions"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "deepseek/deepseek-v4-flash",
             "messages": [{ "role": "user", "content": "hi" }],
@@ -1237,13 +1255,16 @@ async fn usage_recorded_through_proxy() {
 async fn zero_output_not_recorded() {
     let (base, state) = start_proxy().await;
     let conn = rusqlite::Connection::open_in_memory().unwrap();
+    super::settings::init_settings_on(&conn).unwrap();
     super::usage::init_usage_on(&conn).unwrap();
+    crate::credentials::save_local_key(&conn, TEST_LOCAL_KEY).unwrap();
+    crate::credentials::add_account(&conn, "user_test_account").unwrap();
     *state.usage.lock().unwrap() = Some(conn);
 
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{base}/v1/chat/completions"))
-        .header("Authorization", "Bearer user_test_key")
+        .header("Authorization", "Bearer sk-test-local-key-123")
         .json(&json!({
             "model": "zero-output",
             "messages": [{ "role": "user", "content": "hi" }],

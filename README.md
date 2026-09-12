@@ -15,7 +15,7 @@
 
 > 本仓库为 [evanfu0110/68proxy](https://github.com/evanfu0110/68proxy) 的个人 fork，在原版基础上持续维护与增强。
 
-**68PROXY** 是一款开箱即用的本地**反向代理 + 协议转换网关**：作为客户端与 Command Code 之间的一层中转，它把请求改写成 CC CLI 信封格式并代理至上游，同时对外暴露 OpenAI Chat Completions / Responses 与 Anthropic Messages 兼容接口——让 Cursor、OpenCode、Cherry Studio、Codex CLI 以及自研工具无需任何 SDK 适配即可直接接入。API Key 明文保存在本地配置文件中，一次配置、全局复用。
+**68PROXY** 是一款开箱即用的本地**反向代理 + 协议转换网关**：作为客户端与 Command Code 之间的一层中转，它把请求改写成 CC CLI 信封格式并代理至上游，同时对外暴露 OpenAI Chat Completions / Responses 与 Anthropic Messages 兼容接口——让 Cursor、OpenCode、Cherry Studio、Codex CLI 以及自研工具无需任何 SDK 适配即可直接接入。支持多 CC 账户按轮询负载均衡，本地转发 Key（`sk-`）与 CC 账户 Key（`user_`）分离管理，一次配置、全局复用。
 
 ---
 
@@ -44,7 +44,7 @@
 | 📦 **模型列表** | 从 Provider API 动态拉取模型（失败自动回退内置 30 个模型），展示厂商标识，支持搜索与一键复制模型 ID |
 | 🔌 **工具接入** | 输入目标工具名与模型，自动生成接入提示词，让 AI 替你完成 Cursor / OpenCode / Cherry Studio 等工具的配置；协议不支持时自动回复「不支持」，附移除接入的提示词 |
 | 🐞 **调试日志** | 内存环形日志 + 实时推送，支持级别过滤、关键词搜索、自动滚动与一键清空，可导出最近 1000 条 |
-| ⚙️ **配置** | 端口 / 监听地址（含端口占用检测与一键释放）、模型来源与刷新间隔、启动行为（自动运行 / 开机自启 / 托盘）、日志级别、token 用量统计开关与保留天数、API Key 明文存储，改动自动保存；另有「空 system 占位符」与「ZDR 模式」两个 CC 上游调用行为开关 |
+| ⚙️ **配置** | 端口 / 监听地址（含端口占用检测与一键释放）、模型来源与刷新间隔、启动行为（自动运行 / 开机自启 / 托盘）、日志级别、token 用量统计开关与保留天数；凭据区分「本地转发 Key」（`sk-`，可一键随机生成）与「CC 账户」（`user_`，支持多个、按轮询自动切换），改动自动保存；另有「空 system 占位符」与「ZDR 模式」两个 CC 上游调用行为开关 |
 | 🎛️ **系统托盘** | 最小化到托盘运行，托盘菜单可显示窗口、启动 / 停止 / 重启代理与退出 |
 
 <p align="center">
@@ -77,19 +77,18 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
-**快速接入**：启动代理后，在任意 OpenAI / Anthropic 兼容客户端中配置：
+**快速接入**：启动代理前，先在「配置 → 凭据」随机生成一个本地转发 Key（`sk-` 开头），并添加至少一个 CC 账户 Key（`user_` 开头）。然后启动代理，在任意 OpenAI / Anthropic 兼容客户端中配置：
 
 ```
 OpenAI 兼容 Base URL   http://127.0.0.1:3050/v1   （含 /v1/responses，
                                                    Codex CLI 等 Responses 客户端同样适用）
 Anthropic Base URL     http://127.0.0.1:3050
 模型                   deepseek/deepseek-v4-flash 等（见「模型列表」）
-API Key                任意占位符即可（如 sk-placeholder），
-                       代理会自动使用本机已保存的真实 Key；也可传 user_ 开头
-                       的 Key（请求头优先）
+API Key                本地转发 Key（sk- 开头，见「配置 → 凭据」），
+                       配置多个客户端可共用同一个
 ```
 
-> API Key 明文保存在本地配置文件（`config.json`）中，仅本机可见；请勿将配置文件分享给他人。
+> 本地转发 Key（`sk-`）只用于本地代理鉴权，不会发送给 CC 上游；CC 账户 Key（`user_`）在「配置 → 凭据」中管理，可配置多个，请求按轮询自动切换。两类 Key 均明文保存在本地配置文件（`config.json`）中，仅本机可见；请勿将配置文件分享给他人。
 
 <p align="center">
   <img src="./assets/readme/section-tech.svg" width="100%" alt="技术栈 Tech Stack">
@@ -115,7 +114,7 @@ API Key                任意占位符即可（如 sk-placeholder），
 ├── src-tauri/
 │   ├── src/
 │   │   ├── lib.rs            # Tauri 命令、系统托盘、生命周期
-│   │   ├── credentials.rs    # API Key 明文存取（本地配置文件）
+│   │   ├── credentials.rs    # 凭据管理（本地 sk- Key + CC 账户轮询）
 │   │   └── proxy/            # Rust 反向代理核心
 │   │       ├── server.rs     # axum 路由，流式 / 非流式转发
 │   │       ├── convert.rs    # OpenAI / Responses / Anthropic ↔ CC 协议转换

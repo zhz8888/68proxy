@@ -43,6 +43,8 @@ pub fn save_config(conn: &Connection, cfg: &Config) -> Result<(), String> {
 }
 
 /// 从 settings 表读取配置；表为空或某字段缺失时由 `#[serde(default)]` 兜底。
+///
+/// 兼容旧版：若表内仍存在旧字段 `api_key` 的行，读取后作为首个 CC 账户迁入。
 pub fn load_config(conn: &Connection) -> Config {
     let mut map = Map::new();
     let stmt = conn.prepare("SELECT key, value FROM settings");
@@ -60,7 +62,22 @@ pub fn load_config(conn: &Connection) -> Config {
         }
         Err(e) => log::warn(&format!("读取设置表失败: {e}")),
     }
-    serde_json::from_value(Value::Object(map)).unwrap_or_default()
+    let legacy = map
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut cfg: Config = serde_json::from_value(Value::Object(map)).unwrap_or_default();
+    cfg.migrate_legacy(legacy.as_deref());
+    cfg
+}
+
+/// 清理旧版 `api_key` 残留行：旧字段已拆分为 `cc_accounts` + `local_api_key`，
+/// 该行仅用于一次性迁移（见 `load_config`）。调用方应在迁移完成后执行，
+/// 避免每次启动都从旧行重复迁移（例如用户删光账户后旧 key 又「复活」）。
+pub fn purge_legacy_api_key(conn: &Connection) -> Result<(), String> {
+    conn.execute("DELETE FROM settings WHERE key = 'api_key'", [])
+        .map_err(|e| format!("清理旧 api_key 设置失败: {e}"))?;
+    Ok(())
 }
 
 /// 首次启动迁移：settings 表为空且 config.json 存在时，把文件内容导入 settings 表。
@@ -102,14 +119,16 @@ mod tests {
         cfg.port = 3999;
         cfg.host = "127.0.0.1".into();
         cfg.zdr = true;
-        cfg.api_key = "user_test_key".into();
+        cfg.cc_accounts = vec!["user_test_key".into()];
+        cfg.local_api_key = "sk_local_key".into();
         save_config(&conn, &cfg).unwrap();
 
         let got = load_config(&conn);
         assert_eq!(got.port, 3999);
         assert_eq!(got.host, "127.0.0.1");
         assert!(got.zdr);
-        assert_eq!(got.api_key, "user_test_key");
+        assert_eq!(got.cc_accounts, vec!["user_test_key".to_string()]);
+        assert_eq!(got.local_api_key, "sk_local_key");
         // 未显式写入的字段走默认值
         assert_eq!(got.max_inflight, 0);
         assert!(got.usage_enabled);
@@ -132,6 +151,26 @@ mod tests {
             .unwrap();
         assert_eq!(cnt, 1);
         assert_eq!(load_config(&conn).port, 2000);
+    }
+
+    #[test]
+    fn legacy_api_key_migrated_and_purged() {
+        let conn = temp_conn();
+        // 模拟旧版设置表：只有 api_key 一行
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('api_key', '\"user_old_key\"')",
+            [],
+        )
+        .unwrap();
+
+        // 读取时迁移到 cc_accounts
+        let cfg = load_config(&conn);
+        assert_eq!(cfg.cc_accounts, vec!["user_old_key".to_string()]);
+
+        // 清理旧行后，再次读取不会重复迁移（例如用户之后删光账户）
+        purge_legacy_api_key(&conn).unwrap();
+        let cfg = load_config(&conn);
+        assert!(cfg.cc_accounts.is_empty());
     }
 
     #[test]
