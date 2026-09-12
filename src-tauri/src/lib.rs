@@ -298,6 +298,12 @@ async fn models_get(app: AppHandle, force: bool) -> Result<Value, String> {
     Ok(json!({ "data": list, "fallback": fallback }))
 }
 
+/// 获取内置模型计费表（含能力、折扣、免费与闲/忙时信息），供前端模型页展示。
+#[tauri::command]
+fn models_catalog() -> Value {
+    proxy::pricing::catalog_json()
+}
+
 /// 增量拉取内存日志：`limit` 最多返回条数（默认 200），`after_seq` 只返回序号大于它的条目。
 #[tauri::command]
 fn logs_get(limit: Option<usize>, after_seq: Option<u64>) -> Value {
@@ -693,6 +699,7 @@ pub fn run() {
             auth_login_poll,
             auth_login_cancel,
             models_get,
+            models_catalog,
             logs_get,
             logs_clear,
             logs_export,

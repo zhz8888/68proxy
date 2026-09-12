@@ -310,6 +310,7 @@ pub fn record_usage(conn: &Connection, entry: &UsageEntry) -> Result<(), String>
         entry.completion_tokens,
         entry.cached_tokens,
         entry.cache_write_tokens,
+        entry.ts,
     );
     let tx = conn
         .unchecked_transaction()
@@ -434,23 +435,32 @@ pub fn get_stats(conn: &Connection, period: Period) -> Result<UsageStats, String
             };
             let rows = query_rows(conn, cutoff, i64::MAX as u64)?;
             for r in rows {
+                // 成本按明细的 token 规模与发生时刻重新估算，使分档计费与闲/忙时费率生效
+                let cost = super::pricing::calculate_cost(
+                    &r.model,
+                    r.prompt_tokens,
+                    r.completion_tokens,
+                    r.cached_tokens,
+                    r.cache_write_tokens,
+                    r.ts,
+                );
                 total.requests += 1;
                 total.prompt_tokens += r.prompt_tokens;
                 total.completion_tokens += r.completion_tokens;
                 total.cached_tokens += r.cached_tokens;
-                total.cost += r.cost;
+                total.cost += cost;
                 let row = total.by_model.entry(r.model.clone()).or_default();
                 row.requests += 1;
                 row.prompt_tokens += r.prompt_tokens;
                 row.completion_tokens += r.completion_tokens;
                 row.cached_tokens += r.cached_tokens;
-                row.cost += r.cost;
+                row.cost += cost;
                 let row = total.by_endpoint.entry(r.endpoint.clone()).or_default();
                 row.requests += 1;
                 row.prompt_tokens += r.prompt_tokens;
                 row.completion_tokens += r.completion_tokens;
                 row.cached_tokens += r.cached_tokens;
-                row.cost += r.cost;
+                row.cost += cost;
             }
         }
     }
@@ -504,7 +514,14 @@ pub fn get_stats(conn: &Connection, period: Period) -> Result<UsageStats, String
                 b.requests += 1;
                 b.prompt_tokens += r.prompt_tokens;
                 b.completion_tokens += r.completion_tokens;
-                b.cost += r.cost;
+                b.cost += super::pricing::calculate_cost(
+                    &r.model,
+                    r.prompt_tokens,
+                    r.completion_tokens,
+                    r.cached_tokens,
+                    r.cache_write_tokens,
+                    r.ts,
+                );
             }
         }
         last_10_minutes.push(b);
@@ -561,7 +578,14 @@ pub fn get_chart(conn: &Connection, period: Period) -> Result<Vec<ChartPoint>, S
                 if idx < 24 {
                     buckets[idx].0 += r.prompt_tokens;
                     buckets[idx].1 += r.completion_tokens;
-                    buckets[idx].2 += r.cost;
+                    buckets[idx].2 += super::pricing::calculate_cost(
+                        &r.model,
+                        r.prompt_tokens,
+                        r.completion_tokens,
+                        r.cached_tokens,
+                        r.cache_write_tokens,
+                        r.ts,
+                    );
                 }
             }
             Ok(buckets
@@ -581,7 +605,10 @@ pub fn get_chart(conn: &Connection, period: Period) -> Result<Vec<ChartPoint>, S
     }
 }
 
-/// 查询明细行（ts 区间，新在前），供实时聚合用。
+/// 查询明细行（ts 区间，旧在前），供实时聚合用。
+///
+/// 不读取存储的 `cost`：实时统计按明细的 token 与时刻用当前价目重算，
+/// 使分档计费与闲/忙时费率能正确生效。
 struct Row {
     ts: u64,
     model: String,
@@ -589,14 +616,14 @@ struct Row {
     prompt_tokens: u64,
     completion_tokens: u64,
     cached_tokens: u64,
-    cost: f64,
+    cache_write_tokens: u64,
 }
 
 fn query_rows(conn: &Connection, from_ts: u64, to_ts: u64) -> Result<Vec<Row>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT ts, model, endpoint, prompt_tokens, completion_tokens, cached_tokens, cost
-             FROM usage_history WHERE ts >= ?1 AND ts <= ?2 ORDER BY ts DESC",
+            "SELECT ts, model, endpoint, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens
+             FROM usage_history WHERE ts >= ?1 AND ts <= ?2 ORDER BY ts ASC",
         )
         .map_err(|e| format!("查询用量明细失败: {e}"))?;
     let rows = stmt
@@ -608,7 +635,7 @@ fn query_rows(conn: &Connection, from_ts: u64, to_ts: u64) -> Result<Vec<Row>, S
                 prompt_tokens: r.get::<_, i64>(3)? as u64,
                 completion_tokens: r.get::<_, i64>(4)? as u64,
                 cached_tokens: r.get::<_, i64>(5)? as u64,
-                cost: r.get(6)?,
+                cache_write_tokens: r.get::<_, i64>(6)? as u64,
             })
         })
         .map_err(|e| format!("遍历用量明细失败: {e}"))?;

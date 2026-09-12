@@ -154,6 +154,55 @@ export interface UsageChartPoint {
 /** 用量统计时间范围，与后端 Period::parse 的取值一致。 */
 export type UsagePeriod = "today" | "24h" | "7d" | "30d" | "60d" | "all";
 
+/** 模型能力标记（文本输入 / 视觉 / 思考）。 */
+export interface ModelCaps {
+  text: boolean;
+  vision: boolean;
+  reasoning: boolean;
+}
+
+/** 单档费率（$/1M tokens）。 */
+export interface ModelRates {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/** 价格档位：maxContext 为该档输入 token 上限，null 表示最高档无上限。 */
+export interface ModelTier {
+  maxContext: number | null;
+  rates: ModelRates;
+}
+
+/** 闲时/忙时费率信息（仅 DeepSeek 系列）。 */
+export interface ModelTimeOfDay {
+  peak: ModelRates;
+  windows: string;
+}
+
+/** 促销信息：discountPercent 为折扣百分比，free 表示限时免费。 */
+export interface ModelDeal {
+  discountPercent: number;
+  free: boolean;
+  expires?: string;
+  endsWhen?: string;
+}
+
+/** 内置计费表中的单个模型（含能力、分档价格、折扣与闲忙时）。 */
+export interface ModelPricing {
+  id: string;
+  name: string;
+  category: string;
+  provider?: string;
+  contextWindow?: number;
+  caps: ModelCaps;
+  deprecated?: boolean;
+  deal?: ModelDeal;
+  timeOfDay?: ModelTimeOfDay;
+  tiers: ModelTier[];
+}
+
 /** 后端 Tauri 命令的类型化封装，前端所有 IPC 调用统一经由此对象。 */
 export const api = {
   // 代理生命周期：启动 / 停止 / 重启 / 查询状态，均返回最新 ProxyStatus
@@ -183,6 +232,8 @@ export const api = {
   // 模型列表：force 为 true 时忽略缓存强制向上游拉取；fallback 表示是否使用兜底列表
   modelsGet: (force = false) =>
     invoke<{ data: ModelInfo[]; fallback: boolean }>("models_get", { force }),
+  // 内置模型计费表（能力、分档价格、折扣、免费与闲忙时）
+  modelsCatalog: () => invoke<ModelPricing[]>("models_catalog"),
   // 日志：按序号增量拉取 / 清空 / 导出到文件（返回条数）
   logsGet: (limit = 200, afterSeq = 0) => invoke<LogEntry[]>("logs_get", { limit, afterSeq }),
   logsClear: () => invoke<void>("logs_clear"),

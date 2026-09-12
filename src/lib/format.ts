@@ -71,3 +71,18 @@ export function formatCost(cost: number): string {
   if (cost < 1000) return `$${cost.toFixed(2)}`;
   return `$${formatCompactNumber(cost)}`;
 }
+
+/** 将单价（$/1M tokens）格式化为紧凑文本：整数省略小数，小数最多保留 3 位。 */
+export function formatPrice(v: number): string {
+  if (v === 0) return "$0";
+  if (Number.isInteger(v)) return `$${v}`;
+  if (v < 0.01) return `$${v.toFixed(4)}`;
+  return `$${Number(v.toFixed(3))}`;
+}
+
+/** 将 token 规模格式化为紧凑的 K/M 后缀文本（272K / 1M）。 */
+export function formatContextTokens(n: number): string {
+  if (n >= 1_000_000) return `${Number((n / 1_000_000).toFixed(1))}M`;
+  if (n >= 1000) return `${Number((n / 1000).toFixed(0))}K`;
+  return String(n);
+}
