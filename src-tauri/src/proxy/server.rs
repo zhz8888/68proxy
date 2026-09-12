@@ -1436,7 +1436,7 @@ fn usage_tokens(usage: &Option<Value>) -> (u64, u64, u64) {
     (
         u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0),
         u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0),
-        u.get("cachedInputTokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        super::sse::read_cache_read_tokens(u),
     )
 }
 

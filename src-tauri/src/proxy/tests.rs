@@ -426,7 +426,7 @@ fn openai_translator_streams_text_and_done() {
     assert!(frames[0].contains("\"role\":\"assistant\""));
 
     let frames = t.parse_line(
-        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":10,"outputTokens":5,"cachedInputTokens":3}}"#,
+        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":10,"outputTokens":5,"inputTokenDetails":{"cacheReadTokens":3}}}"#,
     );
     assert_eq!(frames.len(), 1);
     assert!(frames[0].contains("\"finish_reason\":\"stop\""));
@@ -440,7 +440,7 @@ fn openai_translator_streams_text_and_done() {
 #[test]
 fn openai_translator_zero_output_normalization() {
     let mut t = OpenAiTranslator::new("m", "c");
-    t.parse_line(r#"{"type":"finish","totalUsage":{"inputTokens":100,"outputTokens":0,"cachedInputTokens":90}}"#);
+    t.parse_line(r#"{"type":"finish","totalUsage":{"inputTokens":100,"outputTokens":0,"inputTokenDetails":{"cacheReadTokens":90}}}"#);
     assert_eq!(t.input_tokens, 0);
     assert_eq!(t.cached_tokens, 0);
     assert!(t.zero_output_error_frame().contains("rate_limit_error"));
@@ -457,7 +457,7 @@ fn anthropic_translator_blocks_and_finalize() {
     assert!(frames.iter().any(|f| f.contains("content_block_start")));
     assert!(frames.iter().any(|f| f.contains("\"type\":\"text_delta\"")));
     let frames = t.process_line(
-        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":7,"outputTokens":2,"cachedInputTokens":1}}"#,
+        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":7,"outputTokens":2,"inputTokenDetails":{"cacheReadTokens":1}}}"#,
     );
     assert!(frames.is_empty());
     let end = t.finalize();
@@ -488,7 +488,7 @@ fn responses_translator_text_and_tool_events() {
     assert!(frames.iter().any(|f| f.contains("\"name\":\"shell\"")));
 
     t.process_line(
-        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":10,"outputTokens":5,"cachedInputTokens":3}}"#,
+        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":10,"outputTokens":5,"inputTokenDetails":{"cacheReadTokens":3}}}"#,
     );
     assert_eq!(t.output_tokens, 5);
     let end = t.finalize();
@@ -516,7 +516,7 @@ fn responses_translator_reasoning_events() {
     assert!(frames.iter().any(|f| f.contains("response.output_text.delta")));
 
     t.process_line(
-        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":8,"outputTokens":4,"cachedInputTokens":0}}"#,
+        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":8,"outputTokens":4,"inputTokenDetails":{"cacheReadTokens":0}}}"#,
     );
     let end = t.finalize();
     assert!(end.iter().any(|f| f.contains("response.completed")));
@@ -540,7 +540,7 @@ fn responses_translator_reasoning_only_not_empty() {
 fn responses_translator_zero_output_and_error() {
     let mut t = ResponsesTranslator::new("m", "resp_1");
     t.process_line(
-        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":50,"outputTokens":0,"cachedInputTokens":40}}"#,
+        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":50,"outputTokens":0,"inputTokenDetails":{"cacheReadTokens":40}}}"#,
     );
     let end = t.finalize();
     assert!(end.iter().any(|f| f.contains("response.failed")));
@@ -671,14 +671,14 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
         }
         if parsed["params"]["model"] == "zero-output" {
             return axum::response::Response::new(axum::body::Body::from(
-                "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":50,\"outputTokens\":0,\"cachedInputTokens\":40}}\n",
+                "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":50,\"outputTokens\":0,\"inputTokenDetails\":{\"cacheReadTokens\":40}}}\n",
             ));
         }
         if parsed["params"]["model"] == "slow" {
             // 慢响应：sleep 300ms 模拟上游耗时，用于并发上限测试占用在途额度
             tokio::time::sleep(Duration::from_millis(300)).await;
             return axum::response::Response::new(axum::body::Body::from(
-                "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"Hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"cachedInputTokens\":3}}\n",
+                "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"Hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"inputTokenDetails\":{\"cacheReadTokens\":3}}}\n",
             ));
         }
         if parsed["params"]["model"] == "no-usage" {
@@ -695,7 +695,7 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
                 .unwrap();
         }
         axum::response::Response::new(axum::body::Body::from(
-            "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"Hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"cachedInputTokens\":3}}\n",
+            "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"Hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"inputTokenDetails\":{\"cacheReadTokens\":3}}}\n",
         ))
     }
 

@@ -55,6 +55,17 @@ fn normalize_usage(input: &mut u64, output: &mut u64, cached: &mut u64) {
     }
 }
 
+/// 读取 CC usage 对象中的缓存命中 token 数。
+///
+/// 上游真实格式为 `inputTokenDetails.cacheReadTokens`（与 inputTokens/outputTokens
+/// 并列于 usage 顶层），旧版代理曾用顶层 `cachedInputTokens`，此处保留回退兼容。
+pub fn read_cache_read_tokens(u: &Value) -> u64 {
+    u.pointer("/inputTokenDetails/cacheReadTokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| u.get("cachedInputTokens").and_then(|v| v.as_u64()))
+        .unwrap_or(0)
+}
+
 /// CC NDJSON → OpenAI SSE 翻译器。
 pub struct OpenAiTranslator {
     /// 下游响应体的 completion id（跨帧保持不变）。
@@ -182,7 +193,7 @@ impl OpenAiTranslator {
                 if let Some(u) = event.get("usage") {
                     self.input_tokens = u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
                     self.output_tokens = u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                    self.cached_tokens = u.get("cachedInputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    self.cached_tokens = read_cache_read_tokens(u);
                 }
             }
             "finish" => {
@@ -197,11 +208,11 @@ impl OpenAiTranslator {
                     .unwrap_or_else(|| serde_json::json!({}));
                 let mut input = u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
                 let mut output = u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let mut cached = u.get("cachedInputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut cached = read_cache_read_tokens(&u);
                 normalize_usage(&mut input, &mut output, &mut cached);
                 u["inputTokens"] = serde_json::json!(input);
                 u["outputTokens"] = serde_json::json!(output);
-                u["cachedInputTokens"] = serde_json::json!(cached);
+                u["inputTokenDetails"] = serde_json::json!({ "cacheReadTokens": cached });
                 self.input_tokens = input;
                 self.output_tokens = output;
                 self.cached_tokens = cached;
@@ -577,7 +588,7 @@ impl ResponsesTranslator {
                 if let Some(u) = u {
                     let mut input = u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(self.input_tokens);
                     let mut output = u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(self.output_tokens);
-                    let mut cached = u.get("cachedInputTokens").and_then(|v| v.as_u64()).unwrap_or(self.cached_tokens);
+                    let mut cached = read_cache_read_tokens(&u);
                     normalize_usage(&mut input, &mut output, &mut cached);
                     self.input_tokens = input;
                     self.output_tokens = output;
@@ -878,7 +889,7 @@ impl AnthropicTranslator {
                 if let Some(u) = u {
                     let mut input = u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(self.input_tokens);
                     let mut output = u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(self.output_tokens);
-                    let mut cached = u.get("cachedInputTokens").and_then(|v| v.as_u64()).unwrap_or(self.cached_tokens);
+                    let mut cached = read_cache_read_tokens(&u);
                     normalize_usage(&mut input, &mut output, &mut cached);
                     self.input_tokens = input;
                     self.output_tokens = output;

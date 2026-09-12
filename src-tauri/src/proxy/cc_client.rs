@@ -230,6 +230,7 @@ fn base_headers(state: &AppState, api_key: &str) -> reqwest::header::HeaderMap {
         "x-command-code-version",
         cc_version(state).parse().unwrap(),
     );
+    headers.insert("User-Agent", "cli".parse().unwrap());
     headers
 }
 
@@ -254,7 +255,6 @@ pub async fn forward_to_cc(
     // 在公共头基础上补齐 CLI 会话/项目/链路追踪等伪装头
     let mut headers = base_headers(state, api_key);
     headers.insert("x-session-id", session_id.parse().unwrap());
-    headers.insert("x-co-flag", "false".parse().unwrap());
     headers.insert("x-taste-learning", "false".parse().unwrap());
     headers.insert("x-project-slug", slug.parse().unwrap());
     headers.insert("traceparent", generate_traceparent().parse().unwrap());
