@@ -1,4 +1,6 @@
-import { Github, ServerCog, ShieldCheck, Workflow } from "lucide-react";
+// lucide 1.x 移除了品牌图标，GitHub 图标改用 react-icons
+import { FaGithub } from "react-icons/fa6";
+import { ServerCog, ShieldCheck, Workflow } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 import type { IconType } from "react-icons";
 import { FaFile } from "react-icons/fa6";
@@ -42,9 +44,9 @@ async function openLink(url: string) {
 }
 
 // 作者署名与本 fork 仓库链接；label 由组件内的 t() 提供
-const LINKS: Array<{ icon: typeof Github; labelKey: string; value: string; href: string }> = [
-  { icon: Github, labelKey: "about.originalAuthor", value: "6ix8ight", href: "https://github.com/evanfu0110" },
-  { icon: Github, labelKey: "about.forkMaintainer", value: "zhz8888", href: "https://github.com/zhz8888/68proxy" },
+const LINKS: Array<{ icon: typeof FaGithub; labelKey: string; value: string; href: string }> = [
+  { icon: FaGithub, labelKey: "about.originalAuthor", value: "6ix8ight", href: "https://github.com/evanfu0110" },
+  { icon: FaGithub, labelKey: "about.forkMaintainer", value: "zhz8888", href: "https://github.com/zhz8888/68proxy" },
 ];
 
 /** 关于视图：项目简介、实现逻辑、技术栈与作者联系方式。 */
