@@ -5,6 +5,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Route,
   Save,
   Trash2,
   UserRound,
@@ -23,10 +24,28 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { MeterBar, QuotaDetail, usageColor } from "@/components/QuotaDetail";
-import { api, type AccountEntry, type AccountQuota, type LimitWindow } from "@/lib/api";
+import {
+  api,
+  type AccountEntry,
+  type AccountQuota,
+  type AccountRouting,
+  type LimitWindow,
+} from "@/lib/api";
 import { formatCost } from "@/lib/format";
 import { cn } from "@/lib/utils";
+
+/** 下拉框中「自动选择」选项的哨兵值（Radix Select 不允许空字符串作为 value）。 */
+const AUTO_ACCOUNT = "__auto__";
 
 /** 套餐徽标配色：不同档位用不同色调区分（未收录的套餐回退中性灰）。 */
 function planBadgeClass(planName: string): string {
@@ -109,6 +128,26 @@ export function AccountsView() {
   const [detailQuota, setDetailQuota] = useState<AccountQuota | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
+  // 账户使用规则（策略 + 优先消耗账户）
+  const [routing, setRouting] = useState<AccountRouting>({
+    strategy: "round_robin",
+    preferred_account_id: "",
+  });
+  const [routingSaving, setRoutingSaving] = useState(false);
+
+  /** 保存账户使用规则（策略或优先账户变更时调用）。 */
+  async function saveRouting(next: AccountRouting) {
+    setRouting(next);
+    setRoutingSaving(true);
+    try {
+      await api.accountRoutingSet(next.strategy, next.preferred_account_id);
+      toast.success("账户使用规则已保存");
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setRoutingSaving(false);
+    }
+  }
 
   /** 重新读取账户列表（新增/移除/登录成功后刷新）。 */
   async function reloadAccounts() {
@@ -141,6 +180,7 @@ export function AccountsView() {
       })
       .catch((e) => setLoadError(String(e)));
     reloadQuotas();
+    api.accountRoutingGet().then(setRouting).catch(() => {});
   }, []);
 
   /** 校验并新增一个 CC 账户 Key（必须以 user_ 开头）。 */
@@ -291,6 +331,68 @@ export function AccountsView() {
         </div>
       )}
 
+      {/* 使用规则：决定请求如何在多账户间分配 */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Route className="h-4 w-4" />
+            使用规则
+          </CardTitle>
+          <CardDescription>
+            决定多个账户之间如何分配请求。额度判定顺序为 5 小时限额 → 周限额 → 月限额
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="space-y-0.5">
+              <Label className="text-sm">优先消耗账号</Label>
+              <p className="text-xs text-muted-foreground">
+                开启后被指定的账户会被优先使用，用尽后自动切换到剩余额度最多的账户
+              </p>
+            </div>
+            <Switch
+              checked={routing.strategy === "priority"}
+              disabled={routingSaving}
+              onCheckedChange={(v) =>
+                saveRouting({ ...routing, strategy: v ? "priority" : "round_robin" })
+              }
+            />
+          </div>
+
+          {routing.strategy === "priority" && (
+            <>
+              <div className="space-y-1.5">
+                <Label>指定账户</Label>
+                <Select
+                  value={routing.preferred_account_id || AUTO_ACCOUNT}
+                  onValueChange={(v) =>
+                    saveRouting({ ...routing, preferred_account_id: v === AUTO_ACCOUNT ? "" : v })
+                  }
+                  disabled={routingSaving}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="自动选择" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={AUTO_ACCOUNT}>自动（剩余额度最多）</SelectItem>
+                    {accounts.map((a) => (
+                      <SelectItem key={a.userId} value={a.userId}>
+                        {a.userName || a.masked}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <p className="rounded-md border border-border/70 bg-secondary/20 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                同一会话固定使用同一账户，避免切换账户导致上游缓存失效、额度消耗变快；
+                仅当该账户额度耗尽（依次判断 5 小时限额 → 周限额 → 月限额）或你手动切换账户时，
+                才会路由到其他账户。
+              </p>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-start justify-between gap-2">
@@ -300,7 +402,7 @@ export function AccountsView() {
                 Command Code 账户
               </CardTitle>
               <CardDescription>
-                user_ 开头的 Command Code 上游账户；可配置多个，请求按轮询自动切换。支持浏览器授权登录或手动粘贴 Key
+                user_ 开头的 Command Code 上游账户；可配置多个，请求在账户间的分配方式由上方「使用规则」决定。支持浏览器授权登录或手动粘贴 Key
               </CardDescription>
             </div>
             <Button

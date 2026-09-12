@@ -40,6 +40,18 @@ pub struct KeyState {
     pub next_init_at: u64,
 }
 
+/// 会话 → 账户的粘滞绑定（`priority` 策略用）。
+///
+/// 同一会话固定走同一账户，避免中途换账户导致上游 prompt 缓存失效、额度消耗变快；
+/// 仅在绑定账户额度耗尽（或与会话的绑定被手动清除）时重新选择。
+#[derive(Debug, Clone)]
+pub struct AccountBinding {
+    /// 绑定的账户 userId。
+    pub user_id: String,
+    /// 绑定时间（Unix 毫秒），用于超期清理。
+    pub bound_at: u64,
+}
+
 /// 对外暴露的模型条目（/v1/models 展示用）。
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelInfo {
@@ -94,6 +106,12 @@ pub struct AppState {
     pub key_states: Mutex<HashMap<String, KeyState>>,
     /// 模型列表缓存。
     pub models: RwLock<ModelsCache>,
+    /// 会话（粘贴键）→ 账户 userId 的粘滞绑定（仅 `priority` 策略使用）。
+    pub account_bindings: Mutex<HashMap<String, AccountBinding>>,
+    /// 各账户额度快照缓存（userId → 快照 + 拉取时间），路由与额度判定共用。
+    pub quota_cache: Mutex<HashMap<String, (super::quota::AccountQuota, u64)>>,
+    /// 正在拉取额度的账户 userId 集合（单飞，避免并发重复请求上游）。
+    pub quota_inflight: Mutex<std::collections::HashSet<String>>,
     /// 当前模拟的 command-code CLI 版本号。
     pub cc_version: RwLock<String>,
     /// 连续超时计数，达到阈值后在超时错误中提示缩减上下文。
@@ -133,6 +151,9 @@ impl AppState {
                 models: Vec::new(),
                 fetched_at: 0,
             }),
+            account_bindings: Mutex::new(HashMap::new()),
+            quota_cache: Mutex::new(HashMap::new()),
+            quota_inflight: Mutex::new(std::collections::HashSet::new()),
             cc_version: RwLock::new("0.32.3".into()),
             consecutive_timeouts: AtomicU32::new(0),
             round_robin: AtomicUsize::new(0),

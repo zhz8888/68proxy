@@ -154,6 +154,197 @@ impl AccountQuota {
     }
 }
 
+/// 单个限额窗口是否已耗尽（无上限或未提供视为未耗尽）。
+pub fn window_exhausted(win: &Option<LimitWindow>) -> bool {
+    match win {
+        Some(w) if w.cap > 0.0 => w.used >= w.cap,
+        _ => false,
+    }
+}
+
+/// 判定账户额度是否已耗尽，判定顺序为 **5 小时 → 周 → 月**（与需求一致）。
+///
+/// 任一层级判定耗尽即视为不可用：上层窗口先耗尽意味着此刻已无法继续请求，
+/// 无需再看更宽的周期。所有额度信息都拿不到（拉取失败/无计费数据）时返回 false，
+/// 即「未知不限制」，避免因上游抖动而误判为耗尽、把请求全挤到个别账户。
+pub fn is_exhausted(q: &AccountQuota) -> bool {
+    if q.error.is_some() {
+        return false;
+    }
+    // ① 5 小时窗口
+    if window_exhausted(&q.five_hour) {
+        return true;
+    }
+    // ② 周窗口
+    if window_exhausted(&q.weekly) {
+        return true;
+    }
+    // ③ 月配额（余额视角：总池已扣完，或用量百分比触顶）
+    if q.has_billing && q.total_pool > 0.0 && (q.total_remaining <= 0.0 || q.usage_percent >= 100.0) {
+        return true;
+    }
+    false
+}
+
+/// 账户「剩余额度」评分，用于在需要换账户时挑选余量最多者（越大越优先）。
+///
+/// 以最窄的可用窗口为基准（5 小时 → 周 → 月），取其剩余比例；这样余量百分比更贴近
+/// 近期可用空间，而不是被更宽周期的大额度摊平。无任何窗口信息时回退月配额余额比例。
+pub fn remaining_score(q: &AccountQuota) -> f64 {
+    let ratio = |w: &Option<LimitWindow>| -> Option<f64> {
+        match w {
+            Some(w) if w.cap > 0.0 => Some(((w.cap - w.used) / w.cap).clamp(0.0, 1.0)),
+            _ => None,
+        }
+    };
+    if let Some(r) = ratio(&q.five_hour) {
+        return r;
+    }
+    if let Some(r) = ratio(&q.weekly) {
+        return r;
+    }
+    if q.total_pool > 0.0 {
+        return (q.total_remaining / q.total_pool).clamp(0.0, 1.0);
+    }
+    0.0
+}
+
+/// 额度缓存有效期：60 秒。额度随用量变化，路由判定用缓存即可，
+/// 实际值由后台任务定期刷新，请求路径不做网络请求。
+pub const CACHE_TTL_MS: u64 = 60 * 1000;
+
+/// 并发刷新全部账户的额度快照并写入缓存（后台任务与命令共用）。
+///
+/// - `force` 为真时忽略 TTL 强制拉取；
+/// - **单飞**：同一账户已有拉取在途时跳过，避免并发重复请求上游；
+/// - 同时清理已删除账户的缓存条目，防止无限增长。
+pub async fn refresh_all_caches(state: &std::sync::Arc<AppState>, force: bool) {
+    use futures_util::future::join_all;
+
+    let accounts = crate::credentials::accounts_from_state(state);
+    let known: std::collections::HashSet<String> =
+        accounts.iter().map(|a| a.user_id.clone()).collect();
+    let now = now_millis();
+
+    let mut to_fetch = Vec::new();
+    {
+        let mut cache = state.quota_cache.lock().unwrap();
+        let mut inflight = state.quota_inflight.lock().unwrap();
+        // 清理已被删除账户的缓存与在途标记，防止无限增长
+        cache.retain(|id, _| known.contains(id));
+        inflight.retain(|id| known.contains(id));
+        for a in &accounts {
+            if !force {
+                if let Some((_, at)) = cache.get(&a.user_id) {
+                    if now.saturating_sub(*at) < CACHE_TTL_MS {
+                        continue;
+                    }
+                }
+            }
+            if inflight.insert(a.user_id.clone()) {
+                to_fetch.push(a.clone());
+            }
+        }
+    }
+
+    let futs = to_fetch.into_iter().map(|a| {
+        let st = state.clone();
+        async move {
+            let name = if a.user_name.is_empty() { a.user_id.clone() } else { a.user_name.clone() };
+            let masked = crate::credentials::mask_key(&a.key);
+            let quota = fetch_account_quota(&st, &name, &masked, &a.key).await;
+            st.quota_cache
+                .lock()
+                .unwrap()
+                .insert(a.user_id.clone(), (quota, now_millis()));
+            st.quota_inflight.lock().unwrap().remove(&a.user_id);
+        }
+    });
+    join_all(futs).await;
+}
+
+/// 取全部账户的额度快照供前端展示：优先用缓存，未命中时实时拉取并回填。
+///
+/// 返回顺序与账户列表一致（前端按下标对齐）。
+pub async fn snapshot_all(state: &std::sync::Arc<AppState>) -> Vec<AccountQuota> {
+    use futures_util::future::join_all;
+
+    let accounts = crate::credentials::accounts_from_state(state);
+    let futs = accounts.into_iter().map(|a| {
+        let st = state.clone();
+        async move {
+            let name = if a.user_name.is_empty() { a.user_id.clone() } else { a.user_name.clone() };
+            let masked = crate::credentials::mask_key(&a.key);
+            // 命中未过期缓存则直接复用，避免每次进页面都打上游
+            let cached = st
+                .quota_cache
+                .lock()
+                .unwrap()
+                .get(&a.user_id)
+                .filter(|(_, at)| now_millis().saturating_sub(*at) < CACHE_TTL_MS)
+                .map(|(q, _)| q.clone());
+            if let Some(q) = cached {
+                return q;
+            }
+            let q = fetch_account_quota(&st, &name, &masked, &a.key).await;
+            st.quota_cache
+                .lock()
+                .unwrap()
+                .insert(a.user_id.clone(), (q.clone(), now_millis()));
+            q
+        }
+    });
+    join_all(futs).await
+}
+
+/// 判定上游错误是否表示「当前账户额度耗尽」，用于即时失效该账户的路由绑定。
+///
+/// 上游在额度用尽时返回 402，或在 200/4xx 消息中携带终态标记
+/// （`premium_credits_exhausted` / `insufficient credits` / `model_not_in_plan`）。
+/// 命中后无需等待下一次额度轮询，立即把该账户标记为耗尽并让会话改路由。
+pub fn looks_exhausted_error(status: u16, body: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "premium_credits_exhausted",
+        "insufficient credits",
+        "insufficient_credits",
+        "model_not_in_plan",
+        "credits exhausted",
+    ];
+    if status == 402 {
+        return true;
+    }
+    let lower = body.to_ascii_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// 把某账户标记为额度耗尽：覆盖缓存的耗尽态并清除其全部会话绑定。
+///
+/// 缓存里没有该账户时不做处理（无法凭空构造耗尽快照，交由后台轮询纠正）。
+/// 仅在 `priority` 策略下有实际影响（绑定用于粘滞）。
+pub fn mark_exhausted(state: &AppState, user_id: &str) {
+    {
+        let mut cache = state.quota_cache.lock().unwrap();
+        if let Some((q, _)) = cache.get_mut(user_id) {
+            // 把最窄的可用窗口推到上限，使 is_exhausted 判定为真；无可改窗口时置空池
+            match q.five_hour.as_mut() {
+                Some(w) if w.cap > 0.0 => w.used = w.cap,
+                _ => match q.weekly.as_mut() {
+                    Some(w) if w.cap > 0.0 => w.used = w.cap,
+                    _ => {
+                        q.total_remaining = 0.0;
+                        q.usage_percent = 100.0;
+                    }
+                },
+            }
+        }
+    }
+    state
+        .account_bindings
+        .lock()
+        .unwrap()
+        .retain(|_, b| b.user_id != user_id);
+}
+
 /// 从 `whoami` 响应里解析 `orgLimits`（数组，字段名容错）。
 fn parse_org_limits(whoami: &Value) -> Vec<OrgLimit> {
     let arr = match whoami.get("orgLimits").and_then(|v| v.as_array()) {
@@ -358,5 +549,91 @@ mod tests {
         assert_eq!(w.reset_at, Some(1700000000000));
         // 缺 cap 视为无效窗口
         assert!(LimitWindow::from_json(&json!({ "used": 1 })).is_none());
+    }
+
+    /// 构造判定用快照（只需额度字段，其余走默认）。
+    fn quota_with(five: Option<(f64, f64)>, weekly: Option<(f64, f64)>, pool: f64, remaining: f64) -> AccountQuota {
+        let win = |(u, c): (f64, f64)| LimitWindow { used: u, cap: c, reset_at: None };
+        AccountQuota {
+            user_name: "u".into(),
+            masked_key: "user_…x".into(),
+            plan_id: None,
+            plan_name: "Go".into(),
+            status: None,
+            monthly_remaining: remaining,
+            purchased_remaining: 0.0,
+            free_remaining: 0.0,
+            total_remaining: remaining,
+            total_pool: pool,
+            total_spent: 0.0,
+            usage_percent: if pool > 0.0 { (pool - remaining) / pool * 100.0 } else { 0.0 },
+            has_billing: true,
+            days_left: None,
+            period_start: None,
+            period_end: None,
+            five_hour: five.map(win),
+            weekly: weekly.map(win),
+            org_limits: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn exhausted_by_five_hour_first() {
+        // 5 小时用满即耗尽，即便周/月仍有大量余额
+        let q = quota_with(Some((50.0, 50.0)), Some((10.0, 500.0)), 100.0, 90.0);
+        assert!(is_exhausted(&q));
+    }
+
+    #[test]
+    fn exhausted_by_weekly_when_five_hour_ok() {
+        // 5 小时未满但周用满 → 耗尽
+        let q = quota_with(Some((10.0, 50.0)), Some((500.0, 500.0)), 100.0, 90.0);
+        assert!(is_exhausted(&q));
+    }
+
+    #[test]
+    fn exhausted_by_month_when_windows_ok() {
+        // 两个窗口都未满，月池扣完 → 耗尽
+        let q = quota_with(Some((10.0, 50.0)), Some((10.0, 500.0)), 30.0, 0.0);
+        assert!(is_exhausted(&q));
+    }
+
+    #[test]
+    fn not_exhausted_when_all_have_room() {
+        let q = quota_with(Some((10.0, 50.0)), Some((100.0, 500.0)), 30.0, 20.0);
+        assert!(!is_exhausted(&q));
+    }
+
+    #[test]
+    fn unknown_quota_is_not_exhausted() {
+        // 无任何额度信息（拉取失败/无计费）不应误判为耗尽
+        let mut q = quota_with(None, None, 0.0, 0.0);
+        q.has_billing = false;
+        assert!(!is_exhausted(&q));
+        let mut failed = quota_with(None, None, 0.0, 0.0);
+        failed.error = Some("whoami 请求失败".into());
+        assert!(!is_exhausted(&failed));
+    }
+
+    #[test]
+    fn remaining_score_uses_narrowest_window() {
+        // 以最窄的可用窗口为准：5 小时剩余 80% 优先于月池剩余 90%
+        let q = quota_with(Some((10.0, 50.0)), Some((100.0, 500.0)), 100.0, 90.0);
+        assert!((remaining_score(&q) - 0.8).abs() < 1e-9);
+        // 无 5 小时则退到周；都不存在才用月池
+        let q2 = quota_with(None, Some((100.0, 500.0)), 100.0, 90.0);
+        assert!((remaining_score(&q2) - 0.8).abs() < 1e-9);
+        let q3 = quota_with(None, None, 100.0, 25.0);
+        assert!((remaining_score(&q3) - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn detects_exhaustion_markers_in_upstream_error() {
+        assert!(looks_exhausted_error(402, ""));
+        assert!(looks_exhausted_error(429, "{\"error\":{\"code\":\"premium_credits_exhausted\"}}"));
+        assert!(looks_exhausted_error(200, "insufficient credits"));
+        assert!(!looks_exhausted_error(500, "internal server error"));
+        assert!(!looks_exhausted_error(429, "rate limit exceeded"));
     }
 }

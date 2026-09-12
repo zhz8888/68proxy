@@ -240,6 +240,16 @@ pub async fn serve(
                 }
             });
         }
+        // 额度缓存刷新（每 60s）：路由判定与前端展示共用，请求路径只读缓存不打上游
+        {
+            let st = state.clone();
+            tokio::spawn(async move {
+                loop {
+                    super::quota::refresh_all_caches(&st, false).await;
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            });
+        }
     }
 
     axum::serve(listener, router(state))
@@ -547,19 +557,37 @@ async fn read_json_body(
     serde_json::from_slice(&bytes).map_err(|_| (400, "invalid_request_error", "Invalid JSON body"))
 }
 
+/// 派生用于账户粘滞的路由键：优先下游会话 ID 头，其次请求体 `prompt_cache_key`。
+///
+/// 与 cc_client::get_session_id 的候选顺序一致，但只取「下游显式提供」的标识，
+/// 不生成随机会话（否则每次请求都视为新会话，粘滞失效）。均无时返回 None。
+fn route_session_key(headers: &HeaderMap, prompt_cache_key: Option<&str>) -> Option<String> {
+    for name in ["x-session-id", "x-claude-code-session-id", "session_id"] {
+        if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
+            if v.len() >= 8 {
+                return Some(v.to_string());
+            }
+        }
+    }
+    prompt_cache_key.filter(|k| k.len() >= 8).map(|k| k.to_string())
+}
+
 /// 鉴权并选出本次转发的 CC 账户 key。
 ///
 /// 流程：
 /// 1. 从请求头提取本地转发 Key（sk- 开头），必须与本地已生成的 key 一致，否则 401；
 ///    未配置本地 key 时同样 401（提示先生成）。
-/// 2. 鉴权通过后从 CC 账户列表按轮询取下一个账户，返回 `(api_key, user_id)` 供上游转发
-///    （api_key 用于 Bearer/伪造头，user_id 用于会话/指纹/初始化键控）。
+/// 2. 鉴权通过后按配置的账户策略选取账户（`round_robin` 轮询 / `priority` 优先消耗
+///    指定账户 + 会话粘滞，见 `credentials::route_account`），返回 `(api_key, user_id)`
+///    供上游转发（api_key 用于 Bearer/伪造头，user_id 用于会话/指纹/初始化键控）。
 ///    未配置任何账户时 401（提示先添加账户）。
 ///
+/// `session_key` 为下游会话标识，供 `priority` 策略维持账户粘滞。
 /// 失败返回 `(状态码, 具体原因)`，由各协议入口包装成对应的错误体，避免丢失失败细节。
 async fn api_key_or_401(
     st: &AppState,
     headers: &HeaderMap,
+    session_key: Option<&str>,
 ) -> Result<(String, String), (u16, &'static str)> {
     // 本地 key 必须已生成，且请求头携带的必须与本地一致（sk- 开头，防止任意 sk- 直过）
     let local = crate::credentials::cached_local_key();
@@ -576,8 +604,8 @@ async fn api_key_or_401(
         return Err((401, "Invalid API key"));
     }
 
-    // 鉴权通过：轮询取下一个 CC 账户供上游转发
-    match crate::credentials::next_account(st) {
+    // 鉴权通过：按账户策略选取本次转发的 CC 账户
+    match crate::credentials::route_account(st, session_key) {
         Some(a) => Ok((a.key, a.user_id)),
         None => Err((
             401,
@@ -606,7 +634,13 @@ async fn chat_completions(
             )
         }
     };
-    let (api_key, user_id) = match api_key_or_401(&st, &headers).await {
+    // 先取请求体里的 prompt_cache_key（兼作账户粘滞的路由键候选），再据此选账户
+    let prompt_cache_key = req
+        .get("prompt_cache_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let session_key = route_session_key(&headers, prompt_cache_key);
+    let (api_key, user_id) = match api_key_or_401(&st, &headers, session_key.as_deref()).await {
         Ok(k) => k,
         Err((status, msg)) => {
             return json_response(
@@ -622,10 +656,6 @@ async fn chat_completions(
         .and_then(|v| v.as_str())
         .unwrap_or(DEFAULT_MODEL)
         .to_string();
-    let prompt_cache_key = req
-        .get("prompt_cache_key")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
     let completion_id = format!("chatcmpl-{}", &uuid::Uuid::new_v4().to_string()[..12]);
     let ctx = ReqCtx {
         id: completion_id.clone(),
@@ -662,6 +692,11 @@ async fn chat_completions(
             .take(500)
             .collect::<String>();
         log::error(&format!("CC API error: {status} — {}", summarize_upstream_error(&text)));
+        // 上游明确报额度耗尽：即时失效该账户的路由绑定，下一次请求改走其他账户
+        if super::quota::looks_exhausted_error(status, &text) {
+            log::warn("上游报告账户额度耗尽，立即失效该账户的会话绑定");
+            super::quota::mark_exhausted(&st, &user_id);
+        }
         let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
         let retry_after = mapped_body.get("retry_after").and_then(|v| v.as_u64());
         finish_request(&st, &ctx, "error");
@@ -695,7 +730,8 @@ async fn messages(
             )
         }
     };
-    let (api_key, user_id) = match api_key_or_401(&st, &headers).await {
+    let session_key = route_session_key(&headers, None);
+    let (api_key, user_id) = match api_key_or_401(&st, &headers, session_key.as_deref()).await {
         Ok(k) => k,
         Err((status, msg)) => {
             return json_response(
@@ -748,6 +784,11 @@ async fn messages(
             .take(500)
             .collect::<String>();
         log::error(&format!("CC API error (Anthropic): {status} — {}", summarize_upstream_error(&text)));
+        // 上游明确报额度耗尽：即时失效该账户的路由绑定（与 OpenAI 路径一致）
+        if super::quota::looks_exhausted_error(status, &text) {
+            log::warn("上游报告账户额度耗尽，立即失效该账户的会话绑定");
+            super::quota::mark_exhausted(&st, &user_id);
+        }
         let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
         let err_type = mapped_body
             .pointer("/error/type")
@@ -789,7 +830,8 @@ async fn responses(
             )
         }
     };
-    let (api_key, user_id) = match api_key_or_401(&st, &headers).await {
+    let session_key = route_session_key(&headers, None);
+    let (api_key, user_id) = match api_key_or_401(&st, &headers, session_key.as_deref()).await {
         Ok(k) => k,
         Err((status, msg)) => {
             return json_response(
@@ -857,6 +899,11 @@ async fn responses(
             .take(500)
             .collect::<String>();
         log::error(&format!("CC API error (Responses): {status} — {}", summarize_upstream_error(&text)));
+        // 上游明确报额度耗尽：即时失效该账户的路由绑定（三条协议入口保持一致）
+        if super::quota::looks_exhausted_error(status, &text) {
+            log::warn("上游报告账户额度耗尽，立即失效该账户的会话绑定");
+            super::quota::mark_exhausted(&st, &user_id);
+        }
         let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
         let retry_after = mapped_body.get("retry_after").and_then(|v| v.as_u64());
         finish_request(&st, &ctx, "error");

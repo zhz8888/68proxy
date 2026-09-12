@@ -65,13 +65,17 @@ fn config_get(app: AppHandle) -> proxy::config::Config {
 /// 返回 `needs_restart`：端口/主机变更且代理正在运行时需要重启才能生效。
 #[tauri::command]
 fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Value, String> {
-    config.validate()?;
     let ctx = app.state::<AppCtx>();
     // 本地转发 Key 与 CC 账户由 local_key_* / account_* 管理，config_save 不接收，
     // 保存前保留原值
     let stored = ctx.proxy_state.config.read().unwrap().clone();
     config.local_api_key = stored.local_api_key;
     config.cc_accounts = stored.cc_accounts;
+    // 账户使用规则由 account_routing_set 专门管理，此处保留原值避免被前端默认值覆盖
+    config.account_strategy = stored.account_strategy;
+    config.preferred_account_id = stored.preferred_account_id;
+    // 校验放在保留字段之后：被保留的字段不应触发校验失败
+    config.validate()?;
     // 主存 SQLite settings 表
     {
         let guard = ctx.proxy_state.usage.lock().unwrap();
@@ -341,22 +345,69 @@ async fn plan_status(app: AppHandle, force: bool) -> Result<Value, String> {
 
 /// 获取全部 CC 账户的额度快照（套餐、月/购买/赠送余额、5 小时与周窗口限额、组织限额）。
 ///
-/// 各账户并发拉取，单个账户失败只影响该条记录（带 `error` 字段），不影响其余账户。
+/// 命中额度缓存（60s TTL）时直接复用，未命中才向上游拉取并回填；返回顺序与账户列表一致。
 #[tauri::command]
 async fn accounts_quota(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
-    let accounts = credentials::accounts_from_state(&ctx.proxy_state);
-    if accounts.is_empty() {
-        return Ok(json!([]));
-    }
-    let futs = accounts.into_iter().map(|a| {
-        let st = ctx.proxy_state.clone();
-        let name = if a.user_name.is_empty() { a.user_id.clone() } else { a.user_name.clone() };
-        let masked = credentials::mask_key(&a.key);
-        async move { proxy::quota::fetch_account_quota(&st, &name, &masked, &a.key).await }
-    });
-    let list = futures_util::future::join_all(futs).await;
+    let list = proxy::quota::snapshot_all(&ctx.proxy_state).await;
     Ok(serde_json::to_value(list).map_err(|e| format!("序列化额度失败: {e}"))?)
+}
+
+/// 读取账户使用规则：`{ strategy, preferred_account_id }`。
+#[tauri::command]
+fn account_routing_get(app: AppHandle) -> Value {
+    let ctx = app.state::<AppCtx>();
+    let cfg = ctx.proxy_state.config.read().unwrap();
+    json!({
+        "strategy": cfg.account_strategy,
+        "preferred_account_id": cfg.preferred_account_id,
+    })
+}
+
+/// 保存账户使用规则并持久化（settings 表 + 内存状态）。
+///
+/// `strategy`：`round_robin`（轮询，默认）/ `priority`（优先消耗指定账户 + 会话粘滞）；
+/// `preferred_account_id`：优先消耗的 userId（空字符串表示自动取剩余额度最多者）。
+/// 切换规则时清空全部会话绑定，使新规则立即对所有会话生效。
+#[tauri::command]
+fn account_routing_set(
+    app: AppHandle,
+    strategy: String,
+    #[allow(non_snake_case)] preferred_account_id: String,
+) -> Result<(), String> {
+    if !matches!(strategy.as_str(), "round_robin" | "priority") {
+        return Err("账户使用策略只能是 round_robin/priority".into());
+    }
+    let ctx = app.state::<AppCtx>();
+    let updated = {
+        let mut cfg = ctx.proxy_state.config.write().unwrap();
+        cfg.account_strategy = strategy;
+        cfg.preferred_account_id = preferred_account_id;
+        cfg.clone()
+    };
+    {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        proxy::settings::save_config(conn, &updated)?;
+    }
+    // 规则变更后原有绑定可能不再符合预期，全部清除以便按新规则重选
+    ctx.proxy_state.account_bindings.lock().unwrap().clear();
+    proxy::log::info("账户使用规则已更新");
+    Ok(())
+}
+
+/// 清除全部会话→账户绑定（手动切换账户时调用，强制所有会话按新规则重选）。
+#[tauri::command]
+fn account_bindings_clear(app: AppHandle) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let n = {
+        let mut bindings = ctx.proxy_state.account_bindings.lock().unwrap();
+        let n = bindings.len();
+        bindings.clear();
+        n
+    };
+    proxy::log::info(&format!("已清除 {n} 条账户会话绑定"));
+    Ok(json!({ "cleared": n }))
 }
 
 /// 获取指定 userId 账户的额度快照（账户详情用）。
@@ -776,6 +827,9 @@ pub fn run() {
             plan_status,
             accounts_quota,
             account_quota,
+            account_routing_get,
+            account_routing_set,
+            account_bindings_clear,
             logs_get,
             logs_clear,
             logs_export,

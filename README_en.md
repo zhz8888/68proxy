@@ -45,7 +45,7 @@
 | 🔌 **Tool Integration** | Enter a target tool name and model to auto-generate an integration prompt — let AI wire up Cursor / OpenCode / Cherry Studio for you; it replies 「not supported」 when the protocol is incompatible, and also offers a removal prompt |
 | 🐞 **Debug Logs** | In-memory ring buffer with live push, level filter, keyword search, auto-scroll and one-click clear, plus export of the latest 1,000 entries |
 | ⚙️ **Settings** | Port / listen address (with port-in-use detection and one-click release), model source and refresh interval, startup behavior (auto-run, autostart, tray), log level, token usage tracking toggle and retention days, local forwarding Key (`sk-` prefixed, one-click random generation) — changes saved automatically; plus two CC upstream behavior toggles: "empty system placeholder" and "ZDR mode" |
-| 👤 **Accounts** | Manage Command Code upstream accounts (`user_`, multiple supported, requests rotated round-robin): add via browser OAuth or by pasting a Key, rename, remove, and view a single account's full quota (plan, monthly / purchased / free balance, 5-hour and weekly limits) |
+| 👤 **Accounts** | Manage Command Code upstream accounts (`user_`, multiple supported): add via browser OAuth or by pasting a Key, rename, remove, and view a single account's full quota (plan, monthly / purchased / free balance, 5-hour and weekly limits). Configure a **usage rule**: round-robin load balancing, or designate a preferred account to drain first (falling back to the account with the most remaining quota), while keeping each session pinned to one account so upstream cache stays warm |
 | 🎛️ **System Tray** | Minimize to tray; tray menu shows the window and start / stop / restart the proxy or quit |
 
 <p align="center">
@@ -88,7 +88,7 @@ API Key                      the local forwarding Key (sk- prefixed, see
                              Settings); multiple clients can share it
 ```
 
-> The local forwarding Key (`sk-`) is only used for local proxy auth and is never sent to the CC upstream. CC account Keys (`user_`) are managed on the Accounts page; you can add several and requests are rotated across them round-robin. Both are stored in plaintext in the local config file (`config.json`) — visible only on this machine; don't share the config file with others.
+> The local forwarding Key (`sk-`) is only used for local proxy auth and is never sent to the CC upstream. CC account Keys (`user_`) are managed on the Accounts page; you can add several, and how requests are spread across them is decided by the usage rule (round-robin by default). Both are stored in plaintext in the local config file (`config.json`) — visible only on this machine; don't share the config file with others.
 
 <p align="center">
   <img src="./assets/readme/section-tech.svg" width="100%" alt="Tech Stack">

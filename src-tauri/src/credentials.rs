@@ -169,6 +169,142 @@ pub fn next_account(state: &crate::proxy::state::AppState) -> Option<Account> {
     Some(accounts[idx].clone())
 }
 
+/// 会话 → 账户粘滞绑定的有效期：与 CLI 会话时长一致（12 小时）。
+///
+/// 超期后解除绑定，下次请求重新选账户，避免长期锁死在某个已变化的账户上。
+const BINDING_TTL_MS: u64 = 12 * 60 * 60 * 1000;
+
+/// 读取某会话当前绑定的账户（未绑定/超期/账户已被删除时返回 None）。
+fn bound_account(state: &crate::proxy::state::AppState, session_key: &str) -> Option<Account> {
+    let now = crate::proxy::state::now_millis();
+    let bound = {
+        let bindings = state.account_bindings.lock().unwrap();
+        match bindings.get(session_key) {
+            Some(b) if now.saturating_sub(b.bound_at) < BINDING_TTL_MS => b.user_id.clone(),
+            _ => return None,
+        }
+    };
+    accounts_from_state(state)
+        .into_iter()
+        .find(|a| a.user_id == bound)
+}
+
+/// 写入/刷新某会话的账户绑定。
+fn bind_account(state: &crate::proxy::state::AppState, session_key: &str, user_id: &str) {
+    state.account_bindings.lock().unwrap().insert(
+        session_key.to_string(),
+        crate::proxy::state::AccountBinding {
+            user_id: user_id.to_string(),
+            bound_at: crate::proxy::state::now_millis(),
+        },
+    );
+}
+
+/// 取该账户的额度快照（路由用，仅读缓存，绝不触发网络请求）。
+fn cached_quota(
+    state: &crate::proxy::state::AppState,
+    user_id: &str,
+) -> Option<crate::proxy::quota::AccountQuota> {
+    state
+        .quota_cache
+        .lock()
+        .unwrap()
+        .get(user_id)
+        .map(|(q, _)| q.clone())
+}
+
+/// 在候选账户中挑选「剩余额度最多」者；额度未知的账户按 0 分参与比较（仍优于无候选）。
+///
+/// 返回 (账户, 是否已耗尽)：若所有账户都耗尽，仍返回余量最多者供兜底尝试。
+fn pick_max_remaining<'a>(
+    state: &crate::proxy::state::AppState,
+    accounts: &'a [Account],
+) -> Option<(&'a Account, bool)> {
+    use crate::proxy::quota;
+    let mut best: Option<(&Account, f64, bool)> = None;
+    for a in accounts {
+        let quota = cached_quota(state, &a.user_id);
+        let exhausted = quota.as_ref().map(quota::is_exhausted).unwrap_or(false);
+        let score = quota.as_ref().map(quota::remaining_score).unwrap_or(0.0);
+        // 优先保留未耗尽者；同为未耗尽/同为耗尽时取余量评分更高者
+        let better = match &best {
+            None => true,
+            Some((_, best_score, best_exhausted)) => match (exhausted, best_exhausted) {
+                (false, true) => true,
+                (true, false) => false,
+                _ => score > *best_score,
+            },
+        };
+        if better {
+            best = Some((a, score, exhausted));
+        }
+    }
+    best.map(|(a, _, ex)| (a, ex))
+}
+
+/// 按配置策略为一次请求选出账户。
+///
+/// - `round_robin`：沿用原轮询行为（每次请求换下一个账户）。
+/// - `priority`：**优先消耗指定账户 + 会话粘滞**。同一会话固定走同一账户，
+///   避免中途换账户导致上游 prompt 缓存失效、额度消耗变快；仅当绑定账户额度
+///   耗尽（5 小时 → 周 → 月依次判定）或属首次请求时，才重新选择：
+///   优先取配置指定的账户，其耗尽后改为**剩余额度最多**的账户。
+///
+/// `session_key` 为下游会话标识（x-session-id / prompt_cache_key 等）；为空时无法
+/// 维持粘滞，退化为每次按策略重选（无会话连续性的客户端本就不存在缓存损失）。
+pub fn route_account(
+    state: &crate::proxy::state::AppState,
+    session_key: Option<&str>,
+) -> Option<Account> {
+    let accounts = accounts_from_state(state);
+    if accounts.is_empty() {
+        return None;
+    }
+    let cfg = state.config.read().unwrap();
+    // 非优先级策略：保持原有轮询语义
+    if !cfg.is_priority_strategy() {
+        drop(cfg);
+        return next_account(state);
+    }
+    let preferred_id = cfg.preferred_account_id.clone();
+    drop(cfg);
+
+    // ① 会话已绑定且绑定账户仍未耗尽：继续使用（保护上游缓存）
+    if let Some(key) = session_key {
+        if let Some(bound) = bound_account(state, key) {
+            let exhausted = cached_quota(state, &bound.user_id)
+                .map(|q| crate::proxy::quota::is_exhausted(&q))
+                .unwrap_or(false);
+            if !exhausted {
+                return Some(bound);
+            }
+            crate::proxy::log::info("会话绑定账户额度已耗尽，重新选择账户");
+        }
+    }
+
+    // ② 重新选择：优先取配置指定的账户（未耗尽时），否则取剩余额度最多者
+    let preferred = if preferred_id.is_empty() {
+        None
+    } else {
+        accounts
+            .iter()
+            .find(|a| a.user_id == preferred_id)
+            .filter(|a| {
+                !cached_quota(state, &a.user_id)
+                    .map(|q| crate::proxy::quota::is_exhausted(&q))
+                    .unwrap_or(false)
+            })
+    };
+    let chosen = preferred
+        .or_else(|| pick_max_remaining(state, &accounts).map(|(a, _)| a))?;
+
+    // ③ 记录绑定，后续同会话请求复用同一账户
+    if let Some(key) = session_key {
+        bind_account(state, key, &chosen.user_id);
+    }
+    Some(chosen.clone())
+}
+
 /// 用 API Key 调用上游 `/alpha/whoami` 验证有效性并取回账户身份（userId/userName）。
 ///
 /// 成功返回 `(userId, userName)`；401 表示 key 无效，其他状态/网络错误给出中文描述。
@@ -354,6 +490,126 @@ mod tests {
     fn round_robin_empty() {
         let state = AppState::new(Config::default());
         assert_eq!(next_account(&state), None);
+    }
+
+    /// 构造带账户的 state（策略与优先账户可指定）。
+    fn state_with(accounts: Vec<Account>, strategy: &str, preferred: &str) -> std::sync::Arc<AppState> {
+        let state = AppState::new(Config::default());
+        *state.config.write().unwrap() = Config {
+            cc_accounts: accounts,
+            account_strategy: strategy.into(),
+            preferred_account_id: preferred.into(),
+            ..Config::default()
+        };
+        state
+    }
+
+    fn acct(id: &str) -> Account {
+        Account { key: format!("user_{id}"), user_id: id.into(), user_name: id.into(), ..Account::default() }
+    }
+
+    /// 注入某账户的额度缓存（供路由判定用）。
+    fn put_quota(state: &AppState, user_id: &str, five: Option<(f64, f64)>, weekly: Option<(f64, f64)>, pool: f64, remaining: f64) {
+        use crate::proxy::quota::{AccountQuota, LimitWindow};
+        let win = |(u, c): (f64, f64)| LimitWindow { used: u, cap: c, reset_at: None };
+        let q = AccountQuota {
+            user_name: user_id.into(),
+            masked_key: format!("user_…{user_id}"),
+            plan_id: None,
+            plan_name: "Go".into(),
+            status: Some("active".into()),
+            monthly_remaining: remaining,
+            purchased_remaining: 0.0,
+            free_remaining: 0.0,
+            total_remaining: remaining,
+            total_pool: pool,
+            total_spent: 0.0,
+            usage_percent: if pool > 0.0 { (pool - remaining) / pool * 100.0 } else { 0.0 },
+            has_billing: true,
+            days_left: None,
+            period_start: None,
+            period_end: None,
+            five_hour: five.map(win),
+            weekly: weekly.map(win),
+            org_limits: Vec::new(),
+            error: None,
+        };
+        state.quota_cache.lock().unwrap().insert(user_id.to_string(), (q, crate::proxy::state::now_millis()));
+    }
+
+    #[test]
+    fn priority_binds_session_to_preferred_account() {
+        // 指定 b 为优先账户：不同会话首次都选 b，且同一会话持续绑定 b
+        let state = state_with(vec![acct("a"), acct("b")], "priority", "b");
+        put_quota(&state, "a", Some((1.0, 50.0)), None, 10.0, 9.0);
+        put_quota(&state, "b", Some((1.0, 50.0)), None, 10.0, 9.0);
+        let first = route_account(&state, Some("sess-aaaa1111")).unwrap();
+        assert_eq!(first.user_id, "b");
+        // 第二个会话同样优先 b（不是轮询到 a）
+        let other = route_account(&state, Some("sess-bbbb2222")).unwrap();
+        assert_eq!(other.user_id, "b");
+        // 同会话再来一次仍是 b
+        assert_eq!(route_account(&state, Some("sess-aaaa1111")).unwrap().user_id, "b");
+    }
+
+    #[test]
+    fn priority_keeps_session_sticky_even_if_richer_account_exists() {
+        // 会话已绑定 a，即使 b 余量更多也不切换（保护上游缓存）
+        let state = state_with(vec![acct("a"), acct("b")], "priority", "");
+        put_quota(&state, "a", Some((10.0, 50.0)), None, 10.0, 9.0);
+        put_quota(&state, "b", Some((0.5, 50.0)), None, 10.0, 9.5);
+        // 首次（无绑定）应选余量最多的 b
+        assert_eq!(route_account(&state, Some("sess-cccc3333")).unwrap().user_id, "b");
+        // 手工把该会话绑定到 a，后续保持 a（不因 b 更空而漂移）
+        state.account_bindings.lock().unwrap().insert(
+            "sess-cccc3333".into(),
+            crate::proxy::state::AccountBinding { user_id: "a".into(), bound_at: crate::proxy::state::now_millis() },
+        );
+        assert_eq!(route_account(&state, Some("sess-cccc3333")).unwrap().user_id, "a");
+    }
+
+    #[test]
+    fn priority_switches_when_bound_account_exhausted() {
+        // 绑定的 a 额度耗尽（5h 用满）→ 自动切到余量最多的 b
+        let state = state_with(vec![acct("a"), acct("b")], "priority", "");
+        put_quota(&state, "a", Some((50.0, 50.0)), None, 10.0, 5.0);
+        put_quota(&state, "b", Some((5.0, 50.0)), None, 10.0, 9.0);
+        state.account_bindings.lock().unwrap().insert(
+            "sess-dddd4444".into(),
+            crate::proxy::state::AccountBinding { user_id: "a".into(), bound_at: crate::proxy::state::now_millis() },
+        );
+        assert_eq!(route_account(&state, Some("sess-dddd4444")).unwrap().user_id, "b");
+        // 新绑定已落到 b
+        let bound = state.account_bindings.lock().unwrap().get("sess-dddd4444").map(|b| b.user_id.clone());
+        assert_eq!(bound.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn priority_falls_back_to_max_remaining_when_preferred_exhausted() {
+        // 指定的 a 已耗尽 → 退回到余量最多的 c
+        let state = state_with(vec![acct("a"), acct("c"), acct("b")], "priority", "a");
+        put_quota(&state, "a", Some((50.0, 50.0)), None, 10.0, 0.0);
+        put_quota(&state, "b", Some((20.0, 50.0)), None, 10.0, 6.0);
+        put_quota(&state, "c", Some((2.0, 50.0)), None, 10.0, 9.8);
+        assert_eq!(route_account(&state, Some("sess-eeee5555")).unwrap().user_id, "c");
+    }
+
+    #[test]
+    fn rr_strategy_ignores_bindings_and_rotates() {
+        // round_robin：保持轮询语义，不看额度也不粘滞
+        let state = state_with(vec![acct("a"), acct("b")], "round_robin", "b");
+        put_quota(&state, "a", Some((50.0, 50.0)), None, 10.0, 0.0);
+        let got: Vec<String> = (0..4)
+            .map(|_| route_account(&state, Some("sess-ffff6666")).unwrap().user_id)
+            .collect();
+        assert_eq!(got, vec!["a", "b", "a", "b"]);
+        assert!(state.account_bindings.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn priority_empty_accounts_returns_none() {
+        let state = state_with(vec![], "priority", "x");
+        assert_eq!(route_account(&state, Some("sess-gggg7777")), None);
     }
 
     #[test]

@@ -240,6 +240,15 @@ export interface OrgLimit {
   reached: boolean;
 }
 
+/** 账户使用策略：轮询 / 优先消耗指定账户（含会话粘滞）。 */
+export type AccountStrategy = "round_robin" | "priority";
+
+/** 账户使用规则：策略与优先消耗的账户 userId（空表示自动取剩余额度最多者）。 */
+export interface AccountRouting {
+  strategy: AccountStrategy;
+  preferred_account_id: string;
+}
+
 /** 单个账户的额度快照（来自上游 whoami/subscriptions/credits/summary）。 */
 export interface AccountQuota {
   user_name: string;
@@ -303,6 +312,12 @@ export const api = {
   // 全部账户的额度快照 / 指定账户的额度快照（账户详情）
   accountsQuota: () => invoke<AccountQuota[]>("accounts_quota"),
   accountQuota: (userId: string) => invoke<AccountQuota>("account_quota", { userId }),
+  // 账户使用规则：轮询 / 优先消耗指定账户（含会话粘滞）
+  accountRoutingGet: () => invoke<AccountRouting>("account_routing_get"),
+  accountRoutingSet: (strategy: AccountStrategy, preferredAccountId: string) =>
+    invoke<void>("account_routing_set", { strategy, preferredAccountId }),
+  // 清除会话→账户绑定（手动切换账户后强制所有会话重选）
+  accountBindingsClear: () => invoke<{ cleared: number }>("account_bindings_clear"),
   // 日志：按序号增量拉取 / 清空 / 导出到文件（返回条数）
   logsGet: (limit = 200, afterSeq = 0) => invoke<LogEntry[]>("logs_get", { limit, afterSeq }),
   logsClear: () => invoke<void>("logs_clear"),

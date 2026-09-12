@@ -153,6 +153,10 @@ pub struct Config {
     pub client_drain_timeout_ms: u64,
     /// 进程内在途请求上限，0 表示不限；超限返回 503 + Retry-After。
     pub max_inflight: u32,
+    /// 账户使用策略：`round_robin`（轮询，默认）/ `priority`（优先消耗指定账户 + 会话粘滞）。
+    pub account_strategy: String,
+    /// 优先消耗的账户 userId（仅 `priority` 策略生效；空字符串表示自动选剩余额度最多者）。
+    pub preferred_account_id: String,
 }
 
 impl Default for Config {
@@ -180,6 +184,8 @@ impl Default for Config {
             max_body_mb: 10,
             client_drain_timeout_ms: 0,
             max_inflight: 0,
+            account_strategy: "round_robin".into(),
+            preferred_account_id: String::new(),
         }
     }
 }
@@ -200,7 +206,15 @@ impl Config {
         if !matches!(self.log_level.as_str(), "debug" | "info" | "warn" | "error") {
             return Err("日志级别只能是 debug/info/warn/error".into());
         }
+        if !matches!(self.account_strategy.as_str(), "round_robin" | "priority") {
+            return Err("账户使用策略只能是 round_robin/priority".into());
+        }
         Ok(())
+    }
+
+    /// 账户使用策略是否为「优先消耗 + 会话粘滞」。
+    pub fn is_priority_strategy(&self) -> bool {
+        self.account_strategy == "priority"
     }
 
     /// 从 JSON 文件加载配置（**不**应用环境变量覆写）；文件缺失或解析失败时回退默认值。
@@ -293,6 +307,14 @@ impl Config {
             if let Ok(p) = v.parse::<u32>() {
                 self.max_inflight = p;
             }
+        }
+        if let Ok(v) = std::env::var("CC_ACCOUNT_STRATEGY") {
+            if matches!(v.as_str(), "round_robin" | "priority") {
+                self.account_strategy = v;
+            }
+        }
+        if let Ok(v) = std::env::var("CC_PREFERRED_ACCOUNT_ID") {
+            self.preferred_account_id = v;
         }
     }
 
