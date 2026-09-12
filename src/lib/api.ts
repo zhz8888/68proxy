@@ -293,8 +293,11 @@ export const api = {
   // 模型列表：force 为 true 时忽略缓存强制向上游拉取；fallback 表示是否使用兜底列表
   modelsGet: (force = false) =>
     invoke<{ data: ModelInfo[]; fallback: boolean }>("models_get", { force }),
-  // 内置模型计费表（能力、分档价格、折扣、免费与闲忙时）
+  // 当前生效的模型计费表（能力、分档价格、折扣、免费与闲忙时；数据存于 SQLite）
   modelsCatalog: () => invoke<ModelPricing[]>("models_catalog"),
+  // 覆盖写入模型信息（按 ID UPSERT 落库并刷新内存表），用于数据更新
+  modelsCatalogUpdate: (models: ModelPricing[], source?: string) =>
+    invoke<{ updated: number }>("models_catalog_update", { models, source }),
   // 当前账户套餐信息与各模型准入结果（force 时强制刷新上游缓存）
   planStatus: (force = false) => invoke<PlanStatus>("plan_status", { force }),
   // 全部账户的额度快照 / 指定账户的额度快照（账户详情）

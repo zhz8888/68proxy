@@ -298,10 +298,32 @@ async fn models_get(app: AppHandle, force: bool) -> Result<Value, String> {
     Ok(json!({ "data": list, "fallback": fallback }))
 }
 
-/// 获取内置模型计费表（含能力、折扣、免费与闲/忙时信息），供前端模型页展示。
+/// 获取当前生效的模型计费表（含能力、折扣、免费与闲/忙时信息），供前端模型页展示。
+///
+/// 数据源为 SQLite `model_pricing` 表（首次启动由内置表播种，见 models 模块）。
 #[tauri::command]
 fn models_catalog() -> Value {
     proxy::pricing::catalog_json()
+}
+
+/// 覆盖写入模型信息（数据更新用）：按模型 ID UPSERT 落库并刷新运行时注册表，
+/// 使名称/能力/价目等更新无需重新发版；未提及的旧模型保留，同 ID 的旧数据被覆盖。
+#[tauri::command]
+fn models_catalog_update(
+    app: AppHandle,
+    models: Vec<proxy::pricing::ModelPricing>,
+    source: Option<String>,
+) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let (updated, all) = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let n = proxy::models::upsert_models(conn, &models, source.as_deref().unwrap_or("manual"))?;
+        (n, proxy::models::load_all(conn))
+    };
+    proxy::pricing::set_models(all);
+    proxy::log::info(&format!("模型信息已更新 {updated} 条"));
+    Ok(json!({ "updated": updated }))
 }
 
 /// 获取当前 CC 账户的套餐信息与各模型准入结果（标注模型页的可用性）。
@@ -750,6 +772,7 @@ pub fn run() {
             auth_login_cancel,
             models_get,
             models_catalog,
+            models_catalog_update,
             plan_status,
             accounts_quota,
             account_quota,
@@ -772,6 +795,12 @@ pub fn run() {
 
             // 初始化设置库 + 流量统计库（同一 SQLite 文件），并注入代理状态
             let usage_conn = proxy::usage::init_usage(&usage_path)?;
+            // 模型信息首次启动落库（空表用内置表播种）并载入运行时注册表；
+            // 之后模型数据以数据库为准，内置表仅作兜底
+            match proxy::models::init_and_load(&usage_conn) {
+                Ok(models) => proxy::pricing::set_models(models),
+                Err(e) => proxy::log::warn(&format!("模型信息初始化失败，使用内置兜底表: {e}")),
+            }
             // 首次启动：config.json 存在且 settings 表为空时迁移到 SQLite
             proxy::settings::migrate_from_config(&usage_conn, &config_path)?;
             // 旧版 api_key 行迁移到 cc_accounts 后清理，避免每次启动重复迁移

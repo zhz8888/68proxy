@@ -4,6 +4,9 @@
 //! - `usage_daily`：按本地时区「天」预聚合的 JSON，支撑 7D/30D/60D 大时间窗快速查询。
 //! - `usage_meta`：生命周期计数（总请求数）。
 //!
+//! 同一数据库文件还承载设置表（settings）与模型信息表（model_pricing），
+//! 建表统一在此处的 `init_usage_on` 完成，具体读写归属各自模块。
+//!
 //! 采集挂载点位于代理请求处理管线（server.rs），此处只负责建库、写入与查询。
 
 use chrono::{Datelike, Local, Timelike};
@@ -197,6 +200,7 @@ pub fn init_usage(path: &Path) -> Result<Connection, String> {
 /// 在已有连接上建表与索引（供 init_usage 与内存库测试复用）。
 pub fn init_usage_on(conn: &Connection) -> Result<(), String> {
     super::settings::init_settings_on(conn)?;
+    super::models::init_models_on(conn)?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| format!("设置 WAL 失败: {e}"))?;
     conn.pragma_update(None, "synchronous", "NORMAL").ok();

@@ -440,7 +440,7 @@ pub async fn plan_context(state: &AppState, api_key: Option<&str>, force: bool) 
     ctx
 }
 
-/// 构造套餐状态响应：套餐信息 + 计费表中每个模型的准入结果（键为模型 ID）。
+/// 构造套餐状态响应：套餐信息 + 当前模型表中每个模型的准入结果（键为模型 ID）。
 pub fn plan_status_json(ctx: &PlanContext) -> Value {
     let access: serde_json::Map<String, Value> = super::pricing::all_models()
         .iter()

@@ -11,6 +11,7 @@ pub mod convert;
 pub mod errors;
 pub mod fingerprint;
 pub mod log;
+pub mod models;
 pub mod plans;
 pub mod pricing;
 pub mod quota;

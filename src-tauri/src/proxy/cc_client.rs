@@ -8,7 +8,8 @@ use super::fingerprint;
 use super::log;
 use super::state::{now_millis, AppState, KeyState, ModelInfo, SessionEntry};
 
-/// 硬编码模型回退列表（动态拉取失败时使用），由内置计费表推导，保证与官方模型清单一致。
+/// 兜底模型回退列表（动态拉取失败时使用），按当前生效的模型表推导，
+/// 保证与模型清单一致（数据来自 SQLite，未落库时回退内置表）。
 pub fn hardcoded_models() -> Vec<ModelInfo> {
     super::pricing::all_models()
         .iter()
