@@ -277,11 +277,11 @@ export function ConfigView() {
   /** 校验并新增一个 CC 账户 Key（必须以 user_ 开头）。 */
   async function addAccount() {
     if (!accountInput.trim()) {
-      toast.error("请输入 CC 账户 Key");
+      toast.error("请输入 Command Code 账户 Key");
       return;
     }
     if (!accountInput.trim().startsWith("user_")) {
-      toast.error("CC 账户 Key 必须以 user_ 开头");
+      toast.error("Command Code 账户 Key 必须以 user_ 开头");
       return;
     }
     try {
@@ -289,7 +289,7 @@ export function ConfigView() {
       setAccounts((await api.accountList()).accounts);
       setAccountInput("");
       setShowAccountInput(false);
-      toast.success("CC 账户已添加");
+      toast.success("Command Code 账户已添加");
     } catch (e) {
       toast.error(String(e));
     }
@@ -315,7 +315,7 @@ export function ConfigView() {
     try {
       await api.accountRemove(index);
       setAccounts((await api.accountList()).accounts);
-      toast.success("CC 账户已移除");
+      toast.success("Command Code 账户已移除");
     } catch (e) {
       toast.error(String(e));
     }
@@ -371,7 +371,7 @@ export function ConfigView() {
             setLoginOpen(false);
             setAccounts([]);
             api.accountList().then((a) => setAccounts(a.accounts)).catch(() => {});
-            toast.success("CC 账户登录成功");
+            toast.success("Command Code 账户登录成功");
           }, 600);
         } else if (r.status === "denied") {
           setLoginStatus("denied");
@@ -488,7 +488,7 @@ export function ConfigView() {
             </Field>
           </Section>
 
-          <Section title="代理" desc="CC 上游调用行为">
+          <Section title="代理" desc="Command Code 上游调用行为">
             <div className="flex items-center justify-between">
               <Label>空 system 占位符</Label>
               <Switch
@@ -497,14 +497,14 @@ export function ConfigView() {
               />
             </div>
             <p className="text-xs text-muted-foreground">
-              无 system prompt 时发送空格占位，阻止 CC 上游注入约 7.5K token 的默认提示词。
+              无 system prompt 时发送空格占位，阻止 Command Code 上游注入约 7.5K token 的默认提示词。
             </p>
             <div className="flex items-center justify-between pt-2">
               <Label>ZDR 模式</Label>
               <Switch checked={cfg.zdr} onCheckedChange={(v) => update("zdr", v)} />
             </div>
             <p className="text-xs text-muted-foreground">
-              向 CC 上游发送 x-cmd-zdr: 1 请求头（生成与初始化预请求均生效）。
+              向 Command Code 上游发送 x-cmd-zdr: 1 请求头（生成与初始化预请求均生效）。
             </p>
           </Section>
 
@@ -569,31 +569,31 @@ export function ConfigView() {
               </Button>
             </Field>
           </Section>
-        </div>
 
-        <Section title="本地转发 Key" desc="客户端接入本地代理时统一填写的 sk- 开头 Key；该 Key 只用于本机服务鉴权，不会发送给 CC 上游">
-          <div className="space-y-3">
+          <Section title="本地转发 Key" desc="客户端接入本地代理时统一填写的 sk- 开头 Key；仅用于本机服务鉴权">
+            {/* 当前 Key 状态 */}
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <KeyRound className="h-3.5 w-3.5" />
               {localKey.has_key ? `当前：${localKey.masked}` : "尚未生成本地转发 Key（客户端将无法接入）"}
             </div>
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Input
-                  type={showLocalKey ? "text" : "password"}
-                  value={localKeyInput}
-                  onChange={(e) => setLocalKeyInput(e.target.value)}
-                  placeholder="sk-xxxxxxxx…"
-                  className="pr-9 font-mono"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowLocalKey((v) => !v)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  {showLocalKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
+            {/* 输入框独占一行，按钮统一置于卡片底部 */}
+            <div className="relative">
+              <Input
+                type={showLocalKey ? "text" : "password"}
+                value={localKeyInput}
+                onChange={(e) => setLocalKeyInput(e.target.value)}
+                placeholder="sk-xxxxxxxx…"
+                className="pr-9 font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => setShowLocalKey((v) => !v)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                {showLocalKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2 pt-1">
               <Button onClick={saveLocalKey}>保存</Button>
               <Button variant="outline" onClick={generateLocalKey}>
                 <Wand2 />
@@ -606,15 +606,15 @@ export function ConfigView() {
                 </Button>
               )}
             </div>
-          </div>
-        </Section>
+          </Section>
+        </div>
 
-        <Section title="CC 账户" desc="user_ 开头的 Command Code 上游账户；可配置多个，请求按轮询自动切换。支持浏览器授权登录或手动粘贴 Key">
+        <Section title="Command Code 账户" desc="user_ 开头的 Command Code 上游账户；可配置多个，请求按轮询自动切换。支持浏览器授权登录或手动粘贴 Key">
           <div className="space-y-3">
             {accounts.length === 0 ? (
               <p className="flex items-center gap-2 text-xs text-muted-foreground">
                 <UserRound className="h-3.5 w-3.5" />
-                尚未添加 CC 账户（需至少一个才能启动代理）
+                尚未添加 Command Code 账户（需至少一个才能启动代理）
               </p>
             ) : (
               <ul className="space-y-2">

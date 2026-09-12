@@ -20,7 +20,7 @@ const LOGIC_STEPS = [
   },
   {
     title: "上游转发",
-    desc: "携带反检测特征（每 Key 独立会话与设备指纹、traceparent、假项目 slug、动态 CC 版本）转发到 /alpha/generate。",
+    desc: "携带反检测特征（每 Key 独立会话与设备指纹、traceparent、假项目 slug、动态 Command Code 版本）转发到 /alpha/generate。",
   },
   {
     title: "流式翻译",

@@ -270,7 +270,7 @@ export function StatsView() {
                     刷新
                   </Button>
                 </div>
-                <CardDescription>各 CC 上游账户的套餐余额与 5 小时 / 周窗口限额（额度实时来自上游）</CardDescription>
+                <CardDescription>各 Command Code 上游账户的套餐余额与 5 小时 / 周窗口限额（额度实时来自上游）</CardDescription>
               </CardHeader>
               <CardContent className="space-y-2 pt-0">
                 {quotas.map((q, i) => (
