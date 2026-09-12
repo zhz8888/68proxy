@@ -111,6 +111,8 @@ pub struct AppState {
     pub shutdown: Mutex<Option<oneshot::Sender<()>>>,
     /// token 用量统计数据库连接（setup 阶段初始化；代理层经此记录/查询）。
     pub usage: Mutex<Option<rusqlite::Connection>>,
+    /// 指纹持久化文件路径（setup 阶段注入；None 时指纹仅存内存）。
+    pub fingerprint_path: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl AppState {
@@ -136,7 +138,13 @@ impl AppState {
                 .expect("failed to build http client"),
             shutdown: Mutex::new(None),
             usage: Mutex::new(None),
+            fingerprint_path: Mutex::new(None),
         })
+    }
+
+    /// 注入指纹持久化文件路径（应用启动时调用一次；不注入则指纹仅存内存）。
+    pub fn set_fingerprint_path(&self, path: std::path::PathBuf) {
+        *self.fingerprint_path.lock().unwrap() = Some(path);
     }
 
     /// 查询代理服务是否正在运行。

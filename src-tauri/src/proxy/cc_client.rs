@@ -127,21 +127,47 @@ fn ensure_session(state: &AppState, api_key: &str) -> String {
     session_id
 }
 
-/// 取该 API Key 的伪装状态；首次访问时生成随机设备指纹并缓存。
+/// 取该 API Key 的伪装状态；首次访问时优先从磁盘恢复指纹（同一 Key 跨重启
+/// 复用同一设备身份），无记录或读取失败时新生成并写盘。未注入路径则仅存内存。
 fn get_or_create_key_state(state: &AppState, api_key: &str) -> KeyState {
     let mut states = state.key_states.lock().unwrap();
     if let Some(s) = states.get(api_key) {
         return s.clone();
     }
+    let path = state.fingerprint_path.lock().unwrap().clone();
+    let id = fingerprint::key_id(api_key);
+    let fingerprint = match path
+        .as_deref()
+        .and_then(|p| fingerprint::load_store(p).remove(&id))
+    {
+        Some(fp) => {
+            log::info("Fingerprint restored for key");
+            fp
+        }
+        None => {
+            let fp = fingerprint::generate();
+            if let Some(p) = path.as_deref() {
+                if let Err(e) = fingerprint::remember(p, &id, &fp) {
+                    log::warn(&format!("指纹持久化失败，本次仅存内存: {e}"));
+                }
+            }
+            log::info("Fingerprint generated for key");
+            fp
+        }
+    };
     let ks = KeyState {
-        fingerprint: fingerprint::generate(),
+        fingerprint,
         next_init_at: 0,
     };
-    log::info("Fingerprint generated for key");
     states.insert(api_key.to_string(), ks.clone());
     ks
 }
 
+/// 测试用：暴露指定 Key 的指纹（触发一次「恢复或生成」逻辑）。
+#[cfg(test)]
+pub fn key_fingerprint_for_test(state: &AppState, api_key: &str) -> fingerprint::Fingerprint {
+    get_or_create_key_state(state, api_key).fingerprint
+}
 /// 读取当前模拟的 command-code CLI 版本号。
 pub fn cc_version(state: &AppState) -> String {
     state.cc_version.read().unwrap().clone()

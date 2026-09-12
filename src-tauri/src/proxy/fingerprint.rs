@@ -1,6 +1,8 @@
 use rand::Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::path::Path;
 
 /// Windows 设备指纹生成（模拟 CLI 环境，不读取真实系统信息）。
 /// 注意：这是"模拟 CLI"的反检测伪装，不读取真实系统信息。
@@ -68,7 +70,7 @@ fn rand_hex(rng: &mut impl Rng, bytes: usize) -> String {
 ///
 /// 序列化为 camelCase（machineIdHash / macHashes / osUserHash / …），
 /// 字段名与上游期望的格式一致。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FingerprintComponents {
     /// 伪装的机器 ID 哈希（SHA-256）。
@@ -82,11 +84,11 @@ pub struct FingerprintComponents {
     /// 伪装 git 邮箱哈希。
     pub git_email_hash: String,
     /// 伪装平台，固定 win32。
-    pub platform: &'static str,
+    pub platform: String,
     /// 伪装 CPU 架构，固定 x64。
-    pub arch: &'static str,
+    pub arch: String,
     /// 伪装操作系统版本号。
-    pub os_release: &'static str,
+    pub os_release: String,
     /// 从池中随机选取的 CPU 型号。
     pub cpu_model: String,
     /// 对应 CPU 型号的逻辑核心数。
@@ -97,15 +99,15 @@ pub struct FingerprintComponents {
     /// 是否运行在容器中，固定 false（避免触发上游容器检测）。
     pub is_container: bool,
     /// 随机选取的时区名。
-    pub timezone: &'static str,
+    pub timezone: String,
     /// 运行环境标识，固定 cli（模拟 CLI 而非 IDE 插件）。
-    pub runtime: &'static str,
+    pub runtime: String,
     /// 指纹采集器版本号。
     pub collector_version: u32,
 }
 
 /// 完整设备指纹：稳定的摘要 thumbmark + 可上报的明细分量。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fingerprint {
     /// 由关键分量拼接后 SHA-256 得到的稳定摘要，作为设备唯一标识。
     pub thumbmark: String,
@@ -158,16 +160,48 @@ pub fn generate() -> Fingerprint {
             os_user_hash,
             hostname_hash,
             git_email_hash,
-            platform: "win32",
-            arch: "x64",
-            os_release: "10.0.22631",
+            platform: "win32".into(),
+            arch: "x64".into(),
+            os_release: "10.0.22631".into(),
             cpu_model: cpu_model.to_string(),
             cpu_count,
             mem_gib,
             is_container: false,
-            timezone,
-            runtime: "cli",
+            timezone: timezone.to_string(),
+            runtime: "cli".into(),
             collector_version: 1,
         },
     }
+}
+
+/// 指纹持久化文件名（置于应用配置目录）。
+pub const STORE_FILE: &str = "fingerprints.json";
+
+/// 由 API Key 派生持久化用的稳定标识（SHA-256），避免明文 Key 落盘。
+pub fn key_id(api_key: &str) -> String {
+    sha256_hex(api_key)
+}
+
+/// 读取指纹持久化文件（`{ key_id: Fingerprint }`）。
+///
+/// 文件缺失或解析失败时返回空表，不阻断代理主流程。
+pub fn load_store(path: &Path) -> HashMap<String, Fingerprint> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<HashMap<String, Fingerprint>>(&t).ok())
+        .unwrap_or_default()
+}
+
+/// 把某个 Key 的指纹写入持久化文件（读改写；父目录不存在时自动创建）。
+///
+/// 持久化使同一 Key 在进程重启后仍复用同一设备身份，贴近真实 CLI 的
+/// “同机指纹恒定”特征，避免上游把同一账号看成多台机器。
+pub fn remember(path: &Path, id: &str, fp: &Fingerprint) -> Result<(), String> {
+    let mut store = load_store(path);
+    store.insert(id.to_string(), fp.clone());
+    let text = serde_json::to_string_pretty(&store).map_err(|e| format!("指纹序列化失败: {e}"))?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(path, text).map_err(|e| format!("指纹写入失败: {e}"))
 }

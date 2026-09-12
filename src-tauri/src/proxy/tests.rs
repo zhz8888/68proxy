@@ -650,6 +650,68 @@ fn project_slug_format() {
     assert!(!slug.starts_with('-') && !slug.ends_with('-'));
 }
 
+/// 验证指纹持久化：key_id 稳定且不泄露明文 Key；remember 写入后 load_store 能原样读回
+/// 同一份指纹（thumbmark 与 components 全部字段），保证同一 Key 跨重启设备身份不变。
+#[test]
+fn fingerprint_persist_roundtrip() {
+    // 同一 Key 的 id 稳定，不同 Key 的 id 不同；id 为 64 位 hex 且不含明文 Key
+    let id1 = fingerprint::key_id("user_abc123");
+    assert_eq!(id1, fingerprint::key_id("user_abc123"));
+    assert_ne!(id1, fingerprint::key_id("user_xyz789"));
+    assert_eq!(id1.len(), 64);
+    assert!(!id1.contains("user_abc123"));
+
+    let path = std::env::temp_dir().join(format!("cc-fp-test-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    assert!(fingerprint::load_store(&path).is_empty());
+
+    let fp = fingerprint::generate();
+    fingerprint::remember(&path, &id1, &fp).unwrap();
+    let store = fingerprint::load_store(&path);
+    let got = store.get(&id1).expect("指纹应已持久化");
+    assert_eq!(got.thumbmark, fp.thumbmark);
+    assert_eq!(got.components.machine_id_hash, fp.components.machine_id_hash);
+    assert_eq!(got.components.mac_hashes, fp.components.mac_hashes);
+    assert_eq!(got.components.platform, fp.components.platform);
+    assert_eq!(got.components.mem_gib, fp.components.mem_gib);
+    assert_eq!(got.components.timezone, fp.components.timezone);
+    assert_eq!(got.components.collector_version, fp.components.collector_version);
+
+    // 再次 remember 另一 Key 时不应覆盖已存在的条目
+    let id2 = fingerprint::key_id("user_other");
+    fingerprint::remember(&path, &id2, &fingerprint::generate()).unwrap();
+    let store = fingerprint::load_store(&path);
+    assert_eq!(store.len(), 2);
+    assert_eq!(store.get(&id1).unwrap().thumbmark, fp.thumbmark);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 验证同一 Key 的指纹状态跨 AppState 实例稳定：首个实例生成并写盘，第二个实例
+/// （模拟重启，内存已清空）从磁盘恢复出完全相同的指纹。
+#[test]
+fn fingerprint_survives_restart() {
+    use super::cc_client;
+    let path = std::env::temp_dir().join(format!("cc-fp-restart-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    let key = "user_persist_test";
+
+    let state1 = AppState::new(Config::default());
+    state1.set_fingerprint_path(path.clone());
+    let fp1 = cc_client::key_fingerprint_for_test(&state1, key);
+    assert!(path.exists(), "首次生成后应写盘");
+
+    // 新实例：内存为空，应从磁盘恢复同一份指纹
+    let state2 = AppState::new(Config::default());
+    state2.set_fingerprint_path(path.clone());
+    let fp2 = cc_client::key_fingerprint_for_test(&state2, key);
+    assert_eq!(fp1.thumbmark, fp2.thumbmark);
+    assert_eq!(fp1.components.machine_id_hash, fp2.components.machine_id_hash);
+
+    let _ = std::fs::remove_file(&path);
+}
+
 // ── 集成测试：mock 上游 ───────────────────────────────
 
 /// mock CC 上游路由：/alpha/generate 按模型名返回正常 NDJSON、零输出 NDJSON
