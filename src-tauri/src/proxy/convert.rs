@@ -58,9 +58,22 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
     let is_system_role =
         |m: &&Value| matches!(m.get("role").and_then(|r| r.as_str()), Some("system") | Some("developer"));
     let system_msgs: Vec<&Value> = messages.iter().filter(is_system_role).collect();
+    // content 既可能是字符串，也可能是 content-parts 数组（[{"type":"text","text":...}]），
+    // 两种都要抽取，否则数组式 system 会被静默丢弃
     let system_prompt = system_msgs
         .iter()
-        .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+        .filter_map(|m| m.get("content"))
+        .map(|c| match c {
+            Value::String(s) => s.clone(),
+            Value::Array(parts) => parts
+                .iter()
+                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        })
+        .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
     let chat_messages: Vec<&Value> = messages
@@ -312,7 +325,6 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
         params.insert("parallel_tool_calls".into(), p.clone());
     }
 
-    // 注：threadId 变量已生成但按当前协议不写入请求体，保持实际行为一致。
     body
 }
 
@@ -401,16 +413,22 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
                         }
                     }
                     Some("function_call") => {
-                        let p = pending.get_or_insert_with(|| json!({ "role": "assistant", "content": Value::Null, "tool_calls": [] }));
-                        let tcs = p["tool_calls"].as_array_mut().expect("tool_calls is array");
-                        tcs.push(json!({
-                            "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "type": "function",
-                            "function": {
-                                "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                                "arguments": item.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}"),
-                            },
-                        }));
+                        // reasoning 分支可能已先创建了 pending（其中不含 tool_calls）：
+                        // 这里必须补建 tool_calls 数组再追加，避免对 Null 取数组而 panic
+                        let p = pending.get_or_insert_with(|| json!({ "role": "assistant", "content": Value::Null }));
+                        if !p.get("tool_calls").map(|v| v.is_array()).unwrap_or(false) {
+                            p["tool_calls"] = json!([]);
+                        }
+                        if let Some(tcs) = p["tool_calls"].as_array_mut() {
+                            tcs.push(json!({
+                                "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                                    "arguments": item.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}"),
+                                },
+                            }));
+                        }
                     }
                     Some("function_call_output") => {
                         flush_pending(&mut pending, &mut messages);

@@ -15,7 +15,7 @@ use futures_util::stream::{self, StreamExt};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io;
@@ -108,6 +108,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// 在途请求计数守卫：绑定到响应 body 的生命周期，body 结束时计数减 1。
+///
+/// 不能在中件件里用 `next.run()` 返回后立即递减：流式响应的 body 在那之后
+/// 还要持续传输数分钟，提前递减会让 `max_inflight` 对流式请求形同虚设。
+struct InflightGuard {
+    st: Arc<AppState>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.st.inflight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// 在途请求计数中间件：`max_inflight > 0` 时对业务路径（/health、/ 除外）计数，
 /// 超限直接返回 503 server_busy + Retry-After: 5（OpenAI/Anthropic SDK 认得并自动退避）。
 async fn inflight_guard(
@@ -137,8 +151,16 @@ async fn inflight_guard(
         );
     }
     let resp = next.run(req).await;
-    st.inflight.fetch_sub(1, Ordering::SeqCst);
-    resp
+    // 把计数释放推迟到响应 body 被消费/丢弃时：覆盖整个流式传输周期
+    let (parts, body) = resp.into_parts();
+    let guard = InflightGuard { st: st.clone() };
+    let stream = stream::unfold((body.into_data_stream(), guard), |(mut s, g)| async move {
+        match s.next().await {
+            Some(item) => Some((item, (s, g))),
+            None => None,
+        }
+    });
+    axum::response::Response::from_parts(parts, Body::from_stream(stream))
 }
 
 /// 在给定 listener 上启动服务，收到 `shutdown` 信号后优雅停机。
@@ -281,9 +303,22 @@ fn sse_response(
                     Some(Some(Frame::Sse(s))) => {
                         return Some((Ok(s), (rx, protocol, st, ctx, ended, None)));
                     }
-                    Some(Some(Frame::Done { .. })) => {
+                    Some(Some(Frame::Done)) => {
+                        // 正常收尾即视为成功：清零连续超时计数
+                        reset_timeouts(&st);
                         finish_request(&st, &ctx, "ok");
                         return None;
+                    }
+                    Some(Some(Frame::ZeroOutput)) => {
+                        // 零输出帧正常应在首帧前被 handle_stream 拦截；此处为兜底：
+                        // 已发出 SSE 头，只能用协议错误帧收尾
+                        finish_request(&st, &ctx, "error");
+                        pending = Some(protocol_error_frame(
+                            protocol,
+                            "Empty response from upstream (zero output tokens)",
+                            Some(10),
+                        ));
+                        ended = true;
                     }
                     Some(Some(Frame::Timeout)) => {
                         finish_request(&st, &ctx, "timeout");
@@ -361,6 +396,48 @@ fn reset_timeouts(st: &AppState) {
     st.consecutive_timeouts.store(0, Ordering::SeqCst);
 }
 
+/// 单次请求的 token/事件计数，供 handler 与流式任务共享回填。
+///
+/// `ReqCtx` 会被克隆多份（handler 与后台流任务各持一份），普通字段无法把流任务
+/// 算出的真实 token 传回结束点；故用 `Arc<原子量>` 共享写入点，`finish_request`
+/// 从这里读取最终结果，避免被 ctx 中的 0 覆盖。
+#[derive(Default)]
+struct ReqTokens {
+    /// 输入 token（含缓存命中与写入）。
+    input: AtomicU64,
+    /// 输出 token。
+    output: AtomicU64,
+    /// 命中缓存的输入 token。
+    cached: AtomicU64,
+    /// 最后收到的上游事件类型。
+    last_event: Mutex<String>,
+}
+
+/// 单次请求的上下文：贯穿 handler → 流式任务 → 结束回填的生命周期数据。
+#[derive(Clone)]
+struct ReqCtx {
+    /// 请求 ID（与下游响应体中的 id 一致）。
+    id: String,
+    /// 入口路径。
+    path: &'static str,
+    /// 请求模型名。
+    model: String,
+    /// 是否流式。
+    stream: bool,
+    /// 开始时间（Unix 毫秒）。
+    started_at: u64,
+    /// 结束时回填的 token 与事件统计（handler 与流任务共享）。
+    tokens: Arc<ReqTokens>,
+}
+
+/// 把流任务统计出的 token 与最后事件写入共享计数（结束前调用）。
+fn set_ctx_tokens(tokens: &ReqTokens, input: u64, output: u64, cached: u64, last_event: &str) {
+    tokens.input.store(input, Ordering::Relaxed);
+    tokens.output.store(output, Ordering::Relaxed);
+    tokens.cached.store(cached, Ordering::Relaxed);
+    *tokens.last_event.lock().unwrap() = last_event.to_string();
+}
+
 /// 请求开始时登记初始摘要（status=streaming）并推送给前端。
 fn record_start(st: &AppState, ctx: &ReqCtx) {
     let info = RequestInfo {
@@ -383,14 +460,18 @@ fn record_start(st: &AppState, ctx: &ReqCtx) {
 /// 请求结束时按 id 回填队列中对应条目的状态/耗时/token，并把最终摘要推送给前端。
 fn finish_request(st: &AppState, ctx: &ReqCtx, status: &str) {
     let elapsed = now_millis().saturating_sub(ctx.started_at);
+    let input_tokens = ctx.tokens.input.load(Ordering::Relaxed);
+    let output_tokens = ctx.tokens.output.load(Ordering::Relaxed);
+    let cached_tokens = ctx.tokens.cached.load(Ordering::Relaxed);
+    let last_event = ctx.tokens.last_event.lock().unwrap().clone();
     let mut q = st.requests.lock().unwrap();
     if let Some(entry) = q.iter_mut().find(|r| r.id == ctx.id) {
         entry.status = status.to_string();
         entry.elapsed_ms = elapsed;
-        entry.input_tokens = ctx.input_tokens;
-        entry.output_tokens = ctx.output_tokens;
-        entry.cached_tokens = ctx.cached_tokens;
-        entry.last_event = ctx.last_event.clone();
+        entry.input_tokens = input_tokens;
+        entry.output_tokens = output_tokens;
+        entry.cached_tokens = cached_tokens;
+        entry.last_event = last_event.clone();
     }
     drop(q);
     let info = RequestInfo {
@@ -401,43 +482,22 @@ fn finish_request(st: &AppState, ctx: &ReqCtx, status: &str) {
         status: status.to_string(),
         started_at: ctx.started_at,
         elapsed_ms: elapsed,
-        input_tokens: ctx.input_tokens,
-        output_tokens: ctx.output_tokens,
-        cached_tokens: ctx.cached_tokens,
-        last_event: ctx.last_event.clone(),
+        input_tokens,
+        output_tokens,
+        cached_tokens,
+        last_event,
     };
     emit_request(&info);
-}
-
-/// 单次请求的上下文：贯穿 handler → 流式任务 → 结束回填的生命周期数据。
-#[derive(Clone)]
-struct ReqCtx {
-    /// 请求 ID（与下游响应体中的 id 一致）。
-    id: String,
-    /// 入口路径。
-    path: &'static str,
-    /// 请求模型名。
-    model: String,
-    /// 是否流式。
-    stream: bool,
-    /// 开始时间（Unix 毫秒）。
-    started_at: u64,
-    /// 结束时回填：输入 token。
-    input_tokens: u64,
-    /// 结束时回填：输出 token。
-    output_tokens: u64,
-    /// 结束时回填：缓存命中 token。
-    cached_tokens: u64,
-    /// 结束时回填：最后的 CC 事件类型。
-    last_event: String,
 }
 
 /// 后台读流任务经 mpsc 通道传给响应流的帧类型。
 enum Frame {
     /// 一条可直接下发的 SSE 文本帧。
     Sse(String),
-    /// 上游流正常结束；`zero_output` 标记是否零输出（需改判限流）。
-    Done { zero_output: bool },
+    /// 上游流正常结束（已产出内容或正常收尾）。
+    Done,
+    /// 上游零输出（未产出任何内容）：首帧前仍可回退为携带正确状态码的 JSON 限流响应。
+    ZeroOutput,
     /// 上游空闲超时。
     Timeout,
     /// 上游读流出错，携带错误消息。
@@ -495,61 +555,33 @@ async fn read_json_body(
 /// 2. 鉴权通过后从 CC 账户列表按轮询取下一个账户，返回 `(api_key, user_id)` 供上游转发
 ///    （api_key 用于 Bearer/伪造头，user_id 用于会话/指纹/初始化键控）。
 ///    未配置任何账户时 401（提示先添加账户）。
+///
+/// 失败返回 `(状态码, 具体原因)`，由各协议入口包装成对应的错误体，避免丢失失败细节。
 async fn api_key_or_401(
     st: &AppState,
     headers: &HeaderMap,
-) -> Result<(String, String), axum::response::Response> {
+) -> Result<(String, String), (u16, &'static str)> {
     // 本地 key 必须已生成，且请求头携带的必须与本地一致（sk- 开头，防止任意 sk- 直过）
     let local = crate::credentials::cached_local_key();
     let Some(expected) = local else {
-        return Err(json_response(
+        return Err((
             401,
-            json!({
-                "error": {
-                    "message": "本地转发 Key 未生成，请先在「配置 → 凭据」随机生成 sk- 开头的 Key",
-                    "type": "auth_error",
-                }
-            }),
-            None,
+            "本地转发 Key 未生成，请先在「配置 → 凭据」随机生成 sk- 开头的 Key",
         ));
     };
     let Some(sent) = extract_api_key(headers) else {
-        return Err(json_response(
-            401,
-            json!({
-                "error": {
-                    "message": "Missing API key. Send in Authorization: Bearer <key> header",
-                    "type": "auth_error",
-                }
-            }),
-            None,
-        ));
+        return Err((401, "Missing API key. Send in Authorization: Bearer <key> header"));
     };
     if sent != expected {
-        return Err(json_response(
-            401,
-            json!({
-                "error": {
-                    "message": "Invalid API key",
-                    "type": "auth_error",
-                }
-            }),
-            None,
-        ));
+        return Err((401, "Invalid API key"));
     }
 
     // 鉴权通过：轮询取下一个 CC 账户供上游转发
     match crate::credentials::next_account(st) {
         Some(a) => Ok((a.key, a.user_id)),
-        None => Err(json_response(
+        None => Err((
             401,
-            json!({
-                "error": {
-                    "message": "未配置 CC 账户，请先在「配置 → 凭据」添加 user_ 开头的账户 Key",
-                    "type": "auth_error",
-                }
-            }),
-            None,
+            "未配置 CC 账户，请先在「配置 → 凭据」添加 user_ 开头的账户 Key",
         )),
     }
 }
@@ -576,7 +608,13 @@ async fn chat_completions(
     };
     let (api_key, user_id) = match api_key_or_401(&st, &headers).await {
         Ok(k) => k,
-        Err(r) => return r,
+        Err((status, msg)) => {
+            return json_response(
+                status,
+                json!({ "error": { "message": msg, "type": "authentication_error" } }),
+                None,
+            )
+        }
     };
     let stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     let model = req
@@ -595,10 +633,7 @@ async fn chat_completions(
         model: model.clone(),
         stream,
         started_at: now_millis(),
-        input_tokens: 0,
-        output_tokens: 0,
-        cached_tokens: 0,
-        last_event: String::new(),
+        tokens: Arc::new(ReqTokens::default()),
     };
     record_start(&st, &ctx);
 
@@ -662,16 +697,10 @@ async fn messages(
     };
     let (api_key, user_id) = match api_key_or_401(&st, &headers).await {
         Ok(k) => k,
-        Err(_) => {
+        Err((status, msg)) => {
             return json_response(
-                401,
-                errors::anthropic_error(
-                    401,
-                    "authentication_error",
-                    "Missing API key. Send in Authorization: Bearer <key> header",
-                    None,
-                )
-                .1,
+                status,
+                errors::anthropic_error(status, "authentication_error", msg, None).1,
                 None,
             )
         }
@@ -689,10 +718,7 @@ async fn messages(
         model: model.clone(),
         stream,
         started_at: now_millis(),
-        input_tokens: 0,
-        output_tokens: 0,
-        cached_tokens: 0,
-        last_event: String::new(),
+        tokens: Arc::new(ReqTokens::default()),
     };
     record_start(&st, &ctx);
 
@@ -765,7 +791,13 @@ async fn responses(
     };
     let (api_key, user_id) = match api_key_or_401(&st, &headers).await {
         Ok(k) => k,
-        Err(r) => return r,
+        Err((status, msg)) => {
+            return json_response(
+                status,
+                json!({ "error": { "message": msg, "type": "authentication_error" } }),
+                None,
+            )
+        }
     };
     let stream = req.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     let model = req
@@ -795,10 +827,7 @@ async fn responses(
         model: model.clone(),
         stream,
         started_at: now_millis(),
-        input_tokens: 0,
-        output_tokens: 0,
-        cached_tokens: 0,
-        last_event: String::new(),
+        tokens: Arc::new(ReqTokens::default()),
     };
     record_start(&st, &ctx);
 
@@ -858,17 +887,18 @@ async fn handle_stream(
     let st2 = st.clone();
     let model = ctx.model.clone();
     let id = ctx.id.clone();
+    let tokens = ctx.tokens.clone();
 
     tokio::spawn(async move {
         match protocol {
             Protocol::OpenAi => {
-                stream_openai(st2, upstream, tx, model, id, "/v1/chat/completions").await;
+                stream_openai(st2, upstream, tx, model, id, tokens, "/v1/chat/completions").await;
             }
             Protocol::Anthropic => {
-                stream_anthropic(st2, upstream, tx, model, id, "/v1/messages").await;
+                stream_anthropic(st2, upstream, tx, model, id, tokens, "/v1/messages").await;
             }
             Protocol::Responses => {
-                stream_responses(st2, upstream, tx, model, id, "/v1/responses").await;
+                stream_responses(st2, upstream, tx, model, id, tokens, "/v1/responses").await;
             }
         }
     });
@@ -883,9 +913,15 @@ async fn handle_stream(
                 if s.starts_with(": ") {
                     continue;
                 }
-                // 各协议“真正携带模型输出”的帧特征，决定从该帧起升级为 SSE
+                // 各协议“真正携带模型输出”的帧特征，决定从该帧起升级为 SSE。
+                // OpenAI 只看增量内容（content/reasoning_content/tool_calls），
+                // 不含结束帧，否则零输出时结束帧会让回退 JSON 429 的分支不可达。
                 let is_content = match protocol {
-                    Protocol::OpenAi => true,
+                    Protocol::OpenAi => {
+                        s.contains("\"content\"")
+                            || s.contains("\"reasoning_content\"")
+                            || s.contains("\"tool_calls\"")
+                    }
                     Protocol::Anthropic => s.contains("\"text_delta\"") || s.contains("\"tool_use\""),
                     Protocol::Responses => {
                         s.contains("response.output_item.added")
@@ -899,13 +935,16 @@ async fn handle_stream(
                 }
                 prefix.push(s);
             }
-            Some(Frame::Done { zero_output }) => {
-                if zero_output {
-                    // 上游未产出任何内容：尚未发 SSE 头，直接以 JSON 429 限流响应回退
-                    reset_timeouts(&st);
-                    finish_request(&st, &ctx, "error");
-                    let (status, body, ra) = match protocol {
-                        Protocol::OpenAi | Protocol::Responses => {
+            Some(Frame::Done) => {
+                reset_timeouts(&st);
+                return sse_response(prefix, rx, protocol, st, ctx);
+            }
+            Some(Frame::ZeroOutput) => {
+                // 上游未产出任何内容：尚未发 SSE 头，直接以 JSON 429 限流响应回退
+                reset_timeouts(&st);
+                finish_request(&st, &ctx, "error");
+                let (status, body, ra) = match protocol {
+                    Protocol::OpenAi | Protocol::Responses => {
                             let (s, b) = errors::openai_error(
                                 429,
                                 "rate_limit_error",
@@ -924,10 +963,7 @@ async fn handle_stream(
                             (s, b, Some(10))
                         }
                     };
-                    return json_response(status, body, ra);
-                }
-                reset_timeouts(&st);
-                return sse_response(prefix, rx, protocol, st, ctx);
+                return json_response(status, body, ra);
             }
             Some(Frame::Timeout) => {
                 let msg = timeout_message(&st);
@@ -975,19 +1011,21 @@ async fn handle_stream(
 /// 后台任务：读上游字节流（按空闲超时），逐行经 OpenAiTranslator 翻译后发帧。
 ///
 /// 本轮 chunk 未产出任何帧时补发 keepalive 注释帧维持下游连接；
-/// 结束后按零输出与否发 Done，接收方若已断开（send 失败）则直接退出。
+/// 结束后把 token 写入共享计数；零输出发 ZeroOutput 帧（供首帧前回退 JSON 429），
+/// 接收方若已断开（send 失败）则直接退出。
 async fn stream_openai(
     st: Arc<AppState>,
     upstream: reqwest::Response,
     tx: mpsc::Sender<Frame>,
     model: String,
     completion_id: String,
+    tokens: Arc<ReqTokens>,
     endpoint: &'static str,
 ) {
     let drain = Duration::from_millis(st.config.read().unwrap().client_drain_timeout_ms);
     let mut translator = OpenAiTranslator::new(&model, &completion_id);
     let mut stream = upstream.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer: Vec<u8> = Vec::new();
     let mut last_event = String::new();
 
     loop {
@@ -1010,7 +1048,7 @@ async fn stream_openai(
                 return;
             }
         };
-        let complete = push_and_split(&mut buffer, &String::from_utf8_lossy(&chunk));
+        let complete = push_and_split(&mut buffer, &chunk);
         let mut had_output = false;
         for line in &complete {
             let frames = translator.parse_line(line);
@@ -1030,21 +1068,27 @@ async fn stream_openai(
             return;
         }
     }
-    if !buffer.trim().is_empty() {
-        for f in translator.parse_line(&buffer) {
+    if let Some(tail) = take_incomplete_tail(&mut buffer) {
+        for f in translator.parse_line(&tail) {
             if !send_frame(&tx, Frame::Sse(f), drain).await {
                 return;
             }
         }
     }
-    update_ctx_tokens(&st, &completion_id, &translator.input_tokens, &translator.output_tokens, &translator.cached_tokens, &last_event);
-    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, 0, true);
-    if translator.output_tokens == 0 {
-        let _ = send_frame(&tx, Frame::Sse(translator.zero_output_error_frame()), drain).await;
-        let _ = send_frame(&tx, Frame::Done { zero_output: true }, drain).await;
-    } else {
+    set_ctx_tokens(
+        &tokens,
+        translator.input_tokens,
+        translator.output_tokens,
+        translator.cached_tokens,
+        &last_event,
+    );
+    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true);
+    if translator.produced_content() {
         let _ = send_frame(&tx, Frame::Sse(translator.done_event()), drain).await;
-        let _ = send_frame(&tx, Frame::Done { zero_output: false }, drain).await;
+        let _ = send_frame(&tx, Frame::Done, drain).await;
+    } else {
+        let _ = send_frame(&tx, Frame::Sse(translator.zero_output_error_frame()), drain).await;
+        let _ = send_frame(&tx, Frame::ZeroOutput, drain).await;
     }
 }
 
@@ -1056,6 +1100,7 @@ async fn stream_anthropic(
     tx: mpsc::Sender<Frame>,
     model: String,
     message_id: String,
+    tokens: Arc<ReqTokens>,
     endpoint: &'static str,
 ) {
     let drain = Duration::from_millis(st.config.read().unwrap().client_drain_timeout_ms);
@@ -1064,7 +1109,7 @@ async fn stream_anthropic(
         return;
     }
     let mut stream = upstream.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer: Vec<u8> = Vec::new();
     let mut last_event = String::new();
 
     loop {
@@ -1087,7 +1132,7 @@ async fn stream_anthropic(
                 return;
             }
         };
-        let complete = push_and_split(&mut buffer, &String::from_utf8_lossy(&chunk));
+        let complete = push_and_split(&mut buffer, &chunk);
         let mut had_output = false;
         for line in &complete {
             let frames = translator.process_line(line);
@@ -1107,20 +1152,31 @@ async fn stream_anthropic(
             return;
         }
     }
-    if !buffer.trim().is_empty() {
-        for f in translator.process_line(&buffer) {
+    if let Some(tail) = take_incomplete_tail(&mut buffer) {
+        for f in translator.process_line(&tail) {
             if !send_frame(&tx, Frame::Sse(f), drain).await {
                 return;
             }
         }
     }
-    let zero = translator.output_tokens == 0;
+    if !translator.produced_content {
+        // 未产出任何内容：message_start 仍缓存在首帧前缀中未下发，
+        // 直接以 ZeroOutput 让首帧循环回退为携带 429 的 JSON 响应
+        let _ = send_frame(&tx, Frame::ZeroOutput, drain).await;
+        return;
+    }
     for f in translator.finalize() {
         if !send_frame(&tx, Frame::Sse(f), drain).await {
             return;
         }
     }
-    update_ctx_tokens(&st, &message_id, &translator.input_tokens, &translator.output_tokens, &translator.cached_tokens, &last_event);
+    set_ctx_tokens(
+        &tokens,
+        translator.input_tokens,
+        translator.output_tokens,
+        translator.cached_tokens,
+        &last_event,
+    );
     record_usage_entry(
         &st,
         &model,
@@ -1131,7 +1187,7 @@ async fn stream_anthropic(
         translator.cache_write_tokens.unwrap_or(0),
         true,
     );
-    let _ = send_frame(&tx, Frame::Done { zero_output: zero }, drain).await;
+    let _ = send_frame(&tx, Frame::Done, drain).await;
 }
 
 /// 后台任务：读上游字节流并经 ResponsesTranslator 翻译（流程同 stream_openai，
@@ -1142,6 +1198,7 @@ async fn stream_responses(
     tx: mpsc::Sender<Frame>,
     model: String,
     response_id: String,
+    tokens: Arc<ReqTokens>,
     endpoint: &'static str,
 ) {
     let drain = Duration::from_millis(st.config.read().unwrap().client_drain_timeout_ms);
@@ -1150,7 +1207,7 @@ async fn stream_responses(
         return;
     }
     let mut stream = upstream.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer: Vec<u8> = Vec::new();
     let mut last_event = String::new();
 
     loop {
@@ -1173,7 +1230,7 @@ async fn stream_responses(
                 return;
             }
         };
-        let complete = push_and_split(&mut buffer, &String::from_utf8_lossy(&chunk));
+        let complete = push_and_split(&mut buffer, &chunk);
         let mut had_output = false;
         for line in &complete {
             let frames = translator.process_line(line);
@@ -1193,40 +1250,74 @@ async fn stream_responses(
             return;
         }
     }
-    if !buffer.trim().is_empty() {
-        for f in translator.process_line(&buffer) {
+    if let Some(tail) = take_incomplete_tail(&mut buffer) {
+        for f in translator.process_line(&tail) {
             if !send_frame(&tx, Frame::Sse(f), drain).await {
                 return;
             }
         }
     }
-    let zero = translator.output_tokens == 0;
+    if !translator.produced_content() {
+        // 未产出任何内容：response.created 仍缓存在首帧前缀中未下发，
+        // 直接以 ZeroOutput 让首帧循环回退为携带 429 的 JSON 响应
+        let _ = send_frame(&tx, Frame::ZeroOutput, drain).await;
+        return;
+    }
     for f in translator.finalize() {
         if !send_frame(&tx, Frame::Sse(f), drain).await {
             return;
         }
     }
-    update_ctx_tokens(&st, &response_id, &translator.input_tokens, &translator.output_tokens, &translator.cached_tokens, &last_event);
-    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, 0, true);
-    let _ = send_frame(&tx, Frame::Done { zero_output: zero }, drain).await;
+    set_ctx_tokens(
+        &tokens,
+        translator.input_tokens,
+        translator.output_tokens,
+        translator.cached_tokens,
+        &last_event,
+    );
+    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true);
+    let _ = send_frame(&tx, Frame::Done, drain).await;
+}
+// ── 行拆分工具 ────────────────────────────────────────
+
+/// 把缓冲字节按 `\n` 拆分为「完整行」与「最后未完结片段」（字节级）。
+///
+/// 必须在字节层切分：上游字节流可能在多字节 UTF-8 字符（中文/emoji）中间断开，
+/// 若先整体 `from_utf8_lossy` 再切行，被截断的字符会变成替换符，造成静默乱码。
+fn split_lines_bytes(buffer: &[u8]) -> (Vec<String>, Vec<u8>) {
+    let split: Vec<&[u8]> = buffer.split(|&b| b == b'\n').collect();
+    let (complete, last) = split.split_at(split.len() - 1);
+    (
+        complete
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect(),
+        last[0].to_vec(),
+    )
 }
 
-/// 流结束后把上游回报的 token 统计与最后事件类型回填到请求队列对应条目。
-fn update_ctx_tokens(
-    st: &AppState,
-    id: &str,
-    input: &u64,
-    output: &u64,
-    cached: &u64,
-    last_event: &str,
-) {
-    let mut q = st.requests.lock().unwrap();
-    if let Some(entry) = q.iter_mut().find(|r| r.id == id) {
-        entry.input_tokens = *input;
-        entry.output_tokens = *output;
-        entry.cached_tokens = *cached;
-        entry.last_event = last_event.to_string();
+/// 追加新到的字节并按需切分：仅当新数据含换行时才做行切分。
+///
+/// `buffer` 中永不残留 `\n`，故无换行即无完整行；避免对增长中的超长单行
+/// （大 tool-call / tool-result）反复做全量 split —— O(n²) → O(n)。
+/// 返回的每一行都是完整行，其字节边界必然落在字符边界上，可安全解码。
+fn push_and_split(buffer: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> {
+    buffer.extend_from_slice(chunk);
+    if !chunk.contains(&b'\n') {
+        return Vec::new();
     }
+    let (complete, last) = split_lines_bytes(buffer);
+    *buffer = last;
+    complete
+}
+
+/// 解码并返回缓冲中最后一段未完结字节（流结束时处理尾部残留）。
+fn take_incomplete_tail(buffer: &mut Vec<u8>) -> Option<String> {
+    if buffer.iter().all(|b| b.is_ascii_whitespace()) {
+        buffer.clear();
+        return None;
+    }
+    Some(String::from_utf8_lossy(buffer).into_owned())
 }
 
 /// 记录一条成功的 token 用量到统计库（token 真实值出现点调用）。
@@ -1284,7 +1375,7 @@ async fn handle_nonstream(
     protocol: Protocol,
 ) -> axum::response::Response {
     let mut stream = upstream.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer: Vec<u8> = Vec::new();
     let mut full_text = String::new();
     let mut reasoning = String::new();
     let mut finish_reason = "stop".to_string();
@@ -1308,7 +1399,7 @@ async fn handle_nonstream(
                 return nonstream_error(protocol, 429, &msg, Some(5));
             }
         };
-        let complete = push_and_split(&mut buffer, &String::from_utf8_lossy(&chunk));
+        let complete = push_and_split(&mut buffer, &chunk);
         for line in &complete {
             parse_ndjson_line(
                 line,
@@ -1321,9 +1412,9 @@ async fn handle_nonstream(
             );
         }
     }
-    if !buffer.trim().is_empty() {
+    if let Some(tail) = take_incomplete_tail(&mut buffer) {
         parse_ndjson_line(
-            &buffer,
+            &tail,
             &mut full_text,
             &mut reasoning,
             &mut finish_reason,
@@ -1336,8 +1427,7 @@ async fn handle_nonstream(
     let (mut input, output, mut cached) = usage_tokens(&usage);
     let cache_write = usage
         .as_ref()
-        .and_then(|u| u.pointer("/inputTokenDetails/cacheWriteTokens"))
-        .and_then(|v| v.as_u64());
+        .map(|u| super::sse::read_cache_write_tokens(u));
     if output == 0 {
         // usage 未回报输出：输入/缓存计数一并清零，避免无效请求计入统计
         input = 0;
@@ -1361,6 +1451,8 @@ async fn handle_nonstream(
         );
     }
     reset_timeouts(&st);
+    // 回填共享计数供 finish_request 使用，避免前端请求列表 token 恒为 0
+    set_ctx_tokens(&ctx.tokens, input, output, cached, &last_event);
     record_usage_entry(
         &st,
         &ctx.model,
@@ -1418,33 +1510,6 @@ async fn handle_nonstream(
             json_response(200, body, None)
         }
     }
-}
-
-/// 将缓冲按行拆分：返回完整行 + 最后未完结片段，避免借用冲突。
-fn split_lines(buffer: &str) -> (Vec<String>, String) {
-    let split: Vec<&str> = buffer.split('\n').collect();
-    if split.is_empty() {
-        return (Vec::new(), String::new());
-    }
-    let (complete, last) = split.split_at(split.len() - 1);
-    (
-        complete.iter().map(|s| s.to_string()).collect(),
-        last[0].to_string(),
-    )
-}
-
-/// 追加新到的数据并按需切分：仅当新数据含换行时才做行切分。
-///
-/// `buffer` 中永不残留 `\n`，故无换行即无完整行；避免对增长中的超长单行
-/// （大 tool-call / tool-result）反复做全量 split —— O(n²) → O(n)。
-fn push_and_split(buffer: &mut String, chunk: &str) -> Vec<String> {
-    buffer.push_str(chunk);
-    if !chunk.contains('\n') {
-        return Vec::new();
-    }
-    let (complete, last) = split_lines(buffer);
-    *buffer = last;
-    complete
 }
 
 /// 把上游错误体摘要成单行，便于日志排查：压掉换行、截断到 500 字符，

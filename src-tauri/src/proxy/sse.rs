@@ -66,6 +66,13 @@ pub fn read_cache_read_tokens(u: &Value) -> u64 {
         .unwrap_or(0)
 }
 
+/// 读取 CC usage 对象中的缓存写入 token 数（`inputTokenDetails.cacheWriteTokens`）；缺失返回 0。
+pub fn read_cache_write_tokens(u: &Value) -> u64 {
+    u.pointer("/inputTokenDetails/cacheWriteTokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+}
+
 /// CC NDJSON → OpenAI SSE 翻译器。
 pub struct OpenAiTranslator {
     /// 下游响应体的 completion id（跨帧保持不变）。
@@ -87,6 +94,8 @@ pub struct OpenAiTranslator {
     pub output_tokens: u64,
     /// 命中缓存的输入 token 数。
     pub cached_tokens: u64,
+    /// 写入缓存的输入 token 数（映射为成本估算的 cache_write）。
+    pub cache_write_tokens: u64,
 }
 
 impl OpenAiTranslator {
@@ -103,6 +112,7 @@ impl OpenAiTranslator {
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
+            cache_write_tokens: 0,
         }
     }
 
@@ -194,6 +204,7 @@ impl OpenAiTranslator {
                     self.input_tokens = u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
                     self.output_tokens = u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
                     self.cached_tokens = read_cache_read_tokens(u);
+                    self.cache_write_tokens = read_cache_write_tokens(u);
                 }
             }
             "finish" => {
@@ -201,26 +212,23 @@ impl OpenAiTranslator {
                     .finish_reason
                     .clone()
                     .unwrap_or_else(|| map_finish_reason(event.get("finishReason").and_then(|v| v.as_str()).unwrap_or("stop")));
-                let mut u = event
-                    .get("totalUsage")
-                    .cloned()
-                    .or_else(|| event.get("usage").cloned())
-                    .unwrap_or_else(|| serde_json::json!({}));
-                let mut input = u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let mut output = u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let mut cached = read_cache_read_tokens(&u);
-                normalize_usage(&mut input, &mut output, &mut cached);
-                u["inputTokens"] = serde_json::json!(input);
-                u["outputTokens"] = serde_json::json!(output);
-                u["inputTokenDetails"] = serde_json::json!({ "cacheReadTokens": cached });
-                self.input_tokens = input;
-                self.output_tokens = output;
-                self.cached_tokens = cached;
+                // 仅在带 usage 时更新计数：上游偶发不回 totalUsage，此时保留
+                // finish-step 已记录的值，不要用 0 覆盖（否则会把已出正文的流误判为空响应）
+                if let Some(u) = event.get("totalUsage").cloned().or_else(|| event.get("usage").cloned()) {
+                    let mut input = u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let mut output = u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let mut cached = read_cache_read_tokens(&u);
+                    normalize_usage(&mut input, &mut output, &mut cached);
+                    self.input_tokens = input;
+                    self.output_tokens = output;
+                    self.cached_tokens = cached;
+                    self.cache_write_tokens = read_cache_write_tokens(&u);
+                }
                 let usage = serde_json::json!({
-                    "prompt_tokens": input,
-                    "completion_tokens": output,
-                    "total_tokens": input + output,
-                    "prompt_tokens_details": { "cached_tokens": cached },
+                    "prompt_tokens": self.input_tokens,
+                    "completion_tokens": self.output_tokens,
+                    "total_tokens": self.input_tokens + self.output_tokens,
+                    "prompt_tokens_details": { "cached_tokens": self.cached_tokens },
                 });
                 out.push(make_chunk(&self.completion_id, self.created, &self.model, serde_json::json!({}), Some(&fr), Some(usage)));
             }
@@ -238,6 +246,14 @@ impl OpenAiTranslator {
             }
         }
         out
+    }
+
+    /// 是否已向下游产出过内容帧（正文/推理/工具调用）。
+    ///
+    /// 零输出判定以此为准而非 output_tokens：上游若未回报 usage，output_tokens 可能为 0，
+    /// 但正文其实已经流式发出，不能据此补发“空响应”错误帧。
+    pub fn produced_content(&self) -> bool {
+        self.chunk_index > 0
     }
 
     /// 流正常结束时的终止帧 `data: [DONE]`。
@@ -301,6 +317,10 @@ pub struct ResponsesTranslator {
     pub output_tokens: u64,
     /// 命中缓存的输入 token 数。
     pub cached_tokens: u64,
+    /// 写入缓存的输入 token 数（映射为成本估算的 cache_write）。
+    pub cache_write_tokens: u64,
+    /// 是否已产出过内容（正文/思考/工具调用）；零输出判定以此为准。
+    produced_content: bool,
     /// 流中已出现过 error 事件，finalize 时不再补发完成事件。
     pub has_error: bool,
 }
@@ -328,6 +348,8 @@ impl ResponsesTranslator {
             input_tokens: 0,
             output_tokens: 0,
             cached_tokens: 0,
+            cache_write_tokens: 0,
+            produced_content: false,
             has_error: false,
         }
     }
@@ -361,6 +383,13 @@ impl ResponsesTranslator {
             "response.created",
             serde_json::json!({ "type": "response.created", "response": self.skeleton("in_progress", vec![]) }),
         )
+    }
+
+    /// 是否已向下游产出过内容条目（正文/思考/工具调用）。
+    ///
+    /// 零输出判定以此为准而非 output_tokens：上游未回报 usage 时 output_tokens 可能为 0。
+    pub fn produced_content(&self) -> bool {
+        self.produced_content
     }
 
     /// 按 Responses 协议字段名组装 usage 对象。
@@ -483,6 +512,7 @@ impl ResponsesTranslator {
                 if text.is_empty() {
                     return out;
                 }
+                self.produced_content = true;
                 if !self.reasoning_open {
                     self.open_reasoning_item(&mut out);
                 }
@@ -500,6 +530,7 @@ impl ResponsesTranslator {
                 if text.is_empty() {
                     return out;
                 }
+                self.produced_content = true;
                 // 正文开始前先收尾思考条目
                 self.close_reasoning_item(&mut out);
                 if !self.text_open {
@@ -536,6 +567,7 @@ impl ResponsesTranslator {
                 self.output_tokens += 1;
             }
             "tool-call" => {
+                self.produced_content = true;
                 self.close_reasoning_item(&mut out);
                 self.close_text_item(&mut out);
                 let call_id = event
@@ -593,6 +625,7 @@ impl ResponsesTranslator {
                     self.input_tokens = input;
                     self.output_tokens = output;
                     self.cached_tokens = cached;
+                    self.cache_write_tokens = read_cache_write_tokens(&u);
                 }
             }
             "error" => {
@@ -687,6 +720,8 @@ pub struct AnthropicTranslator {
     pub cached_tokens: u64,
     /// 写入缓存的输入 token 数（映射为 cache_creation_input_tokens，可能缺失）。
     pub cache_write_tokens: Option<u64>,
+    /// 是否已向下游产出过内容（正文/思考/工具调用）；零输出判定以此为准。
+    pub produced_content: bool,
     /// 流中已出现过 error 事件，finalize 时不再补发完成事件。
     pub has_error: bool,
 }
@@ -709,6 +744,7 @@ impl AnthropicTranslator {
             output_tokens: 0,
             cached_tokens: 0,
             cache_write_tokens: None,
+            produced_content: false,
             has_error: false,
         }
     }
@@ -793,7 +829,8 @@ impl AnthropicTranslator {
     /// 解析一行 CC NDJSON 事件，返回需下发的 Anthropic SSE 事件列表（可能为空）。
     ///
     /// 文本增量会自动开启/延续 text 块；tool-call 先关闭 text 块再一次性发出
-    /// tool_use 的 start/delta/stop 三帧；reasoning 事件被有意丢弃（Anthropic 客户端不消费该字段）。
+    /// tool_use 的 start/delta/stop 三帧；reasoning-delta 映射为 thinking 块
+    /// （Claude Code 会将其显示为思考内容）。
     pub fn process_line(&mut self, line: &str) -> Vec<String> {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed == "[DONE]" {
@@ -818,6 +855,7 @@ impl AnthropicTranslator {
                 if text.is_empty() {
                     return out;
                 }
+                self.produced_content = true;
                 let start_block = self.start_thinking_block();
                 if !start_block.is_empty() {
                     out.push(start_block);
@@ -832,6 +870,7 @@ impl AnthropicTranslator {
             }
             "text-delta" => {
                 let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                self.produced_content = true;
                 let start_block = self.start_text_block();
                 if !start_block.is_empty() {
                     out.push(start_block);
@@ -844,6 +883,7 @@ impl AnthropicTranslator {
                 self.output_tokens += 1;
             }
             "tool-call" => {
+                self.produced_content = true;
                 let close_block = self.close_block();
                 if !close_block.is_empty() {
                     out.push(close_block);
@@ -900,13 +940,9 @@ impl AnthropicTranslator {
                     if let Some(nc) = u.pointer("/inputTokenDetails/noCacheTokens").and_then(|v| v.as_u64()) {
                         self.no_cache_tokens = Some(nc);
                     }
-                } else {
-                    // 上游未回报 usage：清零估算值，避免 message_delta 上报虚高 token
-                    self.input_tokens = 0;
-                    self.output_tokens = 0;
-                    self.cached_tokens = 0;
-                    self.cache_write_tokens = None;
                 }
+                // 上游未回报 usage 时保留逐 delta 估算，不清零：清零会让 finalize
+                // 把已流式输出的正文误判为空响应（发 rate_limit_error 而不发收尾事件）
             }
             "error" => {
                 self.has_error = true;
@@ -929,7 +965,7 @@ impl AnthropicTranslator {
     }
 
     /// 流结束收尾：关闭打开的块（thinking 先发 signature_delta）后补发
-    /// message_delta + message_stop；零输出时改发 error 帧（rate_limit_error +
+    /// message_delta + message_stop；从未产出任何内容时改发 error 帧（rate_limit_error +
     /// retry_after），已出错过则返回空。
     pub fn finalize(&mut self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
@@ -940,7 +976,9 @@ impl AnthropicTranslator {
         if !close_block.is_empty() {
             out.push(close_block);
         }
-        if self.output_tokens == 0 {
+        // 以「是否产出过内容」而非 output_tokens==0 判定空响应：上游未回报 usage 时
+        // output_tokens 可能为 0，但正文已经流式输出，不能误发限流错误
+        if !self.produced_content {
             out.push(format!(
                 "event: error\ndata: {}\n\n",
                 serde_json::json!({
