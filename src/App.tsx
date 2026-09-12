@@ -11,6 +11,7 @@ import {
   Settings2,
   Square,
   Terminal,
+  UserRound,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -27,6 +28,7 @@ import { api, onStatus, type ProxyStatus } from "@/lib/api";
 import { DEFAULT_PORT } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { AboutView } from "@/views/AboutView";
+import { AccountsView } from "@/views/AccountsView";
 import { ConfigView } from "@/views/ConfigView";
 import { ConsoleView } from "@/views/ConsoleView";
 import { LogsView } from "@/views/LogsView";
@@ -36,7 +38,16 @@ import { StatsView } from "@/views/StatsView";
 import { ToolsView } from "@/views/ToolsView";
 
 /** 应用主视图标识，与左侧导航项一一对应。 */
-type View = "console" | "logs" | "relay" | "stats" | "config" | "models" | "tools" | "about";
+type View =
+  | "console"
+  | "logs"
+  | "relay"
+  | "stats"
+  | "models"
+  | "tools"
+  | "accounts"
+  | "config"
+  | "about";
 
 /** 左侧导航栏的菜单项配置：视图 id、显示文案与图标。 */
 const NAV: Array<{ id: View; label: string; icon: LucideIcon }> = [
@@ -46,6 +57,7 @@ const NAV: Array<{ id: View; label: string; icon: LucideIcon }> = [
   { id: "stats", label: "用量统计", icon: BarChart3 },
   { id: "models", label: "模型列表", icon: Boxes },
   { id: "tools", label: "工具接入", icon: Plug },
+  { id: "accounts", label: "账户", icon: UserRound },
   { id: "config", label: "配置", icon: Settings2 },
   { id: "about", label: "关于", icon: Info },
 ];
@@ -223,6 +235,8 @@ function App() {
                 <ConsoleView />
               ) : view === "tools" ? (
                 <ToolsView />
+              ) : view === "accounts" ? (
+                <AccountsView />
               ) : view === "about" ? (
                 <AboutView />
               ) : (

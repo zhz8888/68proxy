@@ -3,7 +3,7 @@ import { formatCost } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /** 用量百分比 → 进度条/文字配色（<70 绿、<90 黄、其余红）。 */
-function usageColor(pct: number): string {
+export function usageColor(pct: number): string {
   if (pct >= 90) return "text-signal-error";
   if (pct >= 70) return "text-signal-warn";
   return "text-signal-success";

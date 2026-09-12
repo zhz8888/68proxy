@@ -30,7 +30,7 @@
 | 📦 **Models** | ![Models](Preview%20Photo/3.png) |
 | ⚙️ **Settings** | ![Settings](Preview%20Photo/4.png) |
 
-> Other pages (📈 Usage Stats, 🐞 Debug Logs, 🔌 Tool Integration, ℹ️ About) are described in the feature table below.
+> Other pages (📈 Usage Stats, 🐞 Debug Logs, 🔌 Tool Integration, 👤 Accounts, ℹ️ About) are described in the feature table below.
 
 <p align="center">
   <img src="./assets/readme/section-features.svg" width="100%" alt="Features">
@@ -44,7 +44,8 @@
 | 📦 **Models** | Models dynamically fetched from the Provider API (falls back to 30 built-in models on failure), with provider badges, search and one-click copy of model IDs |
 | 🔌 **Tool Integration** | Enter a target tool name and model to auto-generate an integration prompt — let AI wire up Cursor / OpenCode / Cherry Studio for you; it replies 「not supported」 when the protocol is incompatible, and also offers a removal prompt |
 | 🐞 **Debug Logs** | In-memory ring buffer with live push, level filter, keyword search, auto-scroll and one-click clear, plus export of the latest 1,000 entries |
-| ⚙️ **Settings** | Port / listen address (with port-in-use detection and one-click release), model source and refresh interval, startup behavior (auto-run, autostart, tray), log level, token usage tracking toggle and retention days, plaintext API key storage — changes saved automatically; plus two CC upstream behavior toggles: "empty system placeholder" and "ZDR mode" |
+| ⚙️ **Settings** | Port / listen address (with port-in-use detection and one-click release), model source and refresh interval, startup behavior (auto-run, autostart, tray), log level, token usage tracking toggle and retention days, local forwarding Key (`sk-` prefixed, one-click random generation) — changes saved automatically; plus two CC upstream behavior toggles: "empty system placeholder" and "ZDR mode" |
+| 👤 **Accounts** | Manage Command Code upstream accounts (`user_`, multiple supported, requests rotated round-robin): add via browser OAuth or by pasting a Key, rename, remove, and view a single account's full quota (plan, monthly / purchased / free balance, 5-hour and weekly limits) |
 | 🎛️ **System Tray** | Minimize to tray; tray menu shows the window and start / stop / restart the proxy or quit |
 
 <p align="center">
@@ -77,17 +78,17 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
-**Quick connect:** before starting the proxy, generate a local forwarding Key (`sk-` prefixed) under **Config → Credentials**, and add at least one CC account Key (`user_` prefixed). Then start the proxy and configure any OpenAI / Anthropic compatible client:
+**Quick connect:** before starting the proxy, generate a local forwarding Key (`sk-` prefixed) under **Settings**, and add at least one CC account Key (`user_` prefixed) on the **Accounts** page. Then start the proxy and configure any OpenAI / Anthropic compatible client:
 
 ```
 OpenAI-compatible Base URL   http://127.0.0.1:3050/v1
 Anthropic Base URL           http://127.0.0.1:3050
 Model                        deepseek/deepseek-v4-flash etc. (see Models)
 API Key                      the local forwarding Key (sk- prefixed, see
-                             Config → Credentials); multiple clients can share it
+                             Settings); multiple clients can share it
 ```
 
-> The local forwarding Key (`sk-`) is only used for local proxy auth and is never sent to the CC upstream. CC account Keys (`user_`) are managed under Config → Credentials; you can add several and requests are rotated across them round-robin. Both are stored in plaintext in the local config file (`config.json`) — visible only on this machine; don't share the config file with others.
+> The local forwarding Key (`sk-`) is only used for local proxy auth and is never sent to the CC upstream. CC account Keys (`user_`) are managed on the Accounts page; you can add several and requests are rotated across them round-robin. Both are stored in plaintext in the local config file (`config.json`) — visible only on this machine; don't share the config file with others.
 
 <p align="center">
   <img src="./assets/readme/section-tech.svg" width="100%" alt="Tech Stack">
@@ -108,7 +109,7 @@ API Key                      the local forwarding Key (sk- prefixed, see
 68proxy/
 ├── src/                      # React frontend
 │   ├── components/           # UI components (StatusLamp / RelayRail / UrlRow / ModelLogo / UsageTrendChart / UsageMiniBars …)
-│   ├── views/                # Pages (Console / Logs / Relay / Stats / Models / Tools / Config / About)
+│   ├── views/                # Pages (Console / Logs / Relay / Stats / Models / Tools / Accounts / Settings / About)
 │   └── lib/                  # Tauri API bridge (api.ts), status mapping (status.ts), constants (constants.ts), formatting (format.ts)
 ├── src-tauri/
 │   ├── src/

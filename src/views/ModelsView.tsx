@@ -216,7 +216,7 @@ export function ModelsView() {
 
       {fallback && !error && !loading && models.length > 0 && (
         <div className="rounded-md border border-signal-warn/40 bg-signal-warn/5 px-3 py-2 text-xs text-signal-warn">
-          当前显示内置模型列表：未保存 API Key 或 Provider 拉取失败。可在「配置 → 凭据」保存 Key 后刷新。
+          当前显示内置模型列表：未添加 Command Code 账户或 Provider 拉取失败。可在「账户」页添加账户后刷新。
         </div>
       )}
 

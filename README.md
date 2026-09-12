@@ -30,7 +30,7 @@
 | 📦 **模型列表** | ![Models](Preview%20Photo/3.png) |
 | ⚙️ **配置** | ![Settings](Preview%20Photo/4.png) |
 
-> 其余页面（📈 用量统计、🐞 调试日志、🔌 工具接入、ℹ️ 关于）见下方功能说明。
+> 其余页面（📈 用量统计、🐞 调试日志、🔌 工具接入、👤 账户、ℹ️ 关于）见下方功能说明。
 
 <p align="center">
   <img src="./assets/readme/section-features.svg" width="100%" alt="功能 Features">
@@ -44,7 +44,8 @@
 | 📦 **模型列表** | 从 Provider API 动态拉取模型（失败自动回退内置 30 个模型），展示厂商标识，支持搜索与一键复制模型 ID |
 | 🔌 **工具接入** | 输入目标工具名与模型，自动生成接入提示词，让 AI 替你完成 Cursor / OpenCode / Cherry Studio 等工具的配置；协议不支持时自动回复「不支持」，附移除接入的提示词 |
 | 🐞 **调试日志** | 内存环形日志 + 实时推送，支持级别过滤、关键词搜索、自动滚动与一键清空，可导出最近 1000 条 |
-| ⚙️ **配置** | 端口 / 监听地址（含端口占用检测与一键释放）、模型来源与刷新间隔、启动行为（自动运行 / 开机自启 / 托盘）、日志级别、token 用量统计开关与保留天数；凭据区分「本地转发 Key」（`sk-`，可一键随机生成）与「CC 账户」（`user_`，支持多个、按轮询自动切换），改动自动保存；另有「空 system 占位符」与「ZDR 模式」两个 CC 上游调用行为开关 |
+| ⚙️ **配置** | 端口 / 监听地址（含端口占用检测与一键释放）、模型来源与刷新间隔、启动行为（自动运行 / 开机自启 / 托盘）、日志级别、token 用量统计开关与保留天数、本地转发 Key（`sk-`，可一键随机生成），改动自动保存；另有「空 system 占位符」与「ZDR 模式」两个 CC 上游调用行为开关 |
+| 👤 **账户** | 管理 Command Code 上游账户（`user_`，支持多个、请求按轮询自动切换）：浏览器授权登录或手动粘贴 Key 添加，可自定义显示名、移除，并查看单个账户的完整额度（套餐、月/购买/赠送余额、5 小时与周限额） |
 | 🎛️ **系统托盘** | 最小化到托盘运行，托盘菜单可显示窗口、启动 / 停止 / 重启代理与退出 |
 
 <p align="center">
@@ -77,18 +78,18 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
-**快速接入**：启动代理前，先在「配置 → 凭据」随机生成一个本地转发 Key（`sk-` 开头），并添加至少一个 CC 账户 Key（`user_` 开头）。然后启动代理，在任意 OpenAI / Anthropic 兼容客户端中配置：
+**快速接入**：启动代理前，先在「配置」随机生成一个本地转发 Key（`sk-` 开头），并在「账户」页添加至少一个 CC 账户 Key（`user_` 开头）。然后启动代理，在任意 OpenAI / Anthropic 兼容客户端中配置：
 
 ```
 OpenAI 兼容 Base URL   http://127.0.0.1:3050/v1   （含 /v1/responses，
                                                    Codex CLI 等 Responses 客户端同样适用）
 Anthropic Base URL     http://127.0.0.1:3050
 模型                   deepseek/deepseek-v4-flash 等（见「模型列表」）
-API Key                本地转发 Key（sk- 开头，见「配置 → 凭据」），
+API Key                本地转发 Key（sk- 开头，见「配置」），
                        配置多个客户端可共用同一个
 ```
 
-> 本地转发 Key（`sk-`）只用于本地代理鉴权，不会发送给 CC 上游；CC 账户 Key（`user_`）在「配置 → 凭据」中管理，可配置多个，请求按轮询自动切换。两类 Key 均明文保存在本地配置文件（`config.json`）中，仅本机可见；请勿将配置文件分享给他人。
+> 本地转发 Key（`sk-`）只用于本地代理鉴权，不会发送给 CC 上游；CC 账户 Key（`user_`）在「账户」页管理，可配置多个，请求按轮询自动切换。两类 Key 均明文保存在本地配置文件（`config.json`）中，仅本机可见；请勿将配置文件分享给他人。
 
 <p align="center">
   <img src="./assets/readme/section-tech.svg" width="100%" alt="技术栈 Tech Stack">
@@ -109,7 +110,7 @@ API Key                本地转发 Key（sk- 开头，见「配置 → 凭据�
 68proxy/
 ├── src/                      # React 前端
 │   ├── components/           # UI 组件（StatusLamp / RelayRail / UrlRow / ModelLogo / UsageTrendChart / UsageMiniBars …）
-│   ├── views/                # 页面（控制台 / 调试日志 / 中继记录 / 用量统计 / 模型列表 / 工具接入 / 配置 / 关于）
+│   ├── views/                # 页面（控制台 / 调试日志 / 中继记录 / 用量统计 / 模型列表 / 工具接入 / 账户 / 配置 / 关于）
 │   └── lib/                  # Tauri API 桥接（api.ts）、状态映射（status.ts）、常量（constants.ts）、格式化（format.ts）
 ├── src-tauri/
 │   ├── src/
