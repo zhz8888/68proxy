@@ -98,7 +98,7 @@ function Field({
   );
 }
 
-/** 配置视图：编辑服务、模型、代理行为、偏好、日志与本地转发 Key，改动后自动保存。
+/** 配置视图：编辑服务、模型、代理行为、程序、Token 统计、日志与本地转发 Key，改动后自动保存。
  *  Command Code 上游账户由独立的账户视图管理（见 AccountsView）。 */
 export function ConfigView() {
   const [cfg, setCfg] = useState<Config>(DEFAULTS);
@@ -340,7 +340,7 @@ export function ConfigView() {
             </p>
           </Section>
 
-          <Section title="偏好" desc="应用与代理的启动方式">
+          <Section title="程序" desc="程序启动与窗口行为">
             <div className="flex items-center justify-between">
               <Label>启动程序时自动运行代理</Label>
               <Switch
@@ -363,6 +363,9 @@ export function ConfigView() {
                 onCheckedChange={(v) => update("show_window_on_start", v)}
               />
             </div>
+          </Section>
+
+          <Section title="Token 统计" desc="用量统计与数据保留">
             <div className="flex items-center justify-between">
               <Label>启用 token 用量统计</Label>
               <Switch
