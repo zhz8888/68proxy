@@ -2,6 +2,8 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* 浅色（默认）：白底 + 深墨色。层级用灰度表达，与深色模式互为镜像。
+   深色值见下方 .dark 块；运行时由 html 上的 .dark 类切换（见 lib/theme.ts）。 */
 :root {
   --radius: 0.625rem;
   --app-radius-sm: calc(var(--radius) - 4px);
@@ -9,7 +11,46 @@
   --app-radius-lg: var(--radius);
   --app-radius-xl: calc(var(--radius) + 4px);
 
-  /* 黑白配色：纯黑底 + 白墨色，层级用灰度表达 */
+  color-scheme: light;
+
+  --background: #ffffff;
+  --foreground: #0a0a0a;
+  --card: #fafafa;
+  --card-foreground: #0a0a0a;
+  --popover: #ffffff;
+  --popover-foreground: #0a0a0a;
+  --primary: #171717;
+  --primary-foreground: #fafafa;
+  --secondary: #f5f5f5;
+  --secondary-foreground: #171717;
+  --muted: #f5f5f5;
+  --muted-foreground: #737373;
+  --accent: #f5f5f5;
+  --accent-foreground: #171717;
+  --destructive: #171717;
+  --destructive-foreground: #fafafa;
+  --success: #171717;
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --ring: #a3a3a3;
+
+  /* 语义信号色（状态灯/日志级别/中继轨道）：浅色下取较深的值以保证对比度 */
+  --signal-success: #0f7a52;
+  --signal-warn: #a16207;
+  --signal-error: #c0342c;
+  --signal-info: #1c6ea4;
+}
+
+/* 深色：纯黑底 + 白墨色 */
+.dark {
+  --radius: 0.625rem;
+  --app-radius-sm: calc(var(--radius) - 4px);
+  --app-radius-md: calc(var(--radius) - 2px);
+  --app-radius-lg: var(--radius);
+  --app-radius-xl: calc(var(--radius) + 4px);
+
+  color-scheme: dark;
+
   --background: #000000;
   --foreground: #fafafa;
   --card: #0d0d0d;
@@ -122,9 +163,7 @@
   *::-webkit-scrollbar {
     display: none;
   }
-  html {
-    color-scheme: dark;
-  }
+  /* color-scheme 由 :root / .dark 两个变量块按当前主题设定 */
   body {
     @apply select-none bg-background font-sans text-foreground antialiased;
     font-size: 14px;

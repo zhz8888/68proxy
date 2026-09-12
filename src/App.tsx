@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BarChart3,
   Boxes,
@@ -26,6 +26,7 @@ import { UrlRow } from "@/components/UrlRow";
 import { Button } from "@/components/ui/button";
 import { api, onStatus, type ProxyStatus } from "@/lib/api";
 import { DEFAULT_PORT } from "@/lib/constants";
+import { applyTheme, watchSystemTheme, type ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { AboutView } from "@/views/AboutView";
 import { AccountsView } from "@/views/AccountsView";
@@ -72,10 +73,24 @@ function App() {
   const [busy, setBusy] = useState<"start" | "stop" | null>(null);
   const [maximized, setMaximized] = useState(false);
   const [appVersion, setAppVersion] = useState("");
+  // 当前主题模式：供系统明暗变化时判断是否需要跟随重设
+  const themeRef = useRef<ThemeMode>("system");
 
   useEffect(() => {
     // 读取应用版本（来自 tauri.conf.json ← package.json，随发版 tag 自动联动）
     getVersion().then(setAppVersion).catch(() => {});
+    // 主题以后端配置为准：加载后应用一次；index.html 内联脚本已按缓存值预先设过类，
+    // 无缓存（首次运行）时此处补上，避免默认落在浅色。
+    let mounted = true;
+    api.configGet()
+      .then((c) => {
+        if (!mounted) return;
+        themeRef.current = c.theme;
+        applyTheme(c.theme);
+      })
+      .catch(() => {});
+    // 系统明暗变化：仅在「跟随系统」模式下重新应用
+    const unwatchTheme = watchSystemTheme(() => themeRef.current);
     // 挂载时拉取一次代理状态，并订阅后端推送；同时以 3 秒间隔轮询兜底
     api.proxyStatus().then(setStatus).catch(() => {});
     const off = onStatus(setStatus);
@@ -85,8 +100,10 @@ function App() {
     win.isMaximized().then(setMaximized).catch(() => {});
     // 卸载时清除轮询定时器并取消事件订阅，避免泄漏
     return () => {
+      mounted = false;
       clearInterval(timer);
       off.then((f) => f());
+      unwatchTheme();
     };
   }, []);
 

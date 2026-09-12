@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>68proxy</title>
+    <script>
+      // 首屏防闪：在样式与 React 加载前，按上次使用的主题（缓存于 localStorage）
+      // 同步设置 <html> 的 dark 类。后端配置才是真源，React 挂载后会再同步一次。
+      (function () {
+        try {
+          var mode = localStorage.getItem("68proxy-theme") || "system";
+          var dark =
+            mode === "dark" ||
+            (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+        } catch (e) {
+          /* localStorage 不可用时回退浅色（:root 默认值） */
+        }
+      })();
+    </script>
   </head>
 
   <body>

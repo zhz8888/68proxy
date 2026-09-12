@@ -57,11 +57,18 @@ export function UsageTrendChart({
 
   return (
     <div className="select-none">
-      <svg viewBox={`0 0 ${W} ${H}`} className="h-52 w-full" role="img" aria-label="用量趋势图">
+      {/* 主题色经 currentColor 继承：折线/渐变/数据点描边统一用信号信息色，
+          网格线用边框色，数据点填充用卡片底色，随明暗主题自动切换 */}
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="h-52 w-full text-signal-info"
+        role="img"
+        aria-label="用量趋势图"
+      >
         <defs>
           <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#6fb3e0" stopOpacity="0.35" />
-            <stop offset="100%" stopColor="#6fb3e0" stopOpacity="0.02" />
+            <stop offset="0%" stopColor="currentColor" stopOpacity="0.35" />
+            <stop offset="100%" stopColor="currentColor" stopOpacity="0.02" />
           </linearGradient>
         </defs>
         {/* 网格线 + Y 轴标签 */}
@@ -72,7 +79,7 @@ export function UsageTrendChart({
               x2={W - PAD.right}
               y1={t.y}
               y2={t.y}
-              stroke="#262626"
+              className="stroke-border"
               strokeWidth="1"
               strokeDasharray={i === 4 ? "" : "3 3"}
             />
@@ -89,13 +96,21 @@ export function UsageTrendChart({
         ))}
         {/* 面积与折线 */}
         <path d={area} fill={`url(#${gradId})`} />
-        <path d={line} fill="none" stroke="#6fb3e0" strokeWidth="2" strokeLinejoin="round" />
+        <path d={line} fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
         {/* 数据点 */}
         {points.map((p, i) => {
           const x = PAD.left + i * stepX;
           const hover = points.length <= 48; // 点数过多时不画点避免拥挤
           return hover ? (
-            <circle key={i} cx={x} cy={y(values[i])} r="2.5" fill="#0d0d0d" stroke="#6fb3e0" strokeWidth="1.5">
+            <circle
+              key={i}
+              cx={x}
+              cy={y(values[i])}
+              r="2.5"
+              className="fill-card"
+              stroke="currentColor"
+              strokeWidth="1.5"
+            >
               <title>{`${p.label} · ${
                 mode === "tokens"
                   ? `${formatCompactNumber(p.prompt_tokens + p.completion_tokens)} tokens`

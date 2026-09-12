@@ -2,6 +2,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import type { ThemeMode } from "@/lib/theme";
+
 /** 应用配置，字段与后端 config.json 及 Rust 侧 Config 结构一致。 */
 export interface Config {
   port: number;
@@ -32,6 +34,8 @@ export interface Config {
   client_drain_timeout_ms: number;
   /** 进程内在途请求上限，0 表示不限。 */
   max_inflight: number;
+  /** 界面主题：system（跟随系统）/ dark / light。 */
+  theme: ThemeMode;
 }
 
 /** 代理运行状态：是否运行、监听地址、OpenAI/Anthropic 接入 URL、上游版本与运行时长。 */
@@ -318,6 +322,9 @@ export const api = {
     invoke<void>("account_routing_set", { strategy, preferredAccountId }),
   // 清除会话→账户绑定（手动切换账户后强制所有会话重选）
   accountBindingsClear: () => invoke<{ cleared: number }>("account_bindings_clear"),
+  // 界面主题：读取 / 保存（system / dark / light）
+  themeGet: () => invoke<{ theme: ThemeMode }>("theme_get"),
+  themeSet: (theme: ThemeMode) => invoke<void>("theme_set", { theme }),
   // 日志：按序号增量拉取 / 清空 / 导出到文件（返回条数）
   logsGet: (limit = 200, afterSeq = 0) => invoke<LogEntry[]>("logs_get", { limit, afterSeq }),
   logsClear: () => invoke<void>("logs_clear"),

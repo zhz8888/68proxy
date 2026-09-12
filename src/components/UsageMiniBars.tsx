@@ -46,14 +46,20 @@ export function UsageMiniBars({ buckets }: { buckets: UsageMinuteBucket[] }) {
 
   return (
     <div className="select-none">
-      <svg viewBox={`0 0 ${W} ${H}`} className="h-24 w-full" role="img" aria-label="最近 10 分钟用量柱状图">
+      {/* 主题色经 currentColor 继承：柱体用信号信息色、基线用边框色，随明暗主题切换 */}
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="h-24 w-full text-signal-info"
+        role="img"
+        aria-label="最近 10 分钟用量柱状图"
+      >
         {/* 基线 */}
         <line
           x1={PAD.left}
           x2={W - PAD.right}
           y1={PAD.top + innerH}
           y2={PAD.top + innerH}
-          stroke="#262626"
+          className="stroke-border"
           strokeWidth="1"
         />
         {bars.map((b, i) => (
@@ -64,7 +70,7 @@ export function UsageMiniBars({ buckets }: { buckets: UsageMinuteBucket[] }) {
             width={barW}
             height={b.h}
             rx="1.5"
-            fill={b.h > 0 ? "#6fb3e0" : "transparent"}
+            fill={b.h > 0 ? "currentColor" : "transparent"}
           >
             <title>{`${b.label} · ${formatTokens(b.v)} tokens`}</title>
           </rect>

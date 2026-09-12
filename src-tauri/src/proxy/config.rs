@@ -157,6 +157,8 @@ pub struct Config {
     pub account_strategy: String,
     /// 优先消耗的账户 userId（仅 `priority` 策略生效；空字符串表示自动选剩余额度最多者）。
     pub preferred_account_id: String,
+    /// 界面主题：`system`（跟随系统，默认）/ `dark` / `light`。
+    pub theme: String,
 }
 
 impl Default for Config {
@@ -186,6 +188,7 @@ impl Default for Config {
             max_inflight: 0,
             account_strategy: "round_robin".into(),
             preferred_account_id: String::new(),
+            theme: "system".into(),
         }
     }
 }
@@ -208,6 +211,9 @@ impl Config {
         }
         if !matches!(self.account_strategy.as_str(), "round_robin" | "priority") {
             return Err("账户使用策略只能是 round_robin/priority".into());
+        }
+        if !matches!(self.theme.as_str(), "system" | "dark" | "light") {
+            return Err("主题只能是 system/dark/light".into());
         }
         Ok(())
     }

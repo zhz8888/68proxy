@@ -5,11 +5,15 @@ import {
   Eye,
   EyeOff,
   KeyRound,
+  Monitor,
+  Moon,
   RefreshCw,
   Save,
+  Sun,
   Trash2,
   Wand2,
   XCircle,
+  type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -27,7 +31,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, type ApiKeyState, type Config } from "@/lib/api";
+import { applyTheme, type ThemeMode } from "@/lib/theme";
 
 // 配置项默认值，字段与后端 config.json 一一对应
 const DEFAULTS: Config = {
@@ -52,7 +58,15 @@ const DEFAULTS: Config = {
   max_body_mb: 10,
   client_drain_timeout_ms: 0,
   max_inflight: 0,
+  theme: "system",
 };
+
+/** 主题选项：值与标签、图标。 */
+const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: LucideIcon }> = [
+  { value: "system", label: "跟随系统", icon: Monitor },
+  { value: "dark", label: "深色", icon: Moon },
+  { value: "light", label: "浅色", icon: Sun },
+];
 
 /** 配置页通用区块卡片：标题 + 可选描述 + 内容。 */
 function Section({
@@ -363,6 +377,35 @@ export function ConfigView() {
                 onCheckedChange={(v) => update("show_window_on_start", v)}
               />
             </div>
+          </Section>
+
+          <Section title="主题" desc="界面明暗外观">
+            <Field label="外观模式">
+              {/* 三段式滑块：点击任一段即时切换主题（高度与页面其他表单控件一致） */}
+              <Tabs
+                value={cfg.theme}
+                onValueChange={(v) => {
+                  const mode = v as ThemeMode;
+                  // 即时生效（切换 <html> 的 dark 类）并经专用命令持久化——
+                  // config_save 会保留 theme 原值，故此处必须显式落库
+                  applyTheme(mode);
+                  update("theme", mode);
+                  api.themeSet(mode).catch((e) => toast.error(String(e)));
+                }}
+              >
+                <TabsList className="h-11 w-full">
+                  {THEME_OPTIONS.map((opt) => {
+                    const Icon = opt.icon;
+                    return (
+                      <TabsTrigger key={opt.value} value={opt.value} className="h-9 flex-1 gap-1.5">
+                        <Icon className="h-3.5 w-3.5" />
+                        {opt.label}
+                      </TabsTrigger>
+                    );
+                  })}
+                </TabsList>
+              </Tabs>
+            </Field>
           </Section>
 
           <Section title="Token 统计" desc="用量统计与数据保留">

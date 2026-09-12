@@ -74,6 +74,8 @@ fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Valu
     // 账户使用规则由 account_routing_set 专门管理，此处保留原值避免被前端默认值覆盖
     config.account_strategy = stored.account_strategy;
     config.preferred_account_id = stored.preferred_account_id;
+    // 主题由 theme_set 专门管理，同样保留原值
+    config.theme = stored.theme;
     // 校验放在保留字段之后：被保留的字段不应触发校验失败
     config.validate()?;
     // 主存 SQLite settings 表
@@ -351,6 +353,32 @@ async fn accounts_quota(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
     let list = proxy::quota::snapshot_all(&ctx.proxy_state).await;
     Ok(serde_json::to_value(list).map_err(|e| format!("序列化额度失败: {e}"))?)
+}
+
+/// 读取界面主题：`system`（跟随系统）/ `dark` / `light`。
+#[tauri::command]
+fn theme_get(app: AppHandle) -> Value {
+    let ctx = app.state::<AppCtx>();
+    json!({ "theme": ctx.proxy_state.config.read().unwrap().theme })
+}
+
+/// 保存界面主题并持久化（settings 表 + 内存状态）；非法值报错。
+///
+/// 主题即时生效（前端切换 `<html>` 的 dark 类），此命令只负责持久化，无需重启。
+#[tauri::command]
+fn theme_set(app: AppHandle, theme: String) -> Result<(), String> {
+    if !matches!(theme.as_str(), "system" | "dark" | "light") {
+        return Err("主题只能是 system/dark/light".into());
+    }
+    let ctx = app.state::<AppCtx>();
+    let updated = {
+        let mut cfg = ctx.proxy_state.config.write().unwrap();
+        cfg.theme = theme;
+        cfg.clone()
+    };
+    let guard = ctx.proxy_state.usage.lock().unwrap();
+    let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+    proxy::settings::save_config(conn, &updated)
 }
 
 /// 读取账户使用规则：`{ strategy, preferred_account_id }`。
@@ -830,6 +858,8 @@ pub fn run() {
             account_routing_get,
             account_routing_set,
             account_bindings_clear,
+            theme_get,
+            theme_set,
             logs_get,
             logs_clear,
             logs_export,
