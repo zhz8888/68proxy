@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 
 import { StatusLamp } from "@/components/StatusLamp";
 import { Toaster } from "@/components/ui/sonner";
@@ -58,8 +59,11 @@ function App() {
   const [status, setStatus] = useState<ProxyStatus | null>(null);
   const [busy, setBusy] = useState<"start" | "stop" | null>(null);
   const [maximized, setMaximized] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
 
   useEffect(() => {
+    // 读取应用版本（来自 tauri.conf.json ← package.json，随发版 tag 自动联动）
+    getVersion().then(setAppVersion).catch(() => {});
     // 挂载时拉取一次代理状态，并订阅后端推送；同时以 3 秒间隔轮询兜底
     api.proxyStatus().then(setStatus).catch(() => {});
     const off = onStatus(setStatus);
@@ -141,7 +145,7 @@ function App() {
             <p className="font-mono text-[10px] leading-relaxed text-muted-foreground/70">
               by 6ix8ight · fork by zhz8888
               <br />
-              V1.0
+              {appVersion ? `V${appVersion}` : ""}
             </p>
           </div>
         </aside>
