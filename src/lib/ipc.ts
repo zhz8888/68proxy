@@ -10,6 +10,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen, type UnlistenFn, type Event } from "@tauri-apps/api/event";
 
+import { translate } from "@/i18n";
+
 /** 桥接服务基址（与后端默认端口一致；可用 VITE_BRIDGE_PORT 覆写）。 */
 const BRIDGE_BASE = `http://127.0.0.1:${import.meta.env.VITE_BRIDGE_PORT ?? "1431"}`;
 
@@ -28,12 +30,10 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
     });
   } catch {
     // 网络层失败通常是后端未运行或桥接被生产构建排除
-    throw new Error(
-      `无法连接后端调试桥接（${BRIDGE_BASE}）。请确认已运行 pnpm tauri dev 或 cargo run。`,
-    );
+    throw new Error(translate("errors.bridge_unreachable", { p0: BRIDGE_BASE }));
   }
   const body = (await res.json()) as { ok: boolean; data?: T; error?: string };
-  if (!body.ok) throw new Error(body.error ?? "命令调用失败");
+  if (!body.ok) throw new Error(body.error ?? translate("errors.command_failed"));
   return body.data as T;
 }
 
@@ -76,7 +76,7 @@ function ensureBridgeStream() {
   void (async () => {
     try {
       const res = await fetch(`${BRIDGE_BASE}/events`, { signal: controller.signal });
-      if (!res.body) throw new Error("事件流不可用");
+      if (!res.body) throw new Error(translate("errors.event_stream_unavailable"));
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";

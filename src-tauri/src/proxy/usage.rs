@@ -18,6 +18,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use super::pricing;
+use crate::i18n;
 
 /// 用量更新事件转发器（Tauri 注入，供前端统计页实时刷新）。
 static USAGE_SINK: Mutex<Option<Box<dyn Fn() + Send + Sync>>> = Mutex::new(None);
@@ -192,7 +193,10 @@ impl Period {
 
 /// 初始化数据库：建表、索引并设置 PRAGMA。失败返回中文错误描述。
 pub fn init_usage(path: &Path) -> Result<Connection, String> {
-    let conn = Connection::open(path).map_err(|e| format!("打开用量数据库失败: {e}"))?;
+    let conn = Connection::open(path).map_err(|e| {
+        let e = e.to_string();
+        i18n::err_args("open_usage_db_failed", &[&e])
+    })?;
     init_usage_on(&conn)?;
     Ok(conn)
 }
@@ -202,7 +206,10 @@ pub fn init_usage_on(conn: &Connection) -> Result<(), String> {
     super::settings::init_settings_on(conn)?;
     super::models::init_models_on(conn)?;
     conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| format!("设置 WAL 失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("wal_failed", &[&e])
+        })?;
     conn.pragma_update(None, "synchronous", "NORMAL").ok();
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS usage_history (
@@ -229,13 +236,19 @@ pub fn init_usage_on(conn: &Connection) -> Result<(), String> {
             value TEXT NOT NULL
         );",
     )
-    .map_err(|e| format!("初始化用量表失败: {e}"))?;
+    .map_err(|e| {
+        let e = e.to_string();
+        i18n::err_args("init_usage_table_failed", &[&e])
+    })?;
     Ok(())
 }
 
 /// 打开已存在的用量数据库（只读查询用）；文件缺失时返回错误。
 pub fn open_usage(path: &Path) -> Result<Connection, String> {
-    Connection::open(path).map_err(|e| format!("打开用量数据库失败: {e}"))
+    Connection::open(path).map_err(|e| {
+        let e = e.to_string();
+        i18n::err_args("open_usage_db_failed", &[&e])
+    })
 }
 
 /// 把 Unix 毫秒时间戳转为本地时区的天键（YYYY-MM-DD）。
@@ -293,13 +306,21 @@ fn load_day(conn: &Connection, key: &str) -> DayAgg {
 
 /// 写入某天的预聚合数据。
 fn save_day(conn: &Connection, key: &str, agg: &DayAgg) -> Result<(), String> {
-    let data = serde_json::to_string(agg).map_err(|e| format!("聚合序列化失败: {e}"))?;
+    let data = serde_json::to_string(agg).map_err(|e| {
+        let e = e.to_string();
+        i18n::err_args("aggregate_serialize_failed", &[&e])
+    })?;
     conn.execute(
         "INSERT INTO usage_daily (date_key, data) VALUES (?1, ?2)
          ON CONFLICT(date_key) DO UPDATE SET data = excluded.data",
         params![key, data],
     )
-    .map_err(|e| format!("写入按天聚合失败: {e}"))?;
+    .map_err(|e| {
+        format!(
+            "{}: {e}",
+            i18n::pick("写入按天聚合失败", "Failed to write daily aggregate")
+        )
+    })?;
     Ok(())
 }
 
@@ -318,7 +339,12 @@ pub fn record_usage(conn: &Connection, entry: &UsageEntry) -> Result<(), String>
     );
     let tx = conn
         .unchecked_transaction()
-        .map_err(|e| format!("开启用量事务失败: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                i18n::pick("开启用量事务失败", "Failed to begin the usage transaction")
+            )
+        })?;
     conn.execute(
         "INSERT INTO usage_history
             (ts, model, endpoint, status, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, cost, stream)
@@ -336,7 +362,12 @@ pub fn record_usage(conn: &Connection, entry: &UsageEntry) -> Result<(), String>
             entry.stream as i64,
         ],
     )
-    .map_err(|e| format!("写入用量明细失败: {e}"))?;
+    .map_err(|e| {
+        format!(
+            "{}: {e}",
+            i18n::pick("写入用量明细失败", "Failed to write usage row")
+        )
+    })?;
 
     // 更新按天聚合
     let key = day_key_of(entry.ts);
@@ -366,8 +397,18 @@ pub fn record_usage(conn: &Connection, entry: &UsageEntry) -> Result<(), String>
          ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
         [],
     )
-    .map_err(|e| format!("更新生命周期计数失败: {e}"))?;
-    tx.commit().map_err(|e| format!("提交用量事务失败: {e}"))?;
+    .map_err(|e| {
+        format!(
+            "{}: {e}",
+            i18n::pick("更新生命周期计数失败", "Failed to update the lifetime counter")
+        )
+    })?;
+    tx.commit().map_err(|e| {
+        format!(
+            "{}: {e}",
+            i18n::pick("提交用量事务失败", "Failed to commit the usage transaction")
+        )
+    })?;
     emit_usage_updated();
     Ok(())
 }
@@ -381,14 +422,23 @@ fn merge_day_into(
 ) -> Result<(), String> {
     let mut stmt = conn
         .prepare("SELECT date_key, data FROM usage_daily WHERE date_key >= ?1 AND date_key <= ?2")
-        .map_err(|e| format!("查询按天聚合失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("query_daily_failed", &[&e])
+        })?;
     let rows = stmt
         .query_map(params![start_day, end_day], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })
-        .map_err(|e| format!("遍历按天聚合失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("iterate_daily_failed", &[&e])
+        })?;
     for row in rows {
-        let (_, data) = row.map_err(|e| format!("读取按天聚合失败: {e}"))?;
+        let (_, data) = row.map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("read_daily_failed", &[&e])
+        })?;
         if let Ok(agg) = serde_json::from_str::<DayAgg>(&data) {
             total.requests += agg.requests;
             total.prompt_tokens += agg.prompt_tokens;
@@ -629,7 +679,10 @@ fn query_rows(conn: &Connection, from_ts: u64, to_ts: u64) -> Result<Vec<Row>, S
             "SELECT ts, model, endpoint, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens
              FROM usage_history WHERE ts >= ?1 AND ts <= ?2 ORDER BY ts ASC",
         )
-        .map_err(|e| format!("查询用量明细失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("query_rows_failed", &[&e])
+        })?;
     let rows = stmt
         .query_map(params![from_ts as i64, to_ts as i64], |r| {
             Ok(Row {
@@ -642,10 +695,16 @@ fn query_rows(conn: &Connection, from_ts: u64, to_ts: u64) -> Result<Vec<Row>, S
                 cache_write_tokens: r.get::<_, i64>(6)? as u64,
             })
         })
-        .map_err(|e| format!("遍历用量明细失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("iterate_rows_failed", &[&e])
+        })?;
     let mut out = Vec::new();
     for r in rows {
-        out.push(r.map_err(|e| format!("读取用量明细失败: {e}"))?);
+        out.push(r.map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("read_rows_failed", &[&e])
+        })?);
     }
     Ok(out)
 }
@@ -657,7 +716,10 @@ pub fn query_recent(conn: &Connection, limit: usize) -> Result<Vec<RecentRow>, S
             "SELECT ts, model, endpoint, status, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, cost
              FROM usage_history ORDER BY ts DESC LIMIT ?1",
         )
-        .map_err(|e| format!("查询最近用量失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("query_recent_failed", &[&e])
+        })?;
     let rows = stmt
         .query_map(params![limit as i64], |r| {
             Ok(RecentRow {
@@ -673,10 +735,16 @@ pub fn query_recent(conn: &Connection, limit: usize) -> Result<Vec<RecentRow>, S
                 elapsed_ms: 0,
             })
         })
-        .map_err(|e| format!("遍历最近用量失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("iterate_recent_failed", &[&e])
+        })?;
     let mut out = Vec::new();
     for r in rows {
-        out.push(r.map_err(|e| format!("读取最近用量失败: {e}"))?);
+        out.push(r.map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("read_recent_failed", &[&e])
+        })?);
     }
     Ok(out)
 }
@@ -685,9 +753,15 @@ pub fn query_recent(conn: &Connection, limit: usize) -> Result<Vec<RecentRow>, S
 pub fn clear_all(conn: &Connection) -> Result<u64, String> {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM usage_history", [], |r| r.get(0))
-        .map_err(|e| format!("统计用量条数失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("count_usage_failed", &[&e])
+        })?;
     conn.execute_batch("DELETE FROM usage_history; DELETE FROM usage_daily; DELETE FROM usage_meta;")
-        .map_err(|e| format!("清空用量数据失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("clear_usage_failed", &[&e])
+        })?;
     Ok(count as u64)
 }
 
@@ -706,17 +780,26 @@ pub fn clear_before(conn: &Connection, retention_days: u32) -> Result<u64, Strin
             params![cutoff_ts as i64],
             |r| r.get(0),
         )
-        .map_err(|e| format!("统计待清理条数失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("count_usage_failed", &[&e])
+        })?;
     conn.execute(
         "DELETE FROM usage_history WHERE ts < ?1",
         params![cutoff_ts as i64],
     )
-    .map_err(|e| format!("清理过期明细失败: {e}"))?;
+    .map_err(|e| {
+        let e = e.to_string();
+        i18n::err_args("clear_usage_failed", &[&e])
+    })?;
     conn.execute(
         "DELETE FROM usage_daily WHERE date_key < ?1",
         params![cutoff_key],
     )
-    .map_err(|e| format!("清理过期聚合失败: {e}"))?;
+    .map_err(|e| {
+        let e = e.to_string();
+        i18n::err_args("clear_usage_failed", &[&e])
+    })?;
     Ok(count as u64)
 }
 

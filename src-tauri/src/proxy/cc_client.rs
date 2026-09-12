@@ -144,7 +144,13 @@ fn get_or_create_key_state(state: &AppState, user_id: &str) -> KeyState {
             let fp = fingerprint::generate();
             if let Some(p) = path.as_deref() {
                 if let Err(e) = fingerprint::remember(p, &id, &fp) {
-                    log::warn(&format!("指纹持久化失败，本次仅存内存: {e}"));
+                    log::warn(&format!(
+                        "{}: {e}",
+                        crate::i18n::pick(
+                            "指纹持久化失败，本次仅存内存",
+                            "Failed to persist the fingerprint; kept in memory only"
+                        )
+                    ));
                 }
             }
             log::info("Fingerprint generated for user");
@@ -385,7 +391,10 @@ pub async fn fetch_models(state: &AppState, api_key: Option<&str>) -> (Vec<Model
             }
         }
     } else if cfg.use_provider_models {
-        log::info("未提供 API Key，使用内置模型列表");
+        log::info(crate::i18n::pick(
+            "未提供 API Key，使用内置模型列表",
+            "No API key provided; using the built-in model list",
+        ));
     }
 
     log::warn("Provider models fetch failed, using hardcoded list");

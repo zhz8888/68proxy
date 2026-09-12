@@ -1,5 +1,6 @@
 import { ModelIcon, Poolside, ProviderIcon, modelMappings } from "@lobehub/icons";
 import { Bot } from "lucide-react";
+import { translate } from "@/i18n";
 import { cn } from "@/lib/utils";
 
 // 模型 ID 前缀 → 供应商标识的映射表，用于挑选对应的品牌图标
@@ -59,7 +60,7 @@ export function ModelLogo({
         className,
       )}
       style={{ width: size + 8, height: size + 8 }}
-      title={known ? model : `${model}（暂无品牌图标）`}
+      title={known ? model : translate("modelLogo.noBrandIcon", { p0: model })}
     >
       {isPoolside ? (
         <Poolside size={size} />

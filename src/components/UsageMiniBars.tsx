@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { formatTokens } from "@/lib/format";
 import type { UsageMinuteBucket } from "@/lib/api";
 
@@ -6,6 +8,7 @@ import type { UsageMinuteBucket } from "@/lib/api";
  * 按输入+输出 token 总量画柱，高度归一化到桶内最大值；无数据时展示占位提示。
  */
 export function UsageMiniBars({ buckets }: { buckets: UsageMinuteBucket[] }) {
+  const { t } = useTranslation();
   // 空数据（含全零）时展示占位
   const hasData = buckets.some(
     (b) => b.prompt_tokens + b.completion_tokens > 0 || b.requests > 0,
@@ -13,7 +16,7 @@ export function UsageMiniBars({ buckets }: { buckets: UsageMinuteBucket[] }) {
   if (buckets.length === 0 || !hasData) {
     return (
       <div className="flex h-24 items-center justify-center text-xs text-muted-foreground">
-        最近 10 分钟暂无请求
+        {t("usageMiniBars.empty")}
       </div>
     );
   }
@@ -37,10 +40,10 @@ export function UsageMiniBars({ buckets }: { buckets: UsageMinuteBucket[] }) {
     const minsAgo = buckets.length - 1 - i; // 数组按时间从旧到新排列：i=0 最旧，末尾最新
     const label =
       minsAgo === 0
-        ? "刚刚"
+        ? t("usageMiniBars.justNow")
         : minsAgo === 1
-          ? "1 分钟前"
-          : `${minsAgo} 分钟前`;
+          ? t("usageMiniBars.oneMinuteAgo")
+          : t("usageMiniBars.minutesAgo", { p0: minsAgo });
     return { x, y, h, v, label };
   });
 
@@ -51,7 +54,7 @@ export function UsageMiniBars({ buckets }: { buckets: UsageMinuteBucket[] }) {
         viewBox={`0 0 ${W} ${H}`}
         className="h-24 w-full text-signal-info"
         role="img"
-        aria-label="最近 10 分钟用量柱状图"
+        aria-label={t("usageMiniBars.chartLabel")}
       >
         {/* 基线 */}
         <line

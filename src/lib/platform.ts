@@ -10,6 +10,7 @@ import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { IN_TAURI } from "@/lib/ipc";
+import { translate } from "@/i18n";
 
 /** 窗口控制句柄：浏览器下所有操作降级为无操作，避免调用 Tauri 内部结构报错。 */
 export const appWindow = {
@@ -48,11 +49,11 @@ export async function appVersion(): Promise<string> {
  */
 export async function pickSavePath(defaultPath: string, extensions: string[]): Promise<string | null> {
   if (!IN_TAURI) {
-    throw new Error("保存文件对话框仅在桌面应用内可用，请在 68proxy 窗口中使用该功能");
+    throw new Error(translate("errors.dialog_desktop_only"));
   }
   return saveDialog({
     defaultPath,
-    filters: [{ name: "文件", extensions }],
+    filters: [{ name: translate("common.fileFilterName"), extensions }],
   });
 }
 

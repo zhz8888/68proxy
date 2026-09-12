@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { UsageChartPoint } from "@/lib/api";
 import { formatCompactNumber } from "@/lib/format";
@@ -14,12 +15,13 @@ export function UsageTrendChart({
   points: UsageChartPoint[];
   mode: "tokens" | "cost";
 }) {
+  const { t } = useTranslation();
   const gradId = useId().replace(/:/g, "");
   // 空数据时展示占位提示
   if (points.length === 0 || points.every((p) => p.prompt_tokens + p.completion_tokens === 0)) {
     return (
       <div className="flex h-52 items-center justify-center text-sm text-muted-foreground">
-        暂无数据
+        {t("common.noData")}
       </div>
     );
   }
@@ -63,7 +65,7 @@ export function UsageTrendChart({
         viewBox={`0 0 ${W} ${H}`}
         className="h-52 w-full text-signal-info"
         role="img"
-        aria-label="用量趋势图"
+        aria-label={t("usageTrendChart.chartLabel")}
       >
         <defs>
           <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">

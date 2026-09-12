@@ -1,7 +1,9 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { AppWindow, Cloud, Server } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
+import { translate } from "@/i18n";
 import { ModelLogo } from "@/components/ModelLogo";
 import { StatusLamp } from "@/components/StatusLamp";
 import {
@@ -79,19 +81,20 @@ export function RelayRail({
   port: number;
   requests: RequestInfo[];
 }) {
+  const { t } = useTranslation();
   const [detail, setDetail] = useState<RequestInfo | null>(null);
 
   return (
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-sm">实时中继轨道</CardTitle>
+          <CardTitle className="text-sm">{t("relayRail.title")}</CardTitle>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <StatusLamp
               state={running ? (streaming ? "streaming" : "running") : "stopped"}
               pulse={running}
             />
-            {running ? (streaming ? "转发中" : "链路就绪") : "已停止"}
+            {running ? (streaming ? t("relayRail.forwarding") : t("relayRail.linkReady")) : t("topbar.stopped")}
           </div>
         </div>
       </CardHeader>
@@ -112,15 +115,15 @@ export function RelayRail({
           {streaming && (
             <span className="rail-dot-reverse absolute top-[19px] -mt-0.5 h-1.5 w-1.5 rounded-full bg-signal-info shadow-[0_0_8px_rgba(111,179,224,0.9)]" />
           )}
-          <Node left="1rem" label="客户端" icon={<AppWindow className="h-4 w-4" />} />
-          <Node left="calc(50% - 16px)" label="代理" sub={`127.0.0.1:${port}`} accent="amber" icon={<Server className="h-4 w-4" />} />
-          <Node left="calc(100% - 1rem)" label="上游" sub="commandcode.ai" accent="blue" icon={<Cloud className="h-4 w-4" />} />
+          <Node left="1rem" label={t("relayRail.client")} icon={<AppWindow className="h-4 w-4" />} />
+          <Node left="calc(50% - 16px)" label={t("relayRail.proxy")} sub={`127.0.0.1:${port}`} accent="amber" icon={<Server className="h-4 w-4" />} />
+          <Node left="calc(100% - 1rem)" label={t("relayRail.upstream")} sub="commandcode.ai" accent="blue" icon={<Cloud className="h-4 w-4" />} />
         </div>
 
         <div className="mt-2 space-y-1.5">
           {requests.length === 0 ? (
             <p className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
-              还没有请求记录——启动代理后，向 /v1/chat/completions 发一次请求试试。
+              {t("relayRail.empty")}
             </p>
           ) : (
             // 轨道下方只展示最近一次请求
@@ -147,26 +150,26 @@ export function RelayRail({
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               {detail && <ModelLogo model={detail.model} size={16} />}
-              请求详情
+              {t("relayRail.detailTitle")}
             </DialogTitle>
-            <DialogDescription>单次代理请求的中继摘要</DialogDescription>
+            <DialogDescription>{t("relayRail.detailDesc")}</DialogDescription>
           </DialogHeader>
           {detail && (
             <div className="select-text space-y-2 font-mono text-xs">
-              <Row k="请求 ID" v={detail.id} />
-              <Row k="路径" v={detail.path} />
-              <Row k="模型" v={detail.model} />
-              <Row k="模式" v={detail.stream ? "流式" : "非流式"} />
-              <Row k="状态" v={statusLabel(detail.status)} />
-              <Row k="耗时" v={formatDuration(detail.elapsed_ms)} />
+              <Row k={t("relayRail.fieldRequestId")} v={detail.id} />
+              <Row k={t("relayRail.fieldPath")} v={detail.path} />
+              <Row k={t("relayRail.fieldModel")} v={detail.model} />
+              <Row k={t("relayRail.fieldMode")} v={detail.stream ? t("relayRail.modeStream") : t("relayRail.modeNonStream")} />
+              <Row k={t("relayRail.fieldStatus")} v={translate(statusLabel(detail.status))} />
+              <Row k={t("relayRail.fieldElapsed")} v={formatDuration(detail.elapsed_ms)} />
               <Row k="Token" v={`in ${detail.input_tokens} / out ${detail.output_tokens} / cached ${detail.cached_tokens}`} />
-              <Row k="最后事件" v={detail.last_event || "—"} />
+              <Row k={t("relayRail.fieldLastEvent")} v={detail.last_event || "—"} />
             </div>
           )}
           {detail && (
             <div className="flex justify-end">
               <Badge variant={detail.status === "ok" ? "success" : "outline"}>
-                {statusLabel(detail.status)}
+                {translate(statusLabel(detail.status))}
               </Badge>
             </div>
           )}

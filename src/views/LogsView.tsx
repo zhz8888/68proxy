@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Download, Eraser, Search } from "lucide-react";
 import { toast } from "sonner";
 
@@ -9,6 +10,7 @@ import { Switch } from "@/components/ui/switch";
 import { api, onLog, type LogEntry } from "@/lib/api";
 import { pickSavePath } from "@/lib/platform";
 import { formatLogTime } from "@/lib/format";
+import { errText } from "@/lib/messages";
 import { cn } from "@/lib/utils";
 
 // 日志级别筛选档位
@@ -32,6 +34,7 @@ const LEVEL_DOT: Record<string, string> = {
 
 /** 日志视图：实时展示代理运行日志，支持按级别与关键词过滤、自动滚动和导出。 */
 export function LogsView() {
+  const { t } = useTranslation();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [level, setLevel] = useState<Level>("all");
   const [keyword, setKeyword] = useState("");
@@ -74,9 +77,9 @@ export function LogsView() {
       const path = await pickSavePath("68proxy-logs.log", ["log", "txt"]);
       if (!path) return;
       const count = await api.logsExport(path);
-      toast.success(`已导出 ${count} 条日志`);
+      toast.success(t("logs.exported", { p0: count }));
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     }
   }
 
@@ -93,7 +96,7 @@ export function LogsView() {
                 level === l ? "bg-background text-foreground shadow" : "text-muted-foreground hover:text-foreground",
               )}
             >
-              {l === "all" ? "全部" : l === "info" ? "信息" : l === "warn" ? "警告" : "错误"}
+              {l === "all" ? t("logs.levelAll") : l === "info" ? t("logs.levelInfo") : l === "warn" ? t("logs.levelWarn") : t("logs.levelError")}
             </button>
           ))}
         </div>
@@ -102,18 +105,18 @@ export function LogsView() {
           <Input
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
-            placeholder="搜索日志…"
+            placeholder={t("logs.searchPlaceholder")}
             className="h-8 w-56 pl-8 text-xs"
           />
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          自动滚动
+          {t("logs.autoscroll")}
           <Switch checked={autoscroll} onCheckedChange={setAutoscroll} />
         </div>
         <div className="ml-auto flex items-center gap-1">
           <Button variant="ghost" size="sm" onClick={exportLogs}>
             <Download />
-            导出
+            {t("logs.export")}
           </Button>
           <Button
             variant="ghost"
@@ -124,7 +127,7 @@ export function LogsView() {
             }}
           >
             <Eraser />
-            清空
+            {t("logs.clear")}
           </Button>
         </div>
       </div>
@@ -133,7 +136,7 @@ export function LogsView() {
         <div className="select-text p-3 font-mono text-[12.5px] leading-6">
           {filtered.length === 0 ? (
             <p className="px-2 py-8 text-center text-muted-foreground">
-              {keyword || level !== "all" ? "没有匹配的日志" : "还没有日志——启动代理后这里会实时显示运行记录。"}
+              {keyword || level !== "all" ? t("logs.noMatch") : t("logs.empty")}
             </p>
           ) : (
             filtered.map((l) => (

@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
+use crate::i18n;
 use super::state::{now_millis, AppState};
 
 /// 授权登录会话有效期：超过该时长未完成回调即视为超时（毫秒）。
@@ -176,10 +177,16 @@ pub async fn start_auth_login(state: &Arc<AppState>) -> Result<String, String> {
 
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
-        .map_err(|e| format!("启动授权回调服务器失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("auth_callback_server_failed", &[&e])
+        })?;
     let port = listener
         .local_addr()
-        .map_err(|e| format!("读取授权回调端口失败: {e}"))?
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("auth_callback_port_failed", &[&e])
+        })?
         .port();
     let state_token = generate_state();
     let api_base = state.config.read().unwrap().api_base.clone();
@@ -241,7 +248,7 @@ async fn callback_handler(
         if let Some(s) = session.as_mut() {
             // 仅当会话仍属于本次登录时才写入，避免旧回调覆盖新登录
             if s.state == expected_state {
-                s.result = Some(LoginResult::Failed("state 校验失败，请重试登录".into()));
+                s.result = Some(LoginResult::Failed("auth_state_invalid".into()));
             }
         }
         drop(session);
@@ -285,7 +292,7 @@ async fn callback_handler(
         }
         if api_key.is_empty() || user_id.is_empty() {
             s.result = Some(LoginResult::Failed(
-                "回调缺少必要参数（apiKey/userId），请重试登录".into(),
+                "auth_callback_params_missing".into(),
             ));
         } else {
             s.result = Some(LoginResult::Success {
@@ -332,7 +339,7 @@ pub fn poll_auth_login(state: &AppState) -> serde_json::Value {
         return json!({ "status": "idle" });
     };
     if s.result.is_none() && now_millis().saturating_sub(s.started_at) > LOGIN_TTL_MS {
-        s.result = Some(LoginResult::Failed("登录超时（5 分钟未完成授权），请重试".into()));
+        s.result = Some(LoginResult::Failed("auth_timeout".into()));
     }
     match s.result.as_ref() {
         None => json!({ "status": "pending", "port": s.port }),

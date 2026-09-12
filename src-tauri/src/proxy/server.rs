@@ -30,6 +30,7 @@ use super::log;
 use super::sse::{AnthropicTranslator, OpenAiTranslator, ResponsesTranslator};
 use super::state::{now_millis, now_secs, AppState, RequestInfo};
 use super::usage::UsageEntry;
+use crate::i18n;
 
 /// 流式响应两次上游数据之间的最大空闲时间，超时判定为 Timeout。
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -592,9 +593,10 @@ async fn api_key_or_401(
     // 本地 key 必须已生成，且请求头携带的必须与本地一致（sk- 开头，防止任意 sk- 直过）
     let local = crate::credentials::cached_local_key();
     let Some(expected) = local else {
+        // 对外 HTTP 报文（下游 LLM 客户端读取，非界面文案）：按 API 惯例用英文
         return Err((
             401,
-            "本地转发 Key 未生成，请先在「配置 → 凭据」随机生成 sk- 开头的 Key",
+            "Local forwarding key not generated. Generate an sk- key in Settings first.",
         ));
     };
     let Some(sent) = extract_api_key(headers) else {
@@ -609,7 +611,7 @@ async fn api_key_or_401(
         Some(a) => Ok((a.key, a.user_id)),
         None => Err((
             401,
-            "未配置 CC 账户，请先在「配置 → 凭据」添加 user_ 开头的账户 Key",
+            "No CC account configured. Add a user_ account key on the Accounts page.",
         )),
     }
 }
@@ -694,7 +696,10 @@ async fn chat_completions(
         log::error(&format!("CC API error: {status} — {}", summarize_upstream_error(&text)));
         // 上游明确报额度耗尽：即时失效该账户的路由绑定，下一次请求改走其他账户
         if super::quota::looks_exhausted_error(status, &text) {
-            log::warn("上游报告账户额度耗尽，立即失效该账户的会话绑定");
+            log::warn(i18n::pick(
+                "上游报告账户额度耗尽，立即失效该账户的会话绑定",
+                "Upstream reports the account quota is exhausted; invalidating its session bindings",
+            ));
             super::quota::mark_exhausted(&st, &user_id);
         }
         let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
@@ -786,7 +791,10 @@ async fn messages(
         log::error(&format!("CC API error (Anthropic): {status} — {}", summarize_upstream_error(&text)));
         // 上游明确报额度耗尽：即时失效该账户的路由绑定（与 OpenAI 路径一致）
         if super::quota::looks_exhausted_error(status, &text) {
-            log::warn("上游报告账户额度耗尽，立即失效该账户的会话绑定");
+            log::warn(i18n::pick(
+                "上游报告账户额度耗尽，立即失效该账户的会话绑定",
+                "Upstream reports the account quota is exhausted; invalidating its session bindings",
+            ));
             super::quota::mark_exhausted(&st, &user_id);
         }
         let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
@@ -901,7 +909,10 @@ async fn responses(
         log::error(&format!("CC API error (Responses): {status} — {}", summarize_upstream_error(&text)));
         // 上游明确报额度耗尽：即时失效该账户的路由绑定（三条协议入口保持一致）
         if super::quota::looks_exhausted_error(status, &text) {
-            log::warn("上游报告账户额度耗尽，立即失效该账户的会话绑定");
+            log::warn(i18n::pick(
+                "上游报告账户额度耗尽，立即失效该账户的会话绑定",
+                "Upstream reports the account quota is exhausted; invalidating its session bindings",
+            ));
             super::quota::mark_exhausted(&st, &user_id);
         }
         let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
@@ -1404,7 +1415,10 @@ fn record_usage_entry(
     let retention = st.config.read().unwrap().usage_retention_days;
     if retention > 0 {
         if let Err(e) = st.prune_usage(retention) {
-            log::warn(&format!("清理过期用量失败: {e}"));
+            log::warn(&format!(
+                "{}: {e}",
+                i18n::pick("清理过期用量失败", "Failed to prune expired usage")
+            ));
         }
     }
 }

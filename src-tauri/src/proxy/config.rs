@@ -159,6 +159,8 @@ pub struct Config {
     pub preferred_account_id: String,
     /// 界面主题：`system`（跟随系统，默认）/ `dark` / `light`。
     pub theme: String,
+    /// 界面语言：`zh`（简体中文，默认）/ `en`（英文）。
+    pub language: String,
 }
 
 impl Default for Config {
@@ -189,31 +191,35 @@ impl Default for Config {
             account_strategy: "round_robin".into(),
             preferred_account_id: String::new(),
             theme: "system".into(),
+            language: "zh".into(),
         }
     }
 }
 
 impl Config {
     /// 校验配置合法性（端口范围、监听地址、api_base 协议前缀、日志级别枚举）。
-    /// 返回 `Err(中文错误描述)` 表示不合法。
+    /// 返回 `Err(消息码)`（形如 `err:<code>`，见 crate::i18n），由前端翻译为当前语言。
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=65535).contains(&self.port) {
-            return Err("端口必须在 1-65535 之间".into());
+            return Err(crate::i18n::err("config_invalid_port"));
         }
         if self.host.trim().is_empty() {
-            return Err("监听地址不能为空".into());
+            return Err(crate::i18n::err("config_invalid_host"));
         }
         if !self.api_base.starts_with("http://") && !self.api_base.starts_with("https://") {
-            return Err("上游 API 地址必须以 http:// 或 https:// 开头".into());
+            return Err(crate::i18n::err("config_invalid_api_base"));
         }
         if !matches!(self.log_level.as_str(), "debug" | "info" | "warn" | "error") {
-            return Err("日志级别只能是 debug/info/warn/error".into());
+            return Err(crate::i18n::err("config_invalid_log_level"));
         }
         if !matches!(self.account_strategy.as_str(), "round_robin" | "priority") {
-            return Err("账户使用策略只能是 round_robin/priority".into());
+            return Err(crate::i18n::err("config_invalid_strategy"));
         }
         if !matches!(self.theme.as_str(), "system" | "dark" | "light") {
-            return Err("主题只能是 system/dark/light".into());
+            return Err(crate::i18n::err("config_invalid_theme"));
+        }
+        if !matches!(self.language.as_str(), "zh" | "en") {
+            return Err(crate::i18n::err("config_invalid_language"));
         }
         Ok(())
     }
@@ -231,7 +237,10 @@ impl Config {
             Ok(text) => {
                 let mut v: serde_json::Value =
                     serde_json::from_str(&text).unwrap_or_else(|e| {
-                        log::warn(&format!("配置解析失败，使用默认值: {e}"));
+                        log::warn(&format!(
+                            "{}: {e}",
+                            crate::i18n::pick("配置解析失败，使用默认值", "Failed to parse config, using defaults")
+                        ));
                         serde_json::json!({})
                     });
                 // 单位迁移须在反序列化前完成（详见函数注释）
@@ -258,12 +267,21 @@ impl Config {
         let mut mirrored = self.clone();
         mirrored.local_api_key = String::new();
         mirrored.cc_accounts = Vec::new();
-        let text = serde_json::to_string_pretty(&mirrored)
-            .map_err(|e| format!("配置序列化失败: {e}"))?;
+        let text = serde_json::to_string_pretty(&mirrored).map_err(|e| {
+            format!(
+                "{}: {e}",
+                crate::i18n::pick("配置序列化失败", "Failed to serialize the config")
+            )
+        })?;
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        std::fs::write(path, text).map_err(|e| format!("配置写入失败: {e}"))
+        std::fs::write(path, text).map_err(|e| {
+            format!(
+                "{}: {e}",
+                crate::i18n::pick("配置写入失败", "Failed to write the config")
+            )
+        })
     }
 
     /// 用环境变量覆写对应字段：PORT / HOST / CC_API_BASE / PROJECT_SLUG / LOG_FILE /

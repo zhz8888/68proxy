@@ -3,6 +3,8 @@
 //! 日志/请求事件转发与窗口生命周期钩子的装配。
 
 mod credentials;
+/// 后端国际化：错误码生成与日志文案语言选择（详见模块文档）。
+mod i18n;
 mod proxy;
 
 /// 开发调试桥接：仅在 debug 构建编译，让浏览器直连前端页面时也能调用后端命令。
@@ -80,23 +82,28 @@ fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Valu
     config.preferred_account_id = stored.preferred_account_id;
     // 主题由 theme_set 专门管理，同样保留原值
     config.theme = stored.theme;
+    // 语言由 language_set 专门管理，同样保留原值
+    config.language = stored.language;
     // 校验放在保留字段之后：被保留的字段不应触发校验失败
     config.validate()?;
     // 主存 SQLite settings 表
     {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         proxy::settings::save_config(conn, &config)?;
     }
     // 镜像到 config.json（兜底），失败仅记 warn 不阻断保存
     if let Err(e) = config.save(&ctx.config_path) {
-        proxy::log::warn(&format!("config.json 镜像写入失败: {e}"));
+        proxy::log::warn(&format!(
+            "{}: {e}",
+            i18n::pick("config.json 镜像写入失败", "Failed to write the config.json mirror")
+        ));
     }
     let prev = ctx.proxy_state.config.read().unwrap().clone();
     let needs_restart =
         (prev.port != config.port || prev.host != config.host) && ctx.proxy_state.is_running();
     *ctx.proxy_state.config.write().unwrap() = config.clone();
-    proxy::log::info("配置已保存");
+    proxy::log::info(i18n::pick("配置已保存", "Settings saved"));
     Ok(json!({ "needs_restart": needs_restart }))
 }
 
@@ -106,7 +113,7 @@ fn local_key_get(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
     let key = {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         credentials::load_local_key(conn)?
     };
     Ok(json!({
@@ -121,7 +128,7 @@ fn local_key_set(app: AppHandle, key: String) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
     {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         credentials::save_local_key(conn, &key)?;
     }
     ctx.proxy_state.config.write().unwrap().local_api_key = key.trim().to_string();
@@ -134,7 +141,7 @@ fn local_key_generate(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
     let key = {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         let key = credentials::generate_local_key();
         credentials::save_local_key(conn, &key)?;
         key
@@ -149,7 +156,7 @@ fn local_key_delete(app: AppHandle) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
     {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         credentials::delete_local_key(conn)?;
     }
     ctx.proxy_state.config.write().unwrap().local_api_key = String::new();
@@ -162,7 +169,7 @@ fn account_list(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
     let accounts = {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         credentials::load_accounts(conn)?
     };
     Ok(json!({
@@ -186,7 +193,7 @@ fn account_list(app: AppHandle) -> Result<Value, String> {
 async fn account_add(app: AppHandle, key: String, user_name: Option<String>) -> Result<(), String> {
     let key = key.trim().to_string();
     if !key.starts_with("user_") {
-        return Err("CC 账户 Key 必须以 user_ 开头".into());
+        return Err(i18n::err("account_key_prefix"));
     }
     let ctx = app.state::<AppCtx>();
     let api_base = ctx.proxy_state.config.read().unwrap().api_base.clone();
@@ -194,7 +201,7 @@ async fn account_add(app: AppHandle, key: String, user_name: Option<String>) -> 
     let display = user_name.unwrap_or(default_name);
     let accounts = {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         credentials::add_account(
             conn,
             &proxy::config::Account {
@@ -216,7 +223,7 @@ fn account_rename(app: AppHandle, user_id: String, user_name: String) -> Result<
     let ctx = app.state::<AppCtx>();
     let accounts = {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         credentials::rename_account(conn, &user_id, &user_name)?
     };
     ctx.proxy_state.config.write().unwrap().cc_accounts = accounts;
@@ -229,7 +236,7 @@ fn account_remove(app: AppHandle, index: usize) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
     let accounts = {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         credentials::remove_account_at(conn, index)?
     };
     ctx.proxy_state.config.write().unwrap().cc_accounts = accounts;
@@ -264,7 +271,7 @@ async fn auth_login_poll(app: AppHandle) -> Result<Value, String> {
         let user_name = value["account"]["userName"].as_str().unwrap_or("").to_string();
         let accounts = {
             let guard = ctx.proxy_state.usage.lock().unwrap();
-            let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+            let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
             credentials::add_account(
                 conn,
                 &proxy::config::Account {
@@ -327,12 +334,15 @@ fn models_catalog_update(
     let ctx = app.state::<AppCtx>();
     let (updated, all) = {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         let n = proxy::models::upsert_models(conn, &models, source.as_deref().unwrap_or("manual"))?;
         (n, proxy::models::load_all(conn))
     };
     proxy::pricing::set_models(all);
-    proxy::log::info(&format!("模型信息已更新 {updated} 条"));
+    proxy::log::info(&format!(
+        "{} {updated}",
+        i18n::pick("模型信息已更新", "Model info updated:")
+    ));
     Ok(json!({ "updated": updated }))
 }
 
@@ -356,7 +366,8 @@ async fn plan_status(app: AppHandle, force: bool) -> Result<Value, String> {
 async fn accounts_quota(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
     let list = proxy::quota::snapshot_all(&ctx.proxy_state).await;
-    Ok(serde_json::to_value(list).map_err(|e| format!("序列化额度失败: {e}"))?)
+    Ok(serde_json::to_value(list)
+        .map_err(|e| i18n::err_args("serialize_failed", &[&e.to_string()]))?)
 }
 
 /// 读取界面主题：`system`（跟随系统）/ `dark` / `light`。
@@ -372,7 +383,7 @@ fn theme_get(app: AppHandle) -> Value {
 #[tauri::command]
 fn theme_set(app: AppHandle, theme: String) -> Result<(), String> {
     if !matches!(theme.as_str(), "system" | "dark" | "light") {
-        return Err("主题只能是 system/dark/light".into());
+        return Err(i18n::err("theme_invalid"));
     }
     let ctx = app.state::<AppCtx>();
     let updated = {
@@ -381,8 +392,47 @@ fn theme_set(app: AppHandle, theme: String) -> Result<(), String> {
         cfg.clone()
     };
     let guard = ctx.proxy_state.usage.lock().unwrap();
-    let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+    let conn = guard
+        .as_ref()
+        .ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
     proxy::settings::save_config(conn, &updated)
+}
+
+/// 读取界面语言：`zh`（简体中文）/ `en`（英文）。
+#[tauri::command]
+fn language_get(app: AppHandle) -> Value {
+    let ctx = app.state::<AppCtx>();
+    json!({ "language": ctx.proxy_state.config.read().unwrap().language })
+}
+
+/// 保存界面语言并持久化（settings 表 + 内存状态 + 后端日志语言）；非法值报错。
+///
+/// 语言即时生效（前端切换 i18next 语言），此命令只负责持久化与后端日志语言同步，无需重启。
+#[tauri::command]
+fn language_set(app: AppHandle, language: String) -> Result<(), String> {
+    if !matches!(language.as_str(), "zh" | "en") {
+        return Err(i18n::err("language_invalid"));
+    }
+    let ctx = app.state::<AppCtx>();
+    // 先持久化再改内存/日志语言：落库失败时前端会弹错，此时不应让后端语言与库中值分叉
+    let updated = {
+        let cfg = ctx.proxy_state.config.read().unwrap();
+        let mut next = cfg.clone();
+        next.language = language.clone();
+        next
+    };
+    {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
+        proxy::settings::save_config(conn, &updated)?;
+    }
+    // 落库成功后同步内存配置、后端日志语言与托盘菜单
+    ctx.proxy_state.config.write().unwrap().language = language.clone();
+    i18n::set_lang(&language);
+    refresh_tray_menu(&app);
+    Ok(())
 }
 
 /// 读取账户使用规则：`{ strategy, preferred_account_id }`。
@@ -408,7 +458,7 @@ fn account_routing_set(
     #[allow(non_snake_case)] preferred_account_id: String,
 ) -> Result<(), String> {
     if !matches!(strategy.as_str(), "round_robin" | "priority") {
-        return Err("账户使用策略只能是 round_robin/priority".into());
+        return Err(i18n::err("strategy_invalid"));
     }
     let ctx = app.state::<AppCtx>();
     let updated = {
@@ -419,12 +469,12 @@ fn account_routing_set(
     };
     {
         let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         proxy::settings::save_config(conn, &updated)?;
     }
     // 规则变更后原有绑定可能不再符合预期，全部清除以便按新规则重选
     ctx.proxy_state.account_bindings.lock().unwrap().clear();
-    proxy::log::info("账户使用规则已更新");
+    proxy::log::info(i18n::pick("账户使用规则已更新", "Account usage rules updated"));
     Ok(())
 }
 
@@ -438,7 +488,11 @@ fn account_bindings_clear(app: AppHandle) -> Result<Value, String> {
         bindings.clear();
         n
     };
-    proxy::log::info(&format!("已清除 {n} 条账户会话绑定"));
+    proxy::log::info(&format!(
+        "{} {n} {}",
+        i18n::pick("已清除", "Cleared"),
+        i18n::pick("条账户会话绑定", "account session bindings")
+    ));
     Ok(json!({ "cleared": n }))
 }
 
@@ -450,13 +504,14 @@ async fn account_quota(app: AppHandle, #[allow(non_snake_case)] userId: String) 
     let ctx = app.state::<AppCtx>();
     let accounts = credentials::accounts_from_state(&ctx.proxy_state);
     let Some(a) = accounts.iter().find(|a| a.user_id == userId) else {
-        return Err(format!("未找到 userId 为 {userId} 的账户"));
+        return Err(i18n::err_args("account_not_found", &[&userId]));
     };
     let name = if a.user_name.is_empty() { a.user_id.clone() } else { a.user_name.clone() };
     let masked = credentials::mask_key(&a.key);
     let quota =
         proxy::quota::fetch_account_quota(&ctx.proxy_state, &name, &masked, &a.key).await;
-    Ok(serde_json::to_value(quota).map_err(|e| format!("序列化额度失败: {e}"))?)
+    Ok(serde_json::to_value(quota)
+        .map_err(|e| i18n::err_args("serialize_failed", &[&e.to_string()]))?)
 }
 
 /// 增量拉取内存日志：`limit` 最多返回条数（默认 200），`after_seq` 只返回序号大于它的条目。
@@ -483,7 +538,8 @@ fn logs_export(path: String) -> Result<usize, String> {
             .unwrap_or_default();
         out.push_str(&format!("[{ts}] [{level}] {msg}\n", level = e.level, msg = e.msg));
     }
-    std::fs::write(&path, out).map_err(|e| format!("日志写入失败: {e}"))?;
+    std::fs::write(&path, out)
+        .map_err(|e| i18n::err_args("export_failed", &[&e.to_string()]))?;
     Ok(total)
 }
 
@@ -511,7 +567,8 @@ fn stats_chart(app: AppHandle, period: String) -> Result<Value, String> {
     let period = proxy::usage::Period::parse(&period);
     let conn = proxy::usage::open_usage(&ctx.usage_path)?;
     let chart = proxy::usage::get_chart(&conn, period)?;
-    Ok(serde_json::to_value(chart).map_err(|e| format!("序列化趋势数据失败: {e}"))?)
+    Ok(serde_json::to_value(chart)
+        .map_err(|e| i18n::err_args("serialize_failed", &[&e.to_string()]))?)
 }
 
 /// 获取最近 `limit` 条用量明细（默认 20，新在前）。
@@ -520,7 +577,8 @@ fn stats_recent(app: AppHandle, limit: Option<usize>) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
     let conn = proxy::usage::open_usage(&ctx.usage_path)?;
     let recent = proxy::usage::query_recent(&conn, limit.unwrap_or(20))?;
-    Ok(serde_json::to_value(recent).map_err(|e| format!("序列化最近用量失败: {e}"))?)
+    Ok(serde_json::to_value(recent)
+        .map_err(|e| i18n::err_args("serialize_failed", &[&e.to_string()]))?)
 }
 
 /// 清空全部 token 用量统计，返回被清除的记录条数。
@@ -529,7 +587,10 @@ fn stats_clear_all(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
     let conn = proxy::usage::open_usage(&ctx.usage_path)?;
     let count = proxy::usage::clear_all(&conn)?;
-    proxy::log::info(&format!("用量统计已清空（{count} 条）"));
+    proxy::log::info(&format!(
+        "{} {count}",
+        i18n::pick("用量统计已清空，条数：", "Usage stats cleared, records:")
+    ));
     Ok(json!({ "cleared": count }))
 }
 
@@ -551,18 +612,22 @@ async fn port_free(port: u16) -> Result<Value, String> {
         #[cfg(not(windows))]
         return Ok(json!({
             "killed": [],
-            "message": "当前平台暂不支持自动释放端口，请手动结束占用进程",
+            "message": i18n::msg("port_free_unsupported"),
         }));
         #[cfg(windows)]
-        return Ok(json!({ "killed": [], "message": "端口未被占用，无需释放" }));
+        return Ok(json!({ "killed": [], "message": i18n::msg("port_not_in_use") }));
     }
     let mut killed: Vec<u32> = Vec::new();
     for pid in &pids {
         kill_pid(*pid)?;
         killed.push(*pid);
     }
-    proxy::log::info(&format!("端口 {port} 已释放，结束进程：{killed:?}"));
-    Ok(json!({ "killed": killed, "message": format!("已结束占用进程（PID {}）", killed.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")) }))
+    proxy::log::info(&format!(
+        "{} {port} {} {killed:?}",
+        i18n::pick("端口", "Port"),
+        i18n::pick("已释放，结束进程：", "released, killed processes:")
+    ));
+    Ok(json!({ "killed": killed, "message": i18n::msg_args("port_freed", &[&killed.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")]) }))
 }
 
 /// 查询是否已开启开机自启。
@@ -621,19 +686,19 @@ async fn start_proxy_inner(app: &AppHandle) -> Result<Value, String> {
     }
     // 需要已生成本地转发 Key 且至少一个 CC 账户才能启动代理（与运行时鉴权使用同一内存源）
     if credentials::cached_local_key().is_none() {
-        return Err("本地转发 Key 未生成：请先在「配置 → 凭据」随机生成 sk- 开头的 Key 后再启动代理".into());
+        return Err(i18n::err("local_key_missing"));
     }
     if credentials::accounts_from_state(&ctx.proxy_state).is_empty() {
-        return Err("未配置 CC 账户：请先在「配置 → 凭据」添加至少一个 user_ 开头的账户 Key".into());
+        return Err(i18n::err("no_cc_account"));
     }
     let cfg = ctx.proxy_state.config.read().unwrap().clone();
     cfg.validate()?;
     *ctx.proxy_state.config.write().unwrap() = cfg.clone();
 
     let addr = proxy::server::listen_addr(&cfg);
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| format!("端口 {} 监听失败，可能已被占用（请先关闭占用程序）: {e}", addr.port()))?;
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        i18n::err_args("port_listen_failed", &[&addr.port().to_string(), &e.to_string()])
+    })?;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     *ctx.proxy_state.shutdown.lock().unwrap() = Some(tx);
@@ -651,9 +716,14 @@ async fn start_proxy_inner(app: &AppHandle) -> Result<Value, String> {
     }
     // 等待结束后必须确认服务确实进入运行态，否则不能谎报启动成功
     if !ctx.proxy_state.is_running() {
-        return Err("代理服务启动失败（未进入运行状态），请查看日志排查".into());
+        return Err(i18n::err("proxy_start_failed"));
     }
-    proxy::log::info(&format!("代理已启动：{}:{}", cfg.host, cfg.port));
+    proxy::log::info(&format!(
+        "{} {}:{}",
+        i18n::pick("代理已启动", "Proxy started"),
+        cfg.host,
+        cfg.port
+    ));
     emit_status(app);
     Ok(status_value(app))
 }
@@ -684,7 +754,7 @@ fn stop_proxy_inner(app: &AppHandle) {
     }
     ctx.proxy_state.mark_stopped();
     ctx.proxy_state.clear_requests();
-    proxy::log::info("代理已停止");
+    proxy::log::info(i18n::pick("代理已停止", "Proxy stopped"));
     emit_status(app);
 }
 
@@ -749,18 +819,21 @@ fn kill_pid(pid: u32) -> Result<(), String> {
         let output = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
             .output()
-            .map_err(|e| format!("结束进程失败: {e}"))?;
+            .map_err(|e| i18n::err_args("kill_failed", &[&e.to_string()]))?;
         if output.status.success() {
             Ok(())
         } else {
             let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(format!("结束进程失败（PID {pid}）：{msg}"))
+            Err(i18n::err_args(
+                "kill_process_failed",
+                &[&pid.to_string(), &msg],
+            ))
         }
     }
     #[cfg(not(windows))]
     {
         let _ = pid;
-        Err("当前平台暂不支持结束进程".into())
+        Err(i18n::err("platform_unsupported"))
     }
 }
 
@@ -772,14 +845,31 @@ fn show_window(app: &AppHandle) {
     }
 }
 
+/// 构建托盘菜单（文案按当前语言；语言切换时重建即调用本函数）。
+fn tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let show = MenuItem::with_id(app, "show", i18n::pick("显示窗口", "Show Window"), true, None::<&str>)?;
+    let start = MenuItem::with_id(app, "start", i18n::pick("启动代理", "Start Proxy"), true, None::<&str>)?;
+    let stop = MenuItem::with_id(app, "stop", i18n::pick("停止代理", "Stop Proxy"), true, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart", i18n::pick("重启代理", "Restart Proxy"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", i18n::pick("退出", "Quit"), true, None::<&str>)?;
+    Menu::with_items(app, &[&show, &start, &stop, &restart, &quit])
+}
+
+/// 语言切换后重建托盘菜单，使菜单文案跟随界面语言（托盘在 setup 只创建一次）。
+fn refresh_tray_menu(app: &AppHandle) {
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        match tray_menu(app) {
+            Ok(menu) => {
+                let _ = tray.set_menu(Some(menu));
+            }
+            Err(e) => proxy::log::warn(&format!("托盘菜单刷新失败: {e}")),
+        }
+    }
+}
+
 /// 构建系统托盘：提供显示窗口、启停/重启代理与退出菜单，左键单击托盘图标唤起主窗口。
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
-    let start = MenuItem::with_id(app, "start", "启动代理", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "stop", "停止代理", true, None::<&str>)?;
-    let restart = MenuItem::with_id(app, "restart", "重启代理", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &start, &stop, &restart, &quit])?;
+    let menu = tray_menu(app)?;
 
     TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().expect("default window icon").clone())
@@ -867,6 +957,8 @@ pub fn run() {
             account_bindings_clear,
             theme_get,
             theme_set,
+            language_get,
+            language_set,
             logs_get,
             logs_clear,
             logs_export,
@@ -890,7 +982,13 @@ pub fn run() {
             // 之后模型数据以数据库为准，内置表仅作兜底
             match proxy::models::init_and_load(&usage_conn) {
                 Ok(models) => proxy::pricing::set_models(models),
-                Err(e) => proxy::log::warn(&format!("模型信息初始化失败，使用内置兜底表: {e}")),
+                Err(e) => proxy::log::warn(&format!(
+                    "{}: {e}",
+                    i18n::pick(
+                        "模型信息初始化失败，使用内置兜底表",
+                        "Model info init failed, using the built-in fallback table"
+                    )
+                )),
             }
             // 首次启动：config.json 存在且 settings 表为空时迁移到 SQLite
             proxy::settings::migrate_from_config(&usage_conn, &config_path)?;
@@ -898,6 +996,8 @@ pub fn run() {
             let _ = proxy::settings::purge_legacy_api_key(&usage_conn);
             // 从 SQLite 加载配置（缺字段走默认）
             let mut cfg = proxy::settings::load_config(&usage_conn);
+            // 后端日志语言跟随配置（此后产生的日志按该语言输出）
+            i18n::set_lang(&cfg.language);
             // 首次落盘镜像时使用「未叠加环境变量」的副本：否则下次启动
             // migrate_from_config 会把 env 值当作普通设置导入 settings 表并永久生效
             if !config_path.exists() {

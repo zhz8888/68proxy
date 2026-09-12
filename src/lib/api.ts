@@ -3,6 +3,7 @@
 
 import { invoke, listen } from "@/lib/ipc";
 
+import type { Language } from "@/lib/language";
 import type { ThemeMode } from "@/lib/theme";
 
 /** 应用配置，字段与后端 config.json 及 Rust 侧 Config 结构一致。 */
@@ -37,6 +38,8 @@ export interface Config {
   max_inflight: number;
   /** 界面主题：system（跟随系统）/ dark / light。 */
   theme: ThemeMode;
+  /** 界面语言：zh（简体中文）/ en（英文）。 */
+  language: Language;
 }
 
 /** 代理运行状态：是否运行、监听地址、OpenAI/Anthropic 接入 URL、上游版本与运行时长。 */
@@ -326,6 +329,9 @@ export const api = {
   // 界面主题：读取 / 保存（system / dark / light）
   themeGet: () => invoke<{ theme: ThemeMode }>("theme_get"),
   themeSet: (theme: ThemeMode) => invoke<void>("theme_set", { theme }),
+  // 界面语言：读取 / 保存（zh / en）
+  languageGet: () => invoke<{ language: Language }>("language_get"),
+  languageSet: (language: Language) => invoke<void>("language_set", { language }),
   // 日志：按序号增量拉取 / 清空 / 导出到文件（返回条数）
   logsGet: (limit = 200, afterSeq = 0) => invoke<LogEntry[]>("logs_get", { limit, afterSeq }),
   logsClear: () => invoke<void>("logs_clear"),

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, Play, RefreshCw, RotateCw, Square } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { RelayRail } from "@/components/RelayRail";
@@ -11,10 +12,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { api, onRequest, onStatus, type ProxyStatus, type RequestInfo } from "@/lib/api";
 import { DEFAULT_PORT } from "@/lib/constants";
 import { formatUptime } from "@/lib/format";
+import { errText } from "@/lib/messages";
 import { cn } from "@/lib/utils";
 
 /** 控制台视图：展示代理运行状态、监听端口与代理地址，并提供启动/停止/重启及健康检查操作。 */
 export function ConsoleView() {
+  const { t } = useTranslation();
   const [status, setStatus] = useState<ProxyStatus | null>(null);
   const [requests, setRequests] = useState<RequestInfo[]>([]);
   const [busy, setBusy] = useState<"start" | "stop" | "restart" | null>(null);
@@ -67,9 +70,17 @@ export function ConsoleView() {
             ? await api.proxyStop()
             : await api.proxyRestart();
       setStatus(s);
-      toast.success(action === "start" ? "代理已启动" : action === "stop" ? "代理已停止" : "代理已重启");
+      toast.success(
+        t(
+          action === "start"
+            ? "console.proxyStarted"
+            : action === "stop"
+              ? "console.proxyStopped"
+              : "console.proxyRestarted",
+        ),
+      );
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     } finally {
       setBusy(null);
     }
@@ -78,18 +89,18 @@ export function ConsoleView() {
   /** 请求代理的 /health 端点验证可用性；代理未运行时直接提示。 */
   async function checkHealth() {
     if (!status?.running || !status) {
-      toast.error("代理未运行，先启动代理再健康检查");
+      toast.error(t("console.healthNotRunning"));
       return;
     }
     try {
       const r = await fetch(`${status.anthropic_url}/health`);
       if (r.ok) {
-        toast.success("健康检查通过（OK）");
+        toast.success(t("console.healthOk"));
       } else {
-        toast.error(`健康检查失败：HTTP ${r.status}`);
+        toast.error(t("console.healthFailedHttp", { p0: r.status }));
       }
     } catch {
-      toast.error("健康检查失败：无法连接代理");
+      toast.error(t("console.healthFailedConnect"));
     }
   }
 
@@ -110,16 +121,20 @@ export function ConsoleView() {
       <div className="grid grid-cols-3 gap-4">
         <Card className="min-w-0">
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">运行状态</CardTitle>
+            <CardTitle className="text-xs font-medium text-muted-foreground">{t("console.statusTitle")}</CardTitle>
           </CardHeader>
           <CardContent className="flex items-center gap-2 pt-0">
             <StatusLamp state={running ? (streaming ? "streaming" : "running") : "stopped"} pulse={running} />
             <span className={cn("min-w-0 truncate text-lg font-semibold", statusTextClass)}>
-              {running ? (streaming ? "转发中" : "运行中") : "已停止"}
+              {running
+                ? streaming
+                  ? t("console.statusStreaming")
+                  : t("console.statusRunning")
+                : t("console.statusStopped")}
             </span>
             {running && status && (
               <span className="ml-auto whitespace-nowrap text-xs text-muted-foreground">
-                已运行 {formatUptime(status.uptime_secs)}
+                {t("console.uptime", { p0: formatUptime(status.uptime_secs) })}
               </span>
             )}
           </CardContent>
@@ -127,7 +142,7 @@ export function ConsoleView() {
 
         <Card className="min-w-0">
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">监听端口</CardTitle>
+            <CardTitle className="text-xs font-medium text-muted-foreground">{t("console.portTitle")}</CardTitle>
           </CardHeader>
           <CardContent className="pt-0">
             <span className="font-mono text-lg font-semibold">{status ? `${status.host}:${status.port}` : "—"}</span>
@@ -136,7 +151,9 @@ export function ConsoleView() {
 
         <Card className="min-w-0">
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">上游版本</CardTitle>
+            <CardTitle className="text-xs font-medium text-muted-foreground">
+              {t("console.upstreamVersionTitle")}
+            </CardTitle>
           </CardHeader>
           <CardContent className="flex items-center gap-2 pt-0">
             <span className="min-w-0 truncate font-mono text-lg font-semibold">{status?.cc_version ?? "—"}</span>
@@ -150,8 +167,8 @@ export function ConsoleView() {
 
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">代理地址</CardTitle>
-          <CardDescription>粘贴到 Cursor / OpenCode / SDK 的 base URL</CardDescription>
+          <CardTitle className="text-sm">{t("console.proxyAddressTitle")}</CardTitle>
+          <CardDescription>{t("console.proxyAddressDesc")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2 pt-0">
           <UrlRow url={status?.url ?? `http://127.0.0.1:${DEFAULT_PORT}/v1`} label="OpenAI" />
@@ -162,19 +179,19 @@ export function ConsoleView() {
       <div className="flex items-center gap-2">
         <Button disabled={running || busy !== null} onClick={() => run("start")}>
           {busy === "start" ? <RefreshCw className="animate-spin" /> : <Play />}
-          启动代理
+          {t("console.start")}
         </Button>
         <Button variant="destructive" disabled={!running || busy !== null} onClick={() => run("stop")}>
           {busy === "stop" ? <RefreshCw className="animate-spin" /> : <Square />}
-          停止代理
+          {t("console.stop")}
         </Button>
         <Button variant="secondary" disabled={!running || busy !== null} onClick={() => run("restart")}>
           {busy === "restart" ? <RefreshCw className="animate-spin" /> : <RotateCw />}
-          重启代理
+          {t("console.restart")}
         </Button>
-        <Button variant="secondary" onClick={checkHealth} title="检查代理健康状态">
+        <Button variant="secondary" onClick={checkHealth} title={t("console.healthCheckTitle")}>
           <Activity />
-          健康检查
+          {t("console.healthCheck")}
         </Button>
       </div>
     </div>

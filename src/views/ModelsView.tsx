@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Check, Copy, Eye, RefreshCw, Search, Sparkles } from "lucide-react";
 
 import { ModelLogo, providerForModel } from "@/components/ModelLogo";
@@ -8,6 +9,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { api, type ModelAccessInfo, type ModelInfo, type ModelPricing, type PlanContext } from "@/lib/api";
 import { copyText, formatContextTokens, formatPrice } from "@/lib/format";
+import { errText } from "@/lib/messages";
 import { cn } from "@/lib/utils";
 
 /** 能力/价格筛选维度。 */
@@ -61,6 +63,7 @@ function matchAccess(access: Record<string, ModelAccessInfo>, id: string): Model
 
 /** 模型视图：展示可用模型列表及其能力与价格，支持搜索、能力筛选、复制与手动刷新。 */
 export function ModelsView() {
+  const { t } = useTranslation();
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [catalog, setCatalog] = useState<Map<string, ModelPricing>>(new Map());
   const [fallback, setFallback] = useState(false);
@@ -91,6 +94,7 @@ export function ModelsView() {
       setPlan(ps?.plan ?? null);
       setAccess(ps?.access ?? {});
     } catch (e) {
+      // 保存原始错误串，渲染时再翻译（切换语言后已显示的提示随之更新）
       setError(String(e));
     } finally {
       setLoading(false);
@@ -153,11 +157,11 @@ export function ModelsView() {
   }
 
   const FILTERS: Array<{ value: Filter; label: string; count?: number }> = [
-    { value: "all", label: "全部" },
-    { value: "vision", label: "视觉", count: counts.vision },
-    { value: "reasoning", label: "思考", count: counts.reasoning },
-    { value: "free", label: "免费", count: counts.free },
-    { value: "unavailable", label: "不可用", count: counts.unavailable },
+    { value: "all", label: t("models.filter.all") },
+    { value: "vision", label: t("models.filter.vision"), count: counts.vision },
+    { value: "reasoning", label: t("models.filter.reasoning"), count: counts.reasoning },
+    { value: "free", label: t("models.filter.free"), count: counts.free },
+    { value: "unavailable", label: t("models.filter.unavailable"), count: counts.unavailable },
   ];
 
   return (
@@ -168,7 +172,7 @@ export function ModelsView() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="搜索模型…"
+            placeholder={t("models.searchPlaceholder")}
             className="h-8 w-64 pl-8 text-xs"
           />
         </div>
@@ -191,7 +195,7 @@ export function ModelsView() {
           ))}
         </div>
         <span className="text-xs text-muted-foreground">
-          {models.length > 0 ? `共 ${models.length} 个模型` : ""}
+          {models.length > 0 ? t("models.totalModels", { p0: models.length }) : ""}
         </span>
         <Button
           variant="ghost"
@@ -201,32 +205,38 @@ export function ModelsView() {
           onClick={() => load(true)}
         >
           <RefreshCw className={loading ? "animate-spin" : ""} />
-          刷新
+          {t("common.refresh")}
         </Button>
       </div>
 
       {error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-          {error}
+          {errText(error)}
           <button className="ml-2 underline" onClick={() => load(true)}>
-            重试
+            {t("common.retry")}
           </button>
         </div>
       )}
 
       {fallback && !error && !loading && models.length > 0 && (
         <div className="rounded-md border border-signal-warn/40 bg-signal-warn/5 px-3 py-2 text-xs text-signal-warn">
-          当前显示内置模型列表：未添加 Command Code 账户或 Provider 拉取失败。可在「账户」页添加账户后刷新。
+          {t("models.fallbackNotice")}
         </div>
       )}
 
       {plan && !plan.fetch_failed && (
         <div className="rounded-md border border-border bg-secondary/40 px-3 py-2 text-xs text-muted-foreground">
-          当前套餐：<span className="text-foreground">{plan.plan_name}</span>
+          {t("models.currentPlan")}
+          <span className="text-foreground">{plan.plan_name || t("plan.noSubscription")}</span>
           {(plan.purchased_credits > 0 || plan.free_credits > 0) && (
-            <> · 按量额度 ${plan.purchased_credits + plan.free_credits}（可解锁全部模型）</>
+            <>
+              {" "}
+              {t("models.creditsUnlock", { p0: plan.purchased_credits + plan.free_credits })}
+            </>
           )}
-          {counts.unavailable > 0 && <> · 有 {counts.unavailable} 个模型当前套餐不可用</>}
+          {counts.unavailable > 0 && (
+            <> {t("models.unavailableCount", { p0: counts.unavailable })}</>
+          )}
         </div>
       )}
 
@@ -239,7 +249,7 @@ export function ModelsView() {
       ) : filtered.length === 0 ? (
         <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed border-border">
           <p className="text-sm text-muted-foreground">
-            {search || filter !== "all" ? "没有匹配的模型" : "还没有模型——先启动代理，再用已保存的 API Key 刷新一次。"}
+            {search || filter !== "all" ? t("models.noMatch") : t("models.emptyHint")}
           </p>
         </div>
       ) : (
@@ -251,6 +261,11 @@ export function ModelsView() {
             const discount = pricing?.deal && !free ? pricing.deal.discountPercent : 0;
             const multiTier = (pricing?.tiers.length ?? 0) > 1;
             const unavailable = acc?.allowed === false;
+            const accessHint = unavailable
+              ? acc?.minimum_plan
+                ? t("plan.requires", { p0: acc.minimum_plan })
+                : t("models.unavailableShort")
+              : undefined;
             return (
               <Card
                 key={m.id}
@@ -258,7 +273,7 @@ export function ModelsView() {
                   "group flex flex-col gap-2 p-3 transition-colors",
                   unavailable ? "opacity-60 hover:border-border" : "hover:border-primary/40",
                 )}
-                title={unavailable ? (acc?.reason ?? undefined) : undefined}
+                title={accessHint}
               >
                 <div className="flex items-center gap-3">
                   <ModelLogo model={m.id} size={22} />
@@ -280,7 +295,7 @@ export function ModelsView() {
                     size="icon"
                     className="h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100"
                     onClick={() => copy(m.id)}
-                    title="复制模型 ID"
+                    title={t("models.copyId")}
                   >
                     {copiedId === m.id ? <Check className="text-success" /> : <Copy />}
                   </Button>
@@ -293,13 +308,12 @@ export function ModelsView() {
                       variant="outline"
                       className="shrink-0 border-destructive/40 px-1.5 py-0 text-[10px] text-destructive"
                     >
-                      套餐不可用
-                      {acc?.minimum_plan ? `·需 ${acc.minimum_plan}` : ""}
+                      {accessHint}
                     </Badge>
                   )}
                   {free && (
                     <Badge className="shrink-0 bg-signal-success/15 px-1.5 py-0 text-[10px] text-signal-success">
-                      免费
+                      {t("models.free")}
                     </Badge>
                   )}
                   {discount > 0 && (
@@ -310,13 +324,13 @@ export function ModelsView() {
                   {pricing?.caps.vision && (
                     <Badge variant="outline" className="shrink-0 gap-0.5 px-1.5 py-0 text-[10px]">
                       <Eye className="h-2.5 w-2.5" />
-                      视觉
+                      {t("models.caps.vision")}
                     </Badge>
                   )}
                   {pricing?.caps.reasoning && (
                     <Badge variant="outline" className="shrink-0 gap-0.5 px-1.5 py-0 text-[10px]">
                       <Sparkles className="h-2.5 w-2.5" />
-                      思考
+                      {t("models.caps.reasoning")}
                     </Badge>
                   )}
                 </div>
@@ -325,7 +339,7 @@ export function ModelsView() {
                 <div className="flex items-center justify-between text-[10.5px] text-muted-foreground">
                   {rates ? (
                     free ? (
-                      <span className="text-signal-success">限时免费，0 成本</span>
+                      <span className="text-signal-success">{t("models.freeLimited")}</span>
                     ) : (
                       <span className="font-mono">
                         {formatPrice(rates.input)} in / {formatPrice(rates.output)} out
@@ -333,13 +347,13 @@ export function ModelsView() {
                       </span>
                     )
                   ) : (
-                    <span>未收录价格</span>
+                    <span>{t("models.priceUnknown")}</span>
                   )}
                   <span className="flex items-center gap-1">
-                    {multiTier && <span title="按输入规模分档计费">分档</span>}
+                    {multiTier && <span title={t("models.tieredTitle")}>{t("models.tiered")}</span>}
                     {pricing?.timeOfDay && (
                       <span className="text-signal-info" title={pricing.timeOfDay.windows}>
-                        闲/忙时
+                        {t("models.timeOfDay")}
                       </span>
                     )}
                     {pricing?.contextWindow && (

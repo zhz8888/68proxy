@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/format";
@@ -15,6 +16,7 @@ export function UrlRow({
   label?: string;
   className?: string;
 }) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
 
   /** 复制地址到剪贴板，并短暂显示“已复制”图标。 */
@@ -33,7 +35,7 @@ export function UrlRow({
       <code className="select-text flex-1 truncate rounded-md border border-border bg-muted/50 px-2.5 py-1.5 font-mono text-[12.5px] text-foreground">
         {url}
       </code>
-      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={handleCopy} title="复制地址">
+      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={handleCopy} title={t("common.copyAddress")}>
         {copied ? <Check className="text-success" /> : <Copy />}
       </Button>
     </div>

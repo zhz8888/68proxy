@@ -1,39 +1,35 @@
 import { Github, ServerCog, ShieldCheck, Workflow } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
 import type { IconType } from "react-icons";
 import { FaFile } from "react-icons/fa6";
 import { SiReact, SiRust, SiTauri, SiTypescript, SiVite } from "react-icons/si";
 import { toast } from "sonner";
 
+import { translate } from "@/i18n";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { errText } from "@/lib/messages";
 import { openExternal } from "@/lib/platform";
 
-// 代理实现逻辑的四个步骤，按顺序展示
+// 代理实现逻辑的四个步骤，按顺序展示；标题与说明由组件内的 t() 提供
 const LOGIC_STEPS = [
-  {
-    title: "兼容入口",
-    desc: "对外暴露 OpenAI /v1/chat/completions 与 Anthropic /v1/messages 兼容端点，同时提供 /v1/models 模型列表与 /health 健康检查。",
-  },
-  {
-    title: "协议转换",
-    desc: "将请求包成 Command Code CLI 信封格式：提取 system 提示、映射多轮消息、工具调用、多模态图片与 tool_choice 等参数。",
-  },
-  {
-    title: "上游转发",
-    desc: "携带反检测特征（每 Key 独立会话与设备指纹、traceparent、假项目 slug、动态 Command Code 版本）转发到 /alpha/generate。",
-  },
-  {
-    title: "流式翻译",
-    desc: "把上游 NDJSON 流实时翻译为 OpenAI / Anthropic 的 SSE 或非流式 JSON，并处理错误码映射、超时、断连与零输出等边界情况。",
-  },
+  { titleKey: "about.logic.step1Title", descKey: "about.logic.step1Desc" },
+  { titleKey: "about.logic.step2Title", descKey: "about.logic.step2Desc" },
+  { titleKey: "about.logic.step3Title", descKey: "about.logic.step3Desc" },
+  { titleKey: "about.logic.step4Title", descKey: "about.logic.step4Desc" },
 ];
 
-// 技术栈条目：图标、名称与简介
-const TECH_STACK: Array<{ icons: IconType[]; name: string; desc: string }> = [
-  { icons: [SiTauri], name: "Tauri 2", desc: "桌面应用壳：Rust 后端 + 系统 WebView，体积小、资源占用低" },
-  { icons: [SiReact, SiTypescript, SiVite], name: "React 19 + TypeScript + Vite", desc: "前端界面：shadcn/ui 组件 + Tailwind CSS 4" },
-  { icons: [SiRust], name: "Rust (axum + tokio + reqwest)", desc: "本地反向代理服务：高并发流式转发与协议转换" },
-  { icons: [FaFile], name: "本地配置文件", desc: "API Key 明文保存在本地配置文件（config.json）中，方便迁移与备份" },
+// 技术栈条目：图标、名称与简介；技术栈名保持原文，仅名称/简介中的自然语言走 t()
+const TECH_STACK: Array<{
+  icons: IconType[];
+  name?: string;
+  nameKey?: string;
+  descKey: string;
+}> = [
+  { icons: [SiTauri], name: "Tauri 2", descKey: "about.tech.tauriDesc" },
+  { icons: [SiReact, SiTypescript, SiVite], name: "React 19 + TypeScript + Vite", descKey: "about.tech.reactDesc" },
+  { icons: [SiRust], name: "Rust (axum + tokio + reqwest)", descKey: "about.tech.rustDesc" },
+  { icons: [FaFile], nameKey: "about.tech.localConfigName", descKey: "about.tech.localConfigDesc" },
 ];
 
 /** 用系统默认浏览器打开外部链接，失败时弹出错误提示。 */
@@ -41,18 +37,20 @@ async function openLink(url: string) {
   try {
     await openExternal(url);
   } catch (e) {
-    toast.error(String(e));
+    toast.error(errText(e));
   }
 }
 
-// 作者署名与本 fork 仓库链接
-const LINKS: Array<{ icon: typeof Github; label: string; value: string; href: string }> = [
-  { icon: Github, label: "原始作者", value: "6ix8ight", href: "https://github.com/evanfu0110" },
-  { icon: Github, label: "Fork 维护", value: "zhz8888", href: "https://github.com/zhz8888/68proxy" },
+// 作者署名与本 fork 仓库链接；label 由组件内的 t() 提供
+const LINKS: Array<{ icon: typeof Github; labelKey: string; value: string; href: string }> = [
+  { icon: Github, labelKey: "about.originalAuthor", value: "6ix8ight", href: "https://github.com/evanfu0110" },
+  { icon: Github, labelKey: "about.forkMaintainer", value: "zhz8888", href: "https://github.com/zhz8888/68proxy" },
 ];
 
 /** 关于视图：项目简介、实现逻辑、技术栈与作者联系方式。 */
 export function AboutView() {
+  const { t } = useTranslation();
+
   return (
     <div className="space-y-4 pb-8">
       <Card>
@@ -60,11 +58,7 @@ export function AboutView() {
           <p className="font-display text-xl font-semibold tracking-wide text-foreground">
             68PROXY
           </p>
-          <p className="text-sm leading-6 text-muted-foreground">
-            一款开箱即用的本地反向代理桌面工具：把 Command Code 的私有 API 包装成
-            OpenAI / Anthropic 兼容接口，让 Cursor、OpenCode、Cherry Studio 以及自研工具
-            无需任何 SDK 适配即可直接接入。API Key 明文保存在本地配置文件中，一次配置、全局复用。
-          </p>
+          <p className="text-sm leading-6 text-muted-foreground">{t("about.intro")}</p>
         </CardContent>
       </Card>
 
@@ -72,18 +66,18 @@ export function AboutView() {
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-sm">
             <Workflow className="h-4 w-4" />
-            实现逻辑
+            {t("about.logicTitle")}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 pt-0">
           {LOGIC_STEPS.map((step, i) => (
-            <div key={step.title} className="flex gap-3">
+            <div key={step.titleKey} className="flex gap-3">
               <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-foreground font-mono text-[10px] font-bold text-background">
                 {i + 1}
               </span>
               <div className="space-y-0.5">
-                <p className="text-sm font-medium text-foreground">{step.title}</p>
-                <p className="text-[13px] leading-5 text-muted-foreground">{step.desc}</p>
+                <p className="text-sm font-medium text-foreground">{translate(step.titleKey)}</p>
+                <p className="text-[13px] leading-5 text-muted-foreground">{translate(step.descKey)}</p>
               </div>
             </div>
           ))}
@@ -94,21 +88,23 @@ export function AboutView() {
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-sm">
             <ServerCog className="h-4 w-4" />
-            技术栈
+            {t("about.techTitle")}
           </CardTitle>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-3 pt-0">
-          {TECH_STACK.map((t) => (
-            <div key={t.name} className="rounded-lg border border-border bg-muted/30 p-3">
+          {TECH_STACK.map((tech) => (
+            <div key={tech.name ?? tech.nameKey} className="rounded-lg border border-border bg-muted/30 p-3">
               <div className="flex items-center gap-2">
                 <span className="flex shrink-0 items-center gap-1.5">
-                  {t.icons.map((Icon, i) => (
+                  {tech.icons.map((Icon, i) => (
                     <Icon key={i} className="h-4 w-4 shrink-0 text-muted-foreground" />
                   ))}
                 </span>
-                <p className="font-mono text-[12px] font-semibold text-foreground">{t.name}</p>
+                <p className="font-mono text-[12px] font-semibold text-foreground">
+                  {tech.nameKey ? translate(tech.nameKey) : tech.name}
+                </p>
               </div>
-              <p className="mt-1 text-[12px] leading-5 text-muted-foreground">{t.desc}</p>
+              <p className="mt-1 text-[12px] leading-5 text-muted-foreground">{translate(tech.descKey)}</p>
             </div>
           ))}
         </CardContent>
@@ -118,13 +114,15 @@ export function AboutView() {
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-sm">
             <ShieldCheck className="h-4 w-4" />
-            作者
+            {t("about.authorTitle")}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 pt-0">
           <p className="text-sm leading-6 text-muted-foreground">
-            68proxy 由 <span className="font-semibold text-foreground">6ix8ight</span> 开发，
-            本 fork 由 <span className="font-semibold text-foreground">zhz8888</span> 维护与增强：
+            <Trans
+              i18nKey="about.attribution"
+              components={{ b: <span className="font-semibold text-foreground" /> }}
+            />
           </p>
           <Separator />
           <div className="flex flex-col gap-2">
@@ -132,12 +130,12 @@ export function AboutView() {
               const Icon = l.icon;
               return (
                 <button
-                  key={l.label}
+                  key={l.labelKey}
                   onClick={() => openLink(l.href)}
                   className="group flex items-center gap-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-left transition-colors hover:bg-secondary"
                 >
                   <Icon className="h-4 w-4 text-muted-foreground group-hover:text-foreground" />
-                  <span className="w-20 shrink-0 text-xs text-muted-foreground">{l.label}</span>
+                  <span className="w-20 shrink-0 text-xs text-muted-foreground">{translate(l.labelKey)}</span>
                   <span className="min-w-0 truncate font-mono text-[13px] text-foreground">{l.value}</span>
                 </button>
               );

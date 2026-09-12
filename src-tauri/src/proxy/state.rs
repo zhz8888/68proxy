@@ -212,7 +212,10 @@ impl AppState {
         let mut guard = self.usage.lock().unwrap();
         if let Some(conn) = guard.as_mut() {
             if let Err(e) = super::usage::record_usage(conn, entry) {
-                super::log::warn(&format!("记录用量失败: {e}"));
+                super::log::warn(&format!(
+                    "{}: {e}",
+                    crate::i18n::pick("记录用量失败", "Failed to record usage")
+                ));
             }
         }
     }

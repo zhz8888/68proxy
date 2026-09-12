@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   ExternalLink,
   Loader2,
@@ -42,7 +43,9 @@ import {
 } from "@/lib/api";
 import { openExternal } from "@/lib/platform";
 import { formatCost } from "@/lib/format";
+import { errText } from "@/lib/messages";
 import { cn } from "@/lib/utils";
+import { translate } from "@/i18n";
 
 /** 下拉框中「自动选择」选项的哨兵值（Radix Select 不允许空字符串作为 value）。 */
 const AUTO_ACCOUNT = "__auto__";
@@ -107,6 +110,7 @@ function quotaFor(quotas: AccountQuota[], a: AccountEntry, index: number): Accou
  * 多账户请求按轮询自动切换（由后端调度）。
  */
 export function AccountsView() {
+  const { t } = useTranslation();
   const [accounts, setAccounts] = useState<AccountEntry[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -141,9 +145,9 @@ export function AccountsView() {
     setRoutingSaving(true);
     try {
       await api.accountRoutingSet(next.strategy, next.preferred_account_id);
-      toast.success("账户使用规则已保存");
+      toast.success(t("accounts.routingSaved"));
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     } finally {
       setRoutingSaving(false);
     }
@@ -178,6 +182,7 @@ export function AccountsView() {
         setAccounts(a.accounts);
         setLoaded(true);
       })
+      // 保存原始错误串，渲染时再翻译（切换语言后已显示的提示随之更新）
       .catch((e) => setLoadError(String(e)));
     reloadQuotas();
     api.accountRoutingGet().then(setRouting).catch(() => {});
@@ -186,11 +191,11 @@ export function AccountsView() {
   /** 校验并新增一个 CC 账户 Key（必须以 user_ 开头）。 */
   async function addAccount() {
     if (!accountInput.trim()) {
-      toast.error("请输入 Command Code 账户 Key");
+      toast.error(t("accounts.keyRequired"));
       return;
     }
     if (!accountInput.trim().startsWith("user_")) {
-      toast.error("Command Code 账户 Key 必须以 user_ 开头");
+      toast.error(t("accounts.keyPrefix"));
       return;
     }
     try {
@@ -198,10 +203,10 @@ export function AccountsView() {
       await reloadAccounts();
       setAccountInput("");
       setShowAccountInput(false);
-      toast.success("Command Code 账户已添加");
+      toast.success(t("accounts.added"));
       reloadQuotas();
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     }
   }
 
@@ -210,10 +215,10 @@ export function AccountsView() {
     try {
       await api.accountRemove(index);
       await reloadAccounts();
-      toast.success("Command Code 账户已移除");
+      toast.success(t("accounts.removed"));
       reloadQuotas();
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     }
   }
 
@@ -242,16 +247,16 @@ export function AccountsView() {
   async function saveRename(userId: string) {
     const name = renameValue.trim();
     if (!name) {
-      toast.error("显示名不能为空");
+      toast.error(t("accounts.nameEmpty"));
       return;
     }
     try {
       await api.accountRename(userId, name);
       setRenameId(null);
       await reloadAccounts();
-      toast.success("账户显示名已更新");
+      toast.success(t("accounts.renamed"));
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     }
   }
 
@@ -277,7 +282,7 @@ export function AccountsView() {
     try {
       await openExternal(loginUrl);
     } catch (e) {
-      toast.error(`打开浏览器失败：${String(e)}`);
+      toast.error(t("accounts.openBrowserFailed", { p0: errText(e) }));
     }
   }
 
@@ -306,13 +311,14 @@ export function AccountsView() {
             setAccounts([]);
             api.accountList().then((a) => setAccounts(a.accounts)).catch(() => {});
             reloadQuotas();
-            toast.success("Command Code 账户登录成功");
+            toast.success(t("accounts.loginSuccess"));
           }, 600);
         } else if (r.status === "denied") {
           setLoginStatus("denied");
           clearInterval(timer);
         } else if (r.status === "failed") {
-          setLoginError(r.error ?? "登录失败");
+          // 统一存为 err: 前缀的消息码，渲染时用 errText 翻译；无码时回退通用失败文案
+          setLoginError(`err:${r.error || "auth_callback_params_missing"}`);
           setLoginStatus("failed");
           clearInterval(timer);
         }
@@ -327,7 +333,7 @@ export function AccountsView() {
     <div className="space-y-4 pb-8">
       {loadError && (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          账户列表加载失败：{loadError}
+          {t("accounts.loadFailed", { p0: errText(loadError) })}
         </div>
       )}
 
@@ -336,19 +342,15 @@ export function AccountsView() {
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-sm">
             <Route className="h-4 w-4" />
-            使用规则
+            {t("accounts.routingTitle")}
           </CardTitle>
-          <CardDescription>
-            决定多个账户之间如何分配请求。额度判定顺序为 5 小时限额 → 周限额 → 月限额
-          </CardDescription>
+          <CardDescription>{t("accounts.routingDesc")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between gap-3">
             <div className="space-y-0.5">
-              <Label className="text-sm">优先消耗账号</Label>
-              <p className="text-xs text-muted-foreground">
-                开启后被指定的账户会被优先使用，用尽后自动切换到剩余额度最多的账户
-              </p>
+              <Label className="text-sm">{t("accounts.priorityAccount")}</Label>
+              <p className="text-xs text-muted-foreground">{t("accounts.priorityHint")}</p>
             </div>
             <Switch
               checked={routing.strategy === "priority"}
@@ -362,7 +364,7 @@ export function AccountsView() {
           {routing.strategy === "priority" && (
             <>
               <div className="space-y-1.5">
-                <Label>指定账户</Label>
+                <Label>{t("accounts.designatedAccount")}</Label>
                 <Select
                   value={routing.preferred_account_id || AUTO_ACCOUNT}
                   onValueChange={(v) =>
@@ -371,10 +373,10 @@ export function AccountsView() {
                   disabled={routingSaving}
                 >
                   <SelectTrigger>
-                    <SelectValue placeholder="自动选择" />
+                    <SelectValue placeholder={t("accounts.autoSelect")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value={AUTO_ACCOUNT}>自动（剩余额度最多）</SelectItem>
+                    <SelectItem value={AUTO_ACCOUNT}>{t("accounts.autoOption")}</SelectItem>
                     {accounts.map((a) => (
                       <SelectItem key={a.userId} value={a.userId}>
                         {a.userName || a.masked}
@@ -384,9 +386,7 @@ export function AccountsView() {
                 </Select>
               </div>
               <p className="rounded-md border border-border/70 bg-secondary/20 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-                同一会话固定使用同一账户，避免切换账户导致上游缓存失效、额度消耗变快；
-                仅当该账户额度耗尽（依次判断 5 小时限额 → 周限额 → 月限额）或你手动切换账户时，
-                才会路由到其他账户。
+                {t("accounts.stickyHint")}
               </p>
             </>
           )}
@@ -399,11 +399,9 @@ export function AccountsView() {
             <div className="space-y-1.5">
               <CardTitle className="flex items-center gap-2 text-sm">
                 <UserRound className="h-4 w-4" />
-                Command Code 账户
+                {t("accounts.title")}
               </CardTitle>
-              <CardDescription>
-                user_ 开头的 Command Code 上游账户；可配置多个，请求在账户间的分配方式由上方「使用规则」决定。支持浏览器授权登录或手动粘贴 Key
-              </CardDescription>
+              <CardDescription>{t("accounts.desc")}</CardDescription>
             </div>
             <Button
               variant="ghost"
@@ -411,10 +409,10 @@ export function AccountsView() {
               className="h-7 shrink-0 px-2 text-muted-foreground"
               onClick={reloadQuotas}
               disabled={quotaLoading}
-              title="刷新用量"
+              title={t("accounts.refreshUsage")}
             >
               <RefreshCw className={cn("h-3.5 w-3.5", quotaLoading && "animate-spin")} />
-              刷新用量
+              {t("accounts.refreshUsage")}
             </Button>
           </div>
         </CardHeader>
@@ -422,13 +420,13 @@ export function AccountsView() {
           {loaded && accounts.length === 0 ? (
             <p className="flex items-center gap-2 text-xs text-muted-foreground">
               <UserRound className="h-3.5 w-3.5" />
-              尚未添加 Command Code 账户（需至少一个才能启动代理）
+              {t("accounts.empty")}
             </p>
           ) : (
             <ul className="space-y-2">
               {accounts.map((a, i) => {
                 const q = quotaFor(quotas, a, i);
-                const planName = q?.plan_name && q.plan_name !== "无订阅" ? q.plan_name : null;
+                const planName = q?.plan_name ? q.plan_name : null;
                 return (
                   <li key={a.index} className="space-y-2 rounded-md border px-3 py-2">
                     <div className="flex items-center justify-between gap-2">
@@ -477,7 +475,7 @@ export function AccountsView() {
                               planName ? planBadgeClass(planName) : "bg-muted text-muted-foreground",
                             )}
                           >
-                            {planName ?? "—"}
+                            {planName ?? (q ? t("plan.noSubscription") : "—")}
                           </span>
                           <span
                             className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
@@ -486,18 +484,20 @@ export function AccountsView() {
                                 : "bg-muted text-muted-foreground"
                             }`}
                           >
-                            {a.source === "oauth" ? "OAuth" : "手动"}
+                            {a.source === "oauth"
+                              ? t("accounts.source.oauth")
+                              : t("accounts.source.manual")}
                           </span>
                         </div>
                         <span className="truncate font-mono text-xs text-muted-foreground">{a.masked}</span>
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
                         <Button variant="ghost" size="sm" onClick={() => openAccountDetail(a)}>
-                          额度详情
+                          {t("accounts.quotaDetail")}
                         </Button>
                         <Button variant="ghost" size="sm" onClick={() => removeAccount(a.index)}>
                           <Trash2 />
-                          移除
+                          {t("accounts.remove")}
                         </Button>
                       </div>
                     </div>
@@ -505,32 +505,43 @@ export function AccountsView() {
                     {/* 用量概览：5 小时 / 周窗口限额 + 月配额用量 */}
                     <div className="flex items-center gap-3 border-t pt-2">
                       {q?.error ? (
-                        <span className="text-[10px] text-destructive">额度获取失败：{q.error}</span>
+                        <span className="text-[10px] text-destructive">
+                          {t("quota.fetchFailedPrefix", {
+                            p0: translate(`quota.error.${q.error}`, { defaultValue: q.error }),
+                          })}
+                        </span>
                       ) : q && q.has_billing ? (
                         <>
                           <UsageCell
-                            label="5 小时"
+                            label={t("accounts.window.fiveHour")}
                             pct={windowPct(q.five_hour)}
                             title={
                               q.five_hour
-                                ? `已用 ${q.five_hour.used} / 上限 ${q.five_hour.cap}`
-                                : "该账户未启用 5 小时窗口限额"
+                                ? t("accounts.window.usedOfCap", { p0: q.five_hour.used, p1: q.five_hour.cap })
+                                : t("accounts.window.fiveHourDisabled")
                             }
                           />
                           <UsageCell
-                            label="周"
+                            label={t("accounts.window.weekly")}
                             pct={windowPct(q.weekly)}
-                            title={q.weekly ? `已用 ${q.weekly.used} / 上限 ${q.weekly.cap}` : "该账户未启用周窗口限额"}
+                            title={
+                              q.weekly
+                                ? t("accounts.window.usedOfCap", { p0: q.weekly.used, p1: q.weekly.cap })
+                                : t("accounts.window.weeklyDisabled")
+                            }
                           />
                           <UsageCell
-                            label="月"
+                            label={t("accounts.window.monthly")}
                             pct={q.usage_percent}
-                            title={`剩余 ${formatCost(q.total_remaining)} / 总池 ${formatCost(q.total_pool)}`}
+                            title={t("accounts.window.remainingOfPool", {
+                              p0: formatCost(q.total_remaining),
+                              p1: formatCost(q.total_pool),
+                            })}
                           />
                         </>
                       ) : (
                         <span className="text-[10px] text-muted-foreground">
-                          {quotaLoading ? "正在获取用量…" : "暂无计费数据"}
+                          {quotaLoading ? t("accounts.loadingUsage") : t("accounts.noBillingData")}
                         </span>
                       )}
                     </div>
@@ -543,7 +554,7 @@ export function AccountsView() {
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={openLoginDialog}>
               <ExternalLink />
-              通过浏览器登录
+              {t("accounts.loginViaBrowser")}
             </Button>
             {showAccountInput ? (
               <div className="flex gap-2">
@@ -553,7 +564,7 @@ export function AccountsView() {
                   placeholder="user_xxxxxxxxx"
                   className="font-mono"
                 />
-                <Button onClick={addAccount}>添加</Button>
+                <Button onClick={addAccount}>{t("accounts.add")}</Button>
                 <Button
                   variant="ghost"
                   onClick={() => {
@@ -561,13 +572,13 @@ export function AccountsView() {
                     setShowAccountInput(false);
                   }}
                 >
-                  取消
+                  {t("common.cancel")}
                 </Button>
               </div>
             ) : (
               <Button variant="outline" size="sm" onClick={() => setShowAccountInput(true)}>
                 <Plus />
-                添加账户
+                {t("accounts.addAccount")}
               </Button>
             )}
           </div>
@@ -583,24 +594,24 @@ export function AccountsView() {
       >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>账户额度详情</DialogTitle>
+            <DialogTitle>{t("accounts.detailTitle")}</DialogTitle>
             <DialogDescription>{detailAccount?.userName || detailAccount?.masked}</DialogDescription>
           </DialogHeader>
           <div className="py-2">
             {detailLoading ? (
               <p className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                正在获取账户额度…
+                {t("accounts.loadingDetail")}
               </p>
             ) : detailError ? (
-              <p className="py-4 text-sm text-destructive">{detailError}</p>
+              <p className="py-4 text-sm text-destructive">{errText(detailError)}</p>
             ) : detailQuota ? (
               <QuotaDetail quota={detailQuota} />
             ) : null}
           </div>
           <DialogFooter>
             <Button variant="secondary" onClick={() => setDetailAccount(null)}>
-              关闭
+              {t("common.close")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -615,13 +626,13 @@ export function AccountsView() {
       >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>登录 Command Code 账户</DialogTitle>
+            <DialogTitle>{t("accounts.loginTitle")}</DialogTitle>
             <DialogDescription>
               {loginStatus === "pending"
-                ? "将在浏览器中打开授权页面，请完成登录后返回本窗口。"
+                ? t("accounts.loginPendingDesc")
                 : loginStatus === "success"
-                  ? "授权成功，正在添加账户…"
-                  : "通过浏览器授权登录 Command Code，无需手动粘贴 Key。"}
+                  ? t("accounts.loginSuccessDesc")
+                  : t("accounts.loginIdleDesc")}
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col items-center gap-4 py-4">
@@ -629,31 +640,33 @@ export function AccountsView() {
               <>
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
                 <p className="text-center text-sm text-muted-foreground">
-                  已启动授权回调服务器（127.0.0.1 随机端口），等待你在浏览器中完成授权…
+                  {t("accounts.loginWaiting")}
                 </p>
                 <Button onClick={openAuthBrowser}>
                   <ExternalLink />
-                  打开浏览器授权
+                  {t("accounts.openBrowserAuth")}
                 </Button>
               </>
             )}
             {loginStatus === "success" && (
               <p className="text-center text-sm text-emerald-600 dark:text-emerald-400">
-                登录成功，账户已添加。
+                {t("accounts.loginSuccessMessage")}
               </p>
             )}
             {loginStatus === "denied" && (
               <p className="text-center text-sm text-amber-600 dark:text-amber-400">
-                授权被拒绝，你可以关闭弹窗后重试。
+                {t("accounts.loginDenied")}
               </p>
             )}
             {loginStatus === "failed" && (
-              <p className="text-center text-sm text-destructive">授权失败：{loginError || "未知错误"}</p>
+              <p className="text-center text-sm text-destructive">
+                {t("accounts.loginFailedPrefix", { p0: errText(loginError) || t("common.unknown") })}
+              </p>
             )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={closeLoginDialog}>
-              关闭
+              {t("common.close")}
             </Button>
           </DialogFooter>
         </DialogContent>

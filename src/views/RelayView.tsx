@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Activity } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
+import { translate } from "@/i18n";
 import { ModelLogo } from "@/components/ModelLogo";
 import { StatusLamp } from "@/components/StatusLamp";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -10,6 +12,7 @@ import { lampForStatus, statusLabel } from "@/lib/status";
 
 /** 中继视图：实时展示代理启动以来每一次请求的中继记录。 */
 export function RelayView() {
+  const { t } = useTranslation();
   const [relay, setRelay] = useState<RequestInfo[]>([]);
 
   // 挂载时加载历史记录并订阅请求/状态事件，卸载时取消订阅
@@ -41,7 +44,7 @@ export function RelayView() {
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-2 rounded-lg bg-muted px-3 py-1.5 text-xs text-muted-foreground">
           <Activity className="h-3.5 w-3.5" />
-          自代理启动以来 · 共 {relay.length} 条
+          {t("relayView.summary", { p0: relay.length })}
         </div>
       </div>
 
@@ -49,7 +52,7 @@ export function RelayView() {
         <div className="space-y-1 p-3">
           {relay.length === 0 ? (
             <p className="px-2 py-16 text-center text-sm text-muted-foreground">
-              代理启动后，这里会实时显示每次请求的中继记录。代理停止或关闭软件时自动清空。
+              {t("relayView.empty")}
             </p>
           ) : (
             relay.map((r) => (
@@ -66,7 +69,7 @@ export function RelayView() {
                 <span className="flex-1" />
                 <StatusLamp state={lampForStatus(r.status)} pulse={r.status === "streaming"} />
                 <span className="w-12 text-right whitespace-nowrap text-xs text-muted-foreground">
-                  {statusLabel(r.status)}
+                  {translate(statusLabel(r.status))}
                 </span>
                 <span className="w-16 text-right whitespace-nowrap font-mono text-xs text-muted-foreground">
                   {formatDuration(r.elapsed_ms)}

@@ -15,8 +15,10 @@ import {
   XCircle,
   type LucideIcon,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
+import { applyLanguage, translate, type Language } from "@/i18n";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -32,6 +34,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, type ApiKeyState, type Config } from "@/lib/api";
+import { errText, msgText } from "@/lib/messages";
 import { pickSavePath } from "@/lib/platform";
 import { applyTheme, type ThemeMode } from "@/lib/theme";
 
@@ -59,13 +62,20 @@ const DEFAULTS: Config = {
   client_drain_timeout_ms: 0,
   max_inflight: 0,
   theme: "system",
+  language: "zh",
 };
 
-/** 主题选项：值与标签、图标。 */
-const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: LucideIcon }> = [
-  { value: "system", label: "跟随系统", icon: Monitor },
-  { value: "dark", label: "深色", icon: Moon },
-  { value: "light", label: "浅色", icon: Sun },
+/** 主题选项：值与 i18n key、图标（文案在组件内按当前语言取）。 */
+const THEME_OPTIONS: Array<{ value: ThemeMode; labelKey: string; icon: LucideIcon }> = [
+  { value: "system", labelKey: "theme.system", icon: Monitor },
+  { value: "dark", labelKey: "theme.dark", icon: Moon },
+  { value: "light", labelKey: "theme.light", icon: Sun },
+];
+
+/** 语言选项：值与 i18n key（语言名按各自母语书写，跟随界面语言切换）。 */
+const LANGUAGE_OPTIONS: Array<{ value: Language; labelKey: string }> = [
+  { value: "zh", labelKey: "theme.langZh" },
+  { value: "en", labelKey: "theme.langEn" },
 ];
 
 /** 配置页通用区块卡片：标题 + 可选描述 + 内容。 */
@@ -112,9 +122,10 @@ function Field({
   );
 }
 
-/** 配置视图：编辑服务、模型、代理行为、程序、Token 统计、日志与本地转发 Key，改动后自动保存。
+/** 配置视图：编辑服务、模型、代理行为、程序、外观、Token 统计、日志与本地转发 Key，改动后自动保存。
  *  Command Code 上游账户由独立的账户视图管理（见 AccountsView）。 */
 export function ConfigView() {
+  const { t } = useTranslation();
   const [cfg, setCfg] = useState<Config>(DEFAULTS);
   const [loaded, setLoaded] = useState(false);
   // 加载失败提示（加载失败时禁用自动保存，避免用默认值覆盖后端配置）
@@ -137,7 +148,8 @@ export function ConfigView() {
   useEffect(() => {
     Promise.all([api.configGet(), api.localKeyGet()])
       .then(([c, k]) => {
-        setCfg(c);
+        // 语言字段做兜底（旧后端/旧配置可能缺失），保证下拉框始终有合法选中值
+        setCfg({ ...c, language: c.language === "en" ? "en" : "zh" });
         setPortInput(String(c.port));
         setLocalKey(k);
         setLoaded(true);
@@ -145,6 +157,7 @@ export function ConfigView() {
       .catch((e) => {
         // 加载失败不得静默：先前的实现会让 loaded 永远为 false，
         // 页面显示假默认值且所有编辑都不落库
+        // 保存原始错误串，渲染时再翻译，使切换语言后已显示的提示随之更新
         setLoadError(String(e));
       });
   }, []);
@@ -152,10 +165,10 @@ export function ConfigView() {
   // 端口改动后防抖 400ms 再检测占用，避免逐字符输入时频繁请求
   useEffect(() => {
     if (!loaded) return;
-    const t = setTimeout(() => {
+    const t2 = setTimeout(() => {
       api.portCheck(cfg.port).then(setPortInUse).catch(() => {});
     }, 400);
-    return () => clearTimeout(t);
+    return () => clearTimeout(t2);
   }, [cfg.port, loaded]);
 
   /** 更新端口输入：仅在 1-65535 时同步到配置，空值/非法值期间不触发保存与检测。 */
@@ -178,10 +191,10 @@ export function ConfigView() {
       const res = await api.configSave(cfg);
       await api.autostartSet(cfg.autostart);
       if (res.needs_restart) {
-        toast.success("端口或地址已变更，重启代理后生效");
+        toast.success(t("config.needRestart"));
       }
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     }
   }
 
@@ -190,11 +203,11 @@ export function ConfigView() {
     setFreeing(true);
     try {
       const r = await api.portFree(cfg.port);
-      toast.success(r.message);
+      toast.success(msgText(r.message));
       const check = await api.portCheck(cfg.port);
       setPortInUse(check);
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     } finally {
       setFreeing(false);
     }
@@ -208,29 +221,29 @@ export function ConfigView() {
       skipNextAutosave.current = false;
       return;
     }
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       save();
     }, 600);
-    return () => clearTimeout(t);
+    return () => clearTimeout(timer);
   }, [cfg, loaded, loadError]);
 
   /** 校验并保存本地转发 Key（必须以 sk- 开头）。 */
   async function saveLocalKey() {
     if (!localKeyInput.trim()) {
-      toast.error("请输入本地转发 Key");
+      toast.error(t("config.keyRequired"));
       return;
     }
     if (!localKeyInput.trim().startsWith("sk-")) {
-      toast.error("本地转发 Key 必须以 sk- 开头");
+      toast.error(t("config.keyPrefix"));
       return;
     }
     try {
       await api.localKeySet(localKeyInput.trim());
       setLocalKey(await api.localKeyGet());
       setLocalKeyInput("");
-      toast.success("本地转发 Key 已保存");
+      toast.success(t("config.keySaved"));
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     }
   }
 
@@ -240,9 +253,9 @@ export function ConfigView() {
       const r = await api.localKeyGenerate();
       setLocalKey({ has_key: true, masked: r.masked });
       setLocalKeyInput("");
-      toast.success("已随机生成新的本地转发 Key");
+      toast.success(t("config.keyGenerated"));
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     }
   }
 
@@ -251,9 +264,9 @@ export function ConfigView() {
     try {
       await api.localKeyDelete();
       setLocalKey({ has_key: false, masked: "" });
-      toast.success("本地转发 Key 已删除");
+      toast.success(t("config.keyDeleted"));
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     }
   }
 
@@ -263,9 +276,9 @@ export function ConfigView() {
       const path = await pickSavePath("68proxy-logs.log", ["log", "txt"]);
       if (!path) return;
       const count = await api.logsExport(path);
-      toast.success(`已导出 ${count} 条日志`);
+      toast.success(t("config.exported", { p0: count }));
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     }
   }
 
@@ -274,12 +287,12 @@ export function ConfigView() {
         {loadError && (
           <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             <AlertTriangle className="h-4 w-4 shrink-0" />
-            配置加载失败，自动保存已停用以免覆盖后端配置：{loadError}
+            {t("config.loadFailed", { p0: errText(loadError) })}
           </div>
         )}
         <div className="grid grid-cols-2 gap-4">
-          <Section title="服务" desc="代理监听地址与端口">
-            <Field label="监听端口" hint="1-65535">
+          <Section title={t("config.serviceTitle")} desc={t("config.serviceDesc")}>
+            <Field label={t("config.listenPort")} hint={t("config.listenPortHint")}>
               <div className="space-y-1.5">
                 <Input
                   type="number"
@@ -290,8 +303,8 @@ export function ConfigView() {
                   <div className="space-y-1.5">
                     <p className="flex items-center gap-1.5 text-xs text-destructive">
                       <AlertTriangle className="h-3.5 w-3.5" />
-                      端口 {cfg.port} 已被占用
-                      {portInUse.pid ? `（PID ${portInUse.pid}）` : ""}
+                      {t("config.portInUse", { p0: cfg.port })}
+                      {portInUse.pid ? t("config.portInUsePid", { p0: portInUse.pid }) : ""}
                     </p>
                     {portInUse.pid && (
                       <Button
@@ -301,27 +314,27 @@ export function ConfigView() {
                         disabled={freeing}
                       >
                         {freeing ? <RefreshCw className="animate-spin" /> : <XCircle />}
-                        结束占用进程（PID {portInUse.pid}）
+                        {t("config.killOccupier", { p0: portInUse.pid })}
                       </Button>
                     )}
                   </div>
                 )}
               </div>
             </Field>
-            <Field label="监听地址" hint="0.0.0.0 允许局域网访问">
+            <Field label={t("config.listenHost")} hint={t("config.listenHostHint")}>
               <Input value={cfg.host} onChange={(e) => update("host", e.target.value)} />
             </Field>
           </Section>
 
-          <Section title="模型" desc="模型列表的来源与刷新">
+          <Section title={t("config.modelsTitle")} desc={t("config.modelsDesc")}>
             <div className="flex items-center justify-between">
-              <Label>动态拉取 Provider 模型</Label>
+              <Label>{t("config.dynamicModels")}</Label>
               <Switch
                 checked={cfg.use_provider_models}
                 onCheckedChange={(v) => update("use_provider_models", v)}
               />
             </div>
-            <Field label="刷新间隔（秒）">
+            <Field label={t("config.refreshInterval")}>
               <Input
                 type="number"
                 min={1}
@@ -331,44 +344,40 @@ export function ConfigView() {
             </Field>
           </Section>
 
-          <Section title="代理" desc="Command Code 上游调用行为">
+          <Section title={t("config.proxyTitle")} desc={t("config.proxyDesc")}>
             <div className="flex items-center justify-between">
-              <Label>空 system 占位符</Label>
+              <Label>{t("config.emptySystemPlaceholder")}</Label>
               <Switch
                 checked={cfg.empty_system_placeholder}
                 onCheckedChange={(v) => update("empty_system_placeholder", v)}
               />
             </div>
-            <p className="text-xs text-muted-foreground">
-              无 system prompt 时发送空格占位，阻止 Command Code 上游注入约 7.5K token 的默认提示词。
-            </p>
+            <p className="text-xs text-muted-foreground">{t("config.emptySystemPlaceholderHint")}</p>
             <div className="flex items-center justify-between pt-2">
-              <Label>ZDR 模式</Label>
+              <Label>{t("config.zdr")}</Label>
               <Switch checked={cfg.zdr} onCheckedChange={(v) => update("zdr", v)} />
             </div>
-            <p className="text-xs text-muted-foreground">
-              向 Command Code 上游发送 x-cmd-zdr: 1 请求头（生成与初始化预请求均生效）。
-            </p>
+            <p className="text-xs text-muted-foreground">{t("config.zdrHint")}</p>
           </Section>
 
-          <Section title="程序" desc="程序启动与窗口行为">
+          <Section title={t("config.programTitle")} desc={t("config.programDesc")}>
             <div className="flex items-center justify-between">
-              <Label>启动程序时自动运行代理</Label>
+              <Label>{t("config.autoStartProxy")}</Label>
               <Switch
                 checked={cfg.auto_start_proxy}
                 onCheckedChange={(v) => update("auto_start_proxy", v)}
               />
             </div>
             <div className="flex items-center justify-between">
-              <Label>开机自动启动 68proxy</Label>
+              <Label>{t("config.autostart")}</Label>
               <Switch checked={cfg.autostart} onCheckedChange={(v) => update("autostart", v)} />
             </div>
             <div className="flex items-center justify-between">
-              <Label>关闭窗口时隐藏到托盘</Label>
+              <Label>{t("config.closeToTray")}</Label>
               <Switch checked={cfg.close_to_tray} onCheckedChange={(v) => update("close_to_tray", v)} />
             </div>
             <div className="flex items-center justify-between">
-              <Label>启动时显示窗口</Label>
+              <Label>{t("config.showWindowOnStart")}</Label>
               <Switch
                 checked={cfg.show_window_on_start}
                 onCheckedChange={(v) => update("show_window_on_start", v)}
@@ -376,8 +385,8 @@ export function ConfigView() {
             </div>
           </Section>
 
-          <Section title="主题" desc="界面明暗外观">
-            <Field label="外观模式">
+          <Section title={t("theme.sectionTitle")} desc={t("theme.sectionDesc")}>
+            <Field label={t("theme.appearanceMode")}>
               {/* 三段式滑块：点击任一段即时切换主题（高度与页面其他表单控件一致） */}
               <Tabs
                 value={cfg.theme}
@@ -387,7 +396,7 @@ export function ConfigView() {
                   // config_save 会保留 theme 原值，故此处必须显式落库
                   applyTheme(mode);
                   update("theme", mode);
-                  api.themeSet(mode).catch((e) => toast.error(String(e)));
+                  api.themeSet(mode).catch((e) => toast.error(errText(e)));
                 }}
               >
                 <TabsList className="h-11 w-full">
@@ -396,24 +405,47 @@ export function ConfigView() {
                     return (
                       <TabsTrigger key={opt.value} value={opt.value} className="h-9 flex-1 gap-1.5">
                         <Icon className="h-3.5 w-3.5" />
-                        {opt.label}
+                        {translate(opt.labelKey)}
                       </TabsTrigger>
                     );
                   })}
                 </TabsList>
               </Tabs>
             </Field>
+            <Field label={t("theme.language")}>
+              {/* 语言下拉框：切换即时生效并经专用命令持久化（config_save 会保留 language 原值） */}
+              <Select
+                value={cfg.language}
+                onValueChange={(v) => {
+                  const lang = v as Language;
+                  applyLanguage(lang);
+                  update("language", lang);
+                  api.languageSet(lang).catch((e) => toast.error(errText(e)));
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {LANGUAGE_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {translate(opt.labelKey)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
           </Section>
 
-          <Section title="Token 统计" desc="用量统计与数据保留">
+          <Section title={t("config.statsTitle")} desc={t("config.statsDesc")}>
             <div className="flex items-center justify-between">
-              <Label>启用 token 用量统计</Label>
+              <Label>{t("config.usageEnabled")}</Label>
               <Switch
                 checked={cfg.usage_enabled}
                 onCheckedChange={(v) => update("usage_enabled", v)}
               />
             </div>
-            <Field label="用量保留天数" hint="0 表示永久保留">
+            <Field label={t("config.retentionDays")} hint={t("config.retentionDaysHint")}>
               <Input
                 type="number"
                 min={0}
@@ -423,8 +455,8 @@ export function ConfigView() {
             </Field>
           </Section>
 
-          <Section title="日志" desc="日志级别与导出">
-            <Field label="日志级别">
+          <Section title={t("config.logsTitle")} desc={t("config.logsDesc")}>
+            <Field label={t("config.logLevel")}>
               <Select value={cfg.log_level} onValueChange={(v) => update("log_level", v)}>
                 <SelectTrigger>
                   <SelectValue />
@@ -437,19 +469,21 @@ export function ConfigView() {
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="导出最近日志" hint="选择保存位置，导出最近 1000 条">
+            <Field label={t("config.exportRecent")} hint={t("config.exportRecentHint")}>
               <Button variant="outline" size="sm" onClick={exportLogs}>
                 <Download />
-                导出日志…
+                {t("config.exportLogs")}
               </Button>
             </Field>
           </Section>
 
-          <Section title="本地转发 Key" desc="客户端接入本地代理时统一填写的 sk- 开头 Key；仅用于本机服务鉴权">
+          <Section title={t("config.localKeyTitle")} desc={t("config.localKeyDesc")}>
             {/* 当前 Key 状态 */}
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <KeyRound className="h-3.5 w-3.5" />
-              {localKey.has_key ? `当前：${localKey.masked}` : "尚未生成本地转发 Key（客户端将无法接入）"}
+              {localKey.has_key
+                ? t("config.localKeyCurrent", { p0: localKey.masked })
+                : t("config.localKeyMissing")}
             </div>
             {/* 输入框独占一行，按钮统一置于卡片底部 */}
             <div className="relative">
@@ -469,15 +503,15 @@ export function ConfigView() {
               </button>
             </div>
             <div className="flex flex-wrap gap-2 pt-1">
-              <Button onClick={saveLocalKey}>保存</Button>
+              <Button onClick={saveLocalKey}>{t("common.save")}</Button>
               <Button variant="outline" onClick={generateLocalKey}>
                 <Wand2 />
-                随机生成
+                {t("config.generate")}
               </Button>
               {localKey.has_key && (
                 <Button variant="ghost" onClick={deleteLocalKey}>
                   <Trash2 />
-                  删除
+                  {t("common.delete")}
                 </Button>
               )}
             </div>
@@ -489,7 +523,7 @@ export function ConfigView() {
         <div className="flex items-center justify-end gap-2 text-xs text-muted-foreground">
           <span className="flex items-center gap-1.5">
             <Save className="h-3.5 w-3.5" />
-            配置改动后自动保存
+            {t("config.autoSaved")}
           </span>
         </div>
     </div>

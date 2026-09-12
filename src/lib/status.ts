@@ -19,19 +19,20 @@ export function lampForStatus(status: string): LampState {
   }
 }
 
-/** 请求状态字符串 → 中文文案。 */
+/** 请求状态字符串 → i18n key（调用方用 translate(statusLabel(status)) 得到当前语言文案）。 */
 export function statusLabel(status: string): string {
   switch (status) {
     case "streaming":
-      return "流式中";
+      return "status.streaming";
     case "ok":
-      return "成功";
+      return "status.ok";
     case "timeout":
-      return "超时";
+      return "status.timeout";
     case "error":
-      return "错误";
+      return "status.error";
     case "disconnect":
-      return "断连";
+      return "status.disconnect";
+    // 未知状态原样返回，避免翻译层把真实状态名吞掉
     default:
       return status;
   }

@@ -15,8 +15,10 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
+import { applyLanguage, translate } from "@/i18n";
 import { StatusLamp } from "@/components/StatusLamp";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -24,6 +26,7 @@ import { UrlRow } from "@/components/UrlRow";
 import { Button } from "@/components/ui/button";
 import { api, onStatus, type ProxyStatus } from "@/lib/api";
 import { DEFAULT_PORT } from "@/lib/constants";
+import { errText } from "@/lib/messages";
 import { appVersion, appWindow } from "@/lib/platform";
 import { applyTheme, watchSystemTheme, type ThemeMode } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -49,21 +52,22 @@ type View =
   | "config"
   | "about";
 
-/** 左侧导航栏的菜单项配置：视图 id、显示文案与图标。 */
-const NAV: Array<{ id: View; label: string; icon: LucideIcon }> = [
-  { id: "console", label: "控制台", icon: LayoutDashboard },
-  { id: "logs", label: "调试日志", icon: Terminal },
-  { id: "relay", label: "中继记录", icon: ListTree },
-  { id: "stats", label: "用量统计", icon: BarChart3 },
-  { id: "models", label: "模型列表", icon: Boxes },
-  { id: "tools", label: "工具接入", icon: Plug },
-  { id: "accounts", label: "账户", icon: UserRound },
-  { id: "config", label: "配置", icon: Settings2 },
-  { id: "about", label: "关于", icon: Info },
+/** 左侧导航栏的菜单项配置：视图 id、文案 i18n key 与图标。 */
+const NAV: Array<{ id: View; labelKey: string; icon: LucideIcon }> = [
+  { id: "console", labelKey: "nav.console", icon: LayoutDashboard },
+  { id: "logs", labelKey: "nav.logs", icon: Terminal },
+  { id: "relay", labelKey: "nav.relay", icon: ListTree },
+  { id: "stats", labelKey: "nav.stats", icon: BarChart3 },
+  { id: "models", labelKey: "nav.models", icon: Boxes },
+  { id: "tools", labelKey: "nav.tools", icon: Plug },
+  { id: "accounts", labelKey: "nav.accounts", icon: UserRound },
+  { id: "config", labelKey: "nav.config", icon: Settings2 },
+  { id: "about", labelKey: "nav.about", icon: Info },
 ];
 
 /** 应用主框架：左侧导航栏 + 顶部状态栏 + 按当前视图切换的内容区。 */
 function App() {
+  const { t } = useTranslation();
   const [view, setView] = useState<View>("console");
   const [status, setStatus] = useState<ProxyStatus | null>(null);
   const [busy, setBusy] = useState<"start" | "stop" | null>(null);
@@ -76,14 +80,15 @@ function App() {
     // 读取应用版本（来自 tauri.conf.json ← package.json，随发版 tag 自动联动）；
     // 浏览器调试环境下无版本信息，返回空串（界面已按空串省略显示）
     appVersion().then(setVersion).catch(() => {});
-    // 主题以后端配置为准：加载后应用一次；index.html 内联脚本已按缓存值预先设过类，
-    // 无缓存（首次运行）时此处补上，避免默认落在浅色。
+    // 主题与语言以后端配置为准：加载后各应用一次；index.html 内联脚本已按缓存值预设过，
+    // 无缓存（首次运行）时此处补上，避免默认落在浅色/中文。
     let mounted = true;
     api.configGet()
       .then((c) => {
         if (!mounted) return;
         themeRef.current = c.theme;
         applyTheme(c.theme);
+        applyLanguage(c.language);
       })
       .catch(() => {});
     // 系统明暗变化：仅在「跟随系统」模式下重新应用
@@ -111,9 +116,9 @@ function App() {
     try {
       const s = running ? await api.proxyStop() : await api.proxyStart();
       setStatus(s);
-      toast.success(running ? "代理已停止" : "代理已启动");
+      toast.success(running ? t("topbar.stoppedToast") : t("topbar.started"));
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     } finally {
       setBusy(null);
     }
@@ -157,7 +162,7 @@ function App() {
                   )}
                 >
                   <Icon className="h-4 w-4" />
-                  {item.label}
+                  {translate(item.labelKey)}
                 </button>
               );
             })}
@@ -184,7 +189,7 @@ function App() {
                 running ? "text-signal-success" : "text-muted-foreground",
               )}
             >
-              {running ? "运行中" : "已停止"}
+              {running ? t("topbar.running") : t("topbar.stopped")}
             </span>
             <UrlRow url={status?.url ?? `http://127.0.0.1:${DEFAULT_PORT}/v1`} className="w-64 min-w-0" />
             <div data-tauri-drag-region onDoubleClick={toggleMaximize} className="min-w-0 flex-1" />
@@ -196,28 +201,28 @@ function App() {
               disabled={busy !== null}
             >
               {running ? <Square /> : <Play />}
-              {running ? "停止" : "启动"}
+              {running ? t("topbar.stop") : t("topbar.start")}
             </Button>
 
             <div className="flex items-center">
               <button
                 onClick={() => appWindow.minimize()}
                 className="flex h-8 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
-                title="最小化"
+                title={t("topbar.minimize")}
               >
                 <Minus className="h-4 w-4" />
               </button>
               <button
                 onClick={toggleMaximize}
                 className="flex h-8 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
-                title={maximized ? "还原" : "最大化"}
+                title={maximized ? t("topbar.restore") : t("topbar.maximize")}
               >
                 <Square className="h-3.5 w-3.5" />
               </button>
               <button
                 onClick={() => appWindow.close()}
                 className="flex h-8 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground hover:text-background"
-                title="关闭"
+                title={t("topbar.close")}
               >
                 <X className="h-4 w-4" />
               </button>

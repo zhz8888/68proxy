@@ -199,9 +199,19 @@ pub fn load_store(path: &Path) -> HashMap<String, Fingerprint> {
 pub fn remember(path: &Path, id: &str, fp: &Fingerprint) -> Result<(), String> {
     let mut store = load_store(path);
     store.insert(id.to_string(), fp.clone());
-    let text = serde_json::to_string_pretty(&store).map_err(|e| format!("指纹序列化失败: {e}"))?;
+    let text = serde_json::to_string_pretty(&store).map_err(|e| {
+        format!(
+            "{}: {e}",
+            crate::i18n::pick("指纹序列化失败", "Failed to serialize the fingerprint")
+        )
+    })?;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(path, text).map_err(|e| format!("指纹写入失败: {e}"))
+    std::fs::write(path, text).map_err(|e| {
+        format!(
+            "{}: {e}",
+            crate::i18n::pick("指纹写入失败", "Failed to write the fingerprint")
+        )
+    })
 }

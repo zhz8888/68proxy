@@ -10,6 +10,7 @@
 //! 每行存一个模型的完整 JSON（含名称、能力、分档费率、闲忙时与折扣），
 //! 与 `pricing::ModelPricing` 一一对应；新增字段只需改类型，无需迁移表结构。
 
+use crate::i18n;
 use rusqlite::{params, Connection};
 
 use super::log;
@@ -26,19 +27,31 @@ pub fn init_models_on(conn: &Connection) -> Result<(), String> {
             updated_at INTEGER NOT NULL
         );",
     )
-    .map_err(|e| format!("初始化模型表失败: {e}"))
+    .map_err(|e| {
+        let e = e.to_string();
+        i18n::err_args("init_models_table_failed", &[&e])
+    })
 }
 
 /// 首次启动播种：表为空时把内嵌表写入数据库，返回写入条数（非首次返回 0）。
 pub fn seed_if_empty(conn: &Connection) -> Result<usize, String> {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM model_pricing", [], |r| r.get(0))
-        .map_err(|e| format!("统计模型条数失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("count_models_failed", &[&e])
+        })?;
     if count > 0 {
         return Ok(0);
     }
     let seeded = upsert_models(conn, pricing::builtin_models(), "builtin")?;
-    log::info(&format!("模型信息首次落库：已写入 {seeded} 条内置数据"));
+    log::info(&format!(
+        "{} {seeded}",
+        i18n::pick(
+            "模型信息首次落库，已写入内置数据条数：",
+            "Seeded the built-in model table, rows written:"
+        )
+    ));
     Ok(seeded)
 }
 
@@ -52,11 +65,17 @@ pub fn upsert_models(
 ) -> Result<usize, String> {
     let tx = conn
         .unchecked_transaction()
-        .map_err(|e| format!("开启模型事务失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("models_tx_failed", &[&e])
+        })?;
     let now = now_secs();
     for m in models {
-        let data =
-            serde_json::to_string(m).map_err(|e| format!("模型 {0} 序列化失败: {e}", m.id))?;
+        let data = serde_json::to_string(m).map_err(|e| {
+            let id = m.id.clone();
+            let e = e.to_string();
+            i18n::err_args("model_serialize_failed", &[&id, &e])
+        })?;
         conn.execute(
             "INSERT INTO model_pricing (id, data, source, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET
@@ -65,9 +84,16 @@ pub fn upsert_models(
                 updated_at = excluded.updated_at",
             params![m.id, data, source, now as i64],
         )
-        .map_err(|e| format!("写入模型 {} 失败: {e}", m.id))?;
+        .map_err(|e| {
+            let id = m.id.clone();
+            let e = e.to_string();
+            i18n::err_args("model_write_failed", &[&id, &e])
+        })?;
     }
-    tx.commit().map_err(|e| format!("提交模型事务失败: {e}"))?;
+    tx.commit().map_err(|e| {
+        let e = e.to_string();
+        i18n::err_args("models_commit_failed", &[&e])
+    })?;
     Ok(models.len())
 }
 
@@ -84,16 +110,30 @@ pub fn load_all(conn: &Connection) -> Vec<ModelPricing> {
                 for row in rows.flatten() {
                     match serde_json::from_str::<ModelPricing>(&row.1) {
                         Ok(m) => out.push(m),
-                        Err(e) => log::warn(&format!("模型 {} 数据解析失败，已跳过: {e}", row.0)),
+                        Err(e) => log::warn(&format!(
+                            "{} {} {}: {e}",
+                            i18n::pick("模型", "Model"),
+                            row.0,
+                            i18n::pick("数据解析失败，已跳过", "failed to parse, skipped")
+                        )),
                     }
                 }
             }
-            Err(e) => log::warn(&format!("遍历模型表失败: {e}")),
+            Err(e) => log::warn(&format!(
+                "{}: {e}",
+                i18n::pick("遍历模型表失败", "Failed to iterate the models table")
+            )),
         },
-        Err(e) => log::warn(&format!("读取模型表失败: {e}")),
+        Err(e) => log::warn(&format!(
+            "{}: {e}",
+            i18n::pick("读取模型表失败", "Failed to read the models table")
+        )),
     }
     if out.is_empty() {
-        log::warn("模型表为空或不可读，回退内置兜底表");
+        log::warn(i18n::pick(
+            "模型表为空或不可读，回退内置兜底表",
+            "Models table empty or unreadable; falling back to the built-in table",
+        ));
         return pricing::builtin_models().to_vec();
     }
     out

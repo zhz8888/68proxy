@@ -93,7 +93,7 @@ pub struct AccountQuota {
     pub user_name: String,
     /// 掩码 Key（避免前端暴露完整凭据）。
     pub masked_key: String,
-    /// 套餐 ID 与展示名；无订阅时为 null / 「无订阅」。
+    /// 套餐 ID 与展示名；无订阅时为 null / 空字符串（文案由前端按语言渲染）。
     pub plan_id: Option<String>,
     pub plan_name: String,
     /// 订阅状态（active / trialing / past_due …）。
@@ -122,18 +122,19 @@ pub struct AccountQuota {
     pub weekly: Option<LimitWindow>,
     /// 组织级消费限额。
     pub org_limits: Vec<OrgLimit>,
-    /// 拉取失败原因（成功为 null）。
+    /// 拉取失败原因码（成功为 null，码表见前端 `quota.error.*`）。
     pub error: Option<String>,
 }
 
 impl AccountQuota {
-    /// 构造一个失败占位的额度快照。
+    /// 构造一个失败占位的额度快照。`error` 为错误码（如 `whoami_failed`），由前端翻译。
     fn failed(user_name: String, masked_key: String, error: String) -> Self {
         Self {
             user_name,
             masked_key,
             plan_id: None,
-            plan_name: "无订阅".into(),
+            // 空串作为「无订阅」哨兵：文案由前端按当前语言渲染
+            plan_name: String::new(),
             status: None,
             monthly_remaining: 0.0,
             purchased_remaining: 0.0,
@@ -381,7 +382,7 @@ pub async fn fetch_account_quota(
     let whoami = match whoami {
         Some(v) => v,
         None => {
-            return AccountQuota::failed(user_name.into(), masked_key.into(), "whoami 请求失败".into())
+            return AccountQuota::failed(user_name.into(), masked_key.into(), "whoami_failed".into())
         }
     };
     let org_id = whoami
@@ -488,7 +489,7 @@ pub async fn fetch_account_quota(
     AccountQuota {
         user_name: user_name.to_string(),
         masked_key: masked_key.to_string(),
-        plan_name: plan_id.as_deref().map(plan_name).unwrap_or_else(|| "无订阅".into()),
+        plan_name: plan_id.as_deref().map(plan_name).unwrap_or_default(),
         plan_id,
         status,
         monthly_remaining: monthly,
@@ -612,7 +613,7 @@ mod tests {
         q.has_billing = false;
         assert!(!is_exhausted(&q));
         let mut failed = quota_with(None, None, 0.0, 0.0);
-        failed.error = Some("whoami 请求失败".into());
+        failed.error = Some("whoami_failed".into());
         assert!(!is_exhausted(&failed));
     }
 

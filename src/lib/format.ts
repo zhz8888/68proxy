@@ -1,3 +1,5 @@
+import { translate } from "@/i18n";
+
 /** 格式化毫秒耗时：<1s 显示 ms，<1min 显示 s，否则显示 m s。 */
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -7,13 +9,13 @@ export function formatDuration(ms: number): string {
   return `${m}m${s % 60}s`;
 }
 
-/** 格式化运行时长（秒）为中文可读文本，如「3分20秒」「2小时5分」。 */
+/** 格式化运行时长（秒）为当前语言的可读文本，如「3分20秒」/「2h 5m」。 */
 export function formatUptime(secs: number): string {
   if (secs < 60) return `${secs}s`;
   const m = Math.floor(secs / 60);
-  if (m < 60) return `${m}分${secs % 60}秒`;
+  if (m < 60) return translate("time.uptimeMinutes", { p0: m, p1: secs % 60 });
   const h = Math.floor(m / 60);
-  return `${h}小时${m % 60}分`;
+  return translate("time.uptimeHours", { p0: h, p1: m % 60 });
 }
 
 /** 将毫秒时间戳格式化为当日时钟 HH:MM:SS。 */

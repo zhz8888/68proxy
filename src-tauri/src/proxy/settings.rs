@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 
 use super::config::Config;
 use super::log;
+use crate::i18n;
 
 /// 建表（供 init_usage 与测试内存库复用）；表已存在时静默跳过。
 pub fn init_settings_on(conn: &Connection) -> Result<(), String> {
@@ -19,27 +20,29 @@ pub fn init_settings_on(conn: &Connection) -> Result<(), String> {
             value TEXT NOT NULL
         );",
     )
-    .map_err(|e| format!("初始化设置表失败: {e}"))
+    .map_err(|e| i18n::err_args("init_settings_table_failed", &[&e.to_string()]))
 }
 
 /// 把配置整体写入 settings 表（事务内逐字段 UPSERT）。
 ///
 /// 写入后调用方负责同步 config.json 镜像（见 lib.rs）。
 pub fn save_config(conn: &Connection, cfg: &Config) -> Result<(), String> {
-    let v = serde_json::to_value(cfg).map_err(|e| format!("配置序列化失败: {e}"))?;
-    let obj = v.as_object().ok_or_else(|| "配置序列化为非对象".to_string())?;
+    let v = serde_json::to_value(cfg)
+        .map_err(|e| i18n::err_args("serialize_config_failed", &[&e.to_string()]))?;
+    let obj = v.as_object().ok_or_else(|| i18n::err("config_not_object"))?;
     let tx = conn
         .unchecked_transaction()
-        .map_err(|e| format!("开启设置事务失败: {e}"))?;
+        .map_err(|e| i18n::err_args("settings_tx_failed", &[&e.to_string()]))?;
     for (k, val) in obj {
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![k, val.to_string()],
         )
-        .map_err(|e| format!("写入设置 {k} 失败: {e}"))?;
+        .map_err(|e| i18n::err_args("settings_write_failed", &[k, &e.to_string()]))?;
     }
-    tx.commit().map_err(|e| format!("提交设置事务失败: {e}"))
+    tx.commit()
+        .map_err(|e| i18n::err_args("settings_commit_failed", &[&e.to_string()]))
 }
 
 /// 从 settings 表读取配置；表为空或某字段缺失时由 `#[serde(default)]` 兜底。
@@ -60,7 +63,10 @@ pub fn load_config(conn: &Connection) -> Config {
                 }
             }
         }
-        Err(e) => log::warn(&format!("读取设置表失败: {e}")),
+        Err(e) => log::warn(&format!(
+            "{}: {e}",
+            i18n::pick("读取设置表失败", "Failed to read the settings table")
+        )),
     }
     let legacy = map
         .get("api_key")
@@ -92,9 +98,14 @@ fn config_from_map(mut map: Map<String, Value>) -> Config {
         if same_kind {
             obj.insert(k, v);
         } else {
+            let expected = type_name(&probe);
             log::warn(&format!(
-                "设置项 {k} 类型不符（期望 {}），已忽略并使用默认值",
-                type_name(&probe)
+                "{}: {k} ({} {expected})",
+                i18n::pick(
+                    "设置项类型不符，已忽略并使用默认值",
+                    "Setting type mismatch; ignored and using default"
+                ),
+                i18n::pick("期望", "expected"),
             ));
             if let Some(d) = defaults.remove(&k) {
                 obj.insert(k, d);
@@ -102,7 +113,10 @@ fn config_from_map(mut map: Map<String, Value>) -> Config {
         }
     }
     serde_json::from_value(Value::Object(obj)).unwrap_or_else(|e| {
-        log::warn(&format!("设置反序列化失败，使用默认配置: {e}"));
+        log::warn(&format!(
+            "{}: {e}",
+            i18n::pick("设置反序列化失败，使用默认配置", "Failed to deserialize settings, using defaults")
+        ));
         Config::default()
     })
 }
@@ -124,7 +138,7 @@ fn type_name(v: &Value) -> &'static str {
 /// 避免每次启动都从旧行重复迁移（例如用户删光账户后旧 key 又「复活」）。
 pub fn purge_legacy_api_key(conn: &Connection) -> Result<(), String> {
     conn.execute("DELETE FROM settings WHERE key = 'api_key'", [])
-        .map_err(|e| format!("清理旧 api_key 设置失败: {e}"))?;
+        .map_err(|e| i18n::err_args("purge_legacy_failed", &[&e.to_string()]))?;
     Ok(())
 }
 
@@ -134,7 +148,7 @@ pub fn purge_legacy_api_key(conn: &Connection) -> Result<(), String> {
 pub fn migrate_from_config(conn: &Connection, config_path: &std::path::Path) -> Result<(), String> {
     let cnt: i64 = conn
         .query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))
-        .map_err(|e| format!("统计设置条数失败: {e}"))?;
+        .map_err(|e| i18n::err_args("count_settings_failed", &[&e.to_string()]))?;
     if cnt > 0 {
         return Ok(());
     }
@@ -144,7 +158,10 @@ pub fn migrate_from_config(conn: &Connection, config_path: &std::path::Path) -> 
     if serde_json::from_str::<Config>(&text).is_ok() {
         let cfg = Config::load_file(config_path);
         save_config(conn, &cfg)?;
-        log::info("已从 config.json 迁移设置到 SQLite");
+        log::info(i18n::pick(
+            "已从 config.json 迁移设置到 SQLite",
+            "Migrated settings from config.json to SQLite",
+        ));
     }
     Ok(())
 }
@@ -176,12 +193,15 @@ mod tests {
             added_at: 9,
         }];
         cfg.local_api_key = "sk_local_key".into();
+        cfg.language = "en".into();
         save_config(&conn, &cfg).unwrap();
 
         let got = load_config(&conn);
         assert_eq!(got.port, 3999);
         assert_eq!(got.host, "127.0.0.1");
         assert!(got.zdr);
+        // 语言项随配置一同往返（前端首屏防闪语言即依赖此项持久化）
+        assert_eq!(got.language, "en");
         assert_eq!(
             got.cc_accounts,
             vec![Account {

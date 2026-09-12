@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Activity, AlertTriangle, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -25,21 +26,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { translate } from "@/i18n";
 import { api, onStats, type AccountQuota, type UsageChartPoint, type UsageGroupRow, type UsagePeriod, type UsageStats } from "@/lib/api";
 import { formatCost, formatLogTime, formatTokens } from "@/lib/format";
+import { errText } from "@/lib/messages";
 import { lampForStatus } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { LimitWindowRow, MeterBar } from "@/components/QuotaDetail";
 
-/** 时间范围选项：值与中文标签。 */
-const PERIODS: Array<{ value: UsagePeriod; label: string }> = [
-  { value: "today", label: "今日" },
-  { value: "24h", label: "24 小时" },
-  { value: "7d", label: "7 天" },
-  { value: "30d", label: "30 天" },
-  { value: "60d", label: "60 天" },
-  { value: "all", label: "全部" },
-];
+/** 时间范围选项顺序：标签由组件内的 t("stats.period.<value>") 提供。 */
+const PERIODS: UsagePeriod[] = ["today", "24h", "7d", "30d", "60d", "all"];
 
 /** 汇总卡片：小字标题 + 大字数值（font-mono）。 */
 function SummaryCard({ title, value, hint }: { title: string; value: string; hint?: string }) {
@@ -83,6 +79,7 @@ function GroupRowLine({ row }: { row: UsageGroupRow }) {
 
 /** 账户额度紧凑行：套餐 + 剩余额度 + 月/购买/赠送 + 5h/周窗口限额。 */
 function QuotaRow({ q }: { q: AccountQuota }) {
+  const { t } = useTranslation();
   return (
     <div className="space-y-2 rounded-md border border-border/70 bg-secondary/20 px-3 py-2">
       <div className="flex items-center justify-between gap-2">
@@ -103,22 +100,26 @@ function QuotaRow({ q }: { q: AccountQuota }) {
         </span>
       </div>
       {q.error ? (
-        <p className="text-xs text-destructive">额度获取失败：{q.error}</p>
+        <p className="text-xs text-destructive">
+          {t("quota.fetchFailedPrefix", {
+            p0: translate(`quota.error.${q.error}`, { defaultValue: q.error }),
+          })}
+        </p>
       ) : !q.has_billing ? (
-        <p className="text-xs text-muted-foreground">暂无计费数据</p>
+        <p className="text-xs text-muted-foreground">{t("stats.noBillingData")}</p>
       ) : (
         <>
           <MeterBar pct={q.usage_percent} />
           <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
-            <span>月 <span className="font-mono text-foreground/80">{formatCost(q.monthly_remaining)}</span></span>
-            <span>购买 <span className="font-mono text-foreground/80">{formatCost(q.purchased_remaining)}</span></span>
-            <span>赠送 <span className="font-mono text-foreground/80">{formatCost(q.free_remaining)}</span></span>
-            {q.total_spent > 0 && <span>本期消耗 <span className="font-mono text-foreground/80">{formatCost(q.total_spent)}</span></span>}
+            <span>{t("stats.monthlyRemaining")} <span className="font-mono text-foreground/80">{formatCost(q.monthly_remaining)}</span></span>
+            <span>{t("stats.purchasedRemaining")} <span className="font-mono text-foreground/80">{formatCost(q.purchased_remaining)}</span></span>
+            <span>{t("stats.freeRemaining")} <span className="font-mono text-foreground/80">{formatCost(q.free_remaining)}</span></span>
+            {q.total_spent > 0 && <span>{t("stats.spentThisPeriod")} <span className="font-mono text-foreground/80">{formatCost(q.total_spent)}</span></span>}
           </div>
           {(q.five_hour || q.weekly) && (
             <div className="grid grid-cols-2 gap-3 pt-0.5">
-              {q.five_hour && <LimitWindowRow label="5 小时" win={q.five_hour} />}
-              {q.weekly && <LimitWindowRow label="每周" win={q.weekly} />}
+              {q.five_hour && <LimitWindowRow label={t("stats.fiveHour")} win={q.five_hour} />}
+              {q.weekly && <LimitWindowRow label={t("stats.weekly")} win={q.weekly} />}
             </div>
           )}
         </>
@@ -129,6 +130,7 @@ function QuotaRow({ q }: { q: AccountQuota }) {
 
 /** 用量统计视图：汇总卡片、趋势图、按模型/端点分组表与最近请求明细。 */
 export function StatsView() {
+  const { t } = useTranslation();
   const [period, setPeriod] = useState<UsagePeriod>("7d");
   const [stats, setStats] = useState<UsageStats | null>(null);
   const [chart, setChart] = useState<UsageChartPoint[]>([]);
@@ -142,6 +144,16 @@ export function StatsView() {
   // 每次请求的序号：仅当结果仍属于最新一次请求时才落库，避免快速切换周期时旧结果覆盖新结果
   const reqSeq = useRef(0);
 
+  // 时间范围展示标签：静态 key 逐条列出，便于编译期校验
+  const periodLabels: Record<UsagePeriod, string> = {
+    today: t("stats.period.today"),
+    "24h": t("stats.period.24h"),
+    "7d": t("stats.period.7d"),
+    "30d": t("stats.period.30d"),
+    "60d": t("stats.period.60d"),
+    all: t("stats.period.all"),
+  };
+
   /** 拉取当前时间范围的汇总与趋势数据。 */
   const refresh = useCallback(async (p: UsagePeriod) => {
     const seq = ++reqSeq.current;
@@ -154,6 +166,7 @@ export function StatsView() {
     } catch (e) {
       if (seq !== reqSeq.current) return;
       // 不再静默吞错：保留旧数据的同时给出可见提示，便于区分「无数据」与「查询失败」
+      // 保存原始错误串，渲染时再翻译（切换语言后已显示的提示随之更新）
       setLoadError(String(e));
     }
   }, []);
@@ -197,10 +210,10 @@ export function StatsView() {
     setConfirmClear(false);
     try {
       const res = await api.statsClearAll();
-      toast.success(`用量统计已清空（${res.cleared} 条）`);
+      toast.success(t("stats.cleared", { p0: res.cleared }));
       refresh(period);
     } catch (e) {
-      toast.error(String(e));
+      toast.error(errText(e));
     }
   }
 
@@ -222,20 +235,20 @@ export function StatsView() {
           </SelectTrigger>
           <SelectContent>
             {PERIODS.map((p) => (
-              <SelectItem key={p.value} value={p.value}>
-                {p.label}
+              <SelectItem key={p} value={p}>
+                {periodLabels[p]}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
         <div className="flex items-center gap-2 rounded-lg bg-muted px-3 py-1.5 text-xs text-muted-foreground">
           <Activity className="h-3.5 w-3.5" />
-          共 {stats?.total_requests ?? 0} 次请求 · 估算成本仅供参考
+          {t("stats.requestCountSummary", { p0: stats?.total_requests ?? 0 })}
         </div>
         {loadError && (
           <div className="flex items-center gap-1.5 rounded-lg bg-destructive/15 px-3 py-1.5 text-xs text-destructive">
             <AlertTriangle className="h-3.5 w-3.5" />
-            统计加载失败：{loadError}
+            {t("stats.loadFailed", { p0: errText(loadError) })}
           </div>
         )}
         <div className="flex-1" />
@@ -247,7 +260,7 @@ export function StatsView() {
           disabled={!hasData}
         >
           <Trash2 className="h-3.5 w-3.5" />
-          清空统计
+          {t("stats.clearStats")}
         </Button>
       </div>
 
@@ -258,7 +271,7 @@ export function StatsView() {
             <Card>
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
-                  <CardTitle className="text-sm">账户剩余额度</CardTitle>
+                  <CardTitle className="text-sm">{t("stats.quotaTitle")}</CardTitle>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -267,10 +280,10 @@ export function StatsView() {
                     onClick={refreshQuota}
                   >
                     <RefreshCw className={quotaLoading ? "animate-spin" : ""} />
-                    刷新
+                    {t("common.refresh")}
                   </Button>
                 </div>
-                <CardDescription>各 Command Code 上游账户的套餐余额与 5 小时 / 周窗口限额（额度实时来自上游）</CardDescription>
+                <CardDescription>{t("stats.quotaDesc")}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-2 pt-0">
                 {quotas.map((q, i) => (
@@ -282,18 +295,18 @@ export function StatsView() {
 
           {/* 汇总卡片行 */}
           <div className="grid grid-cols-5 gap-3">
-            <SummaryCard title="总请求数" value={formatTokens(stats?.total_requests ?? 0)} />
-            <SummaryCard title="输入 Tokens" value={formatTokens(stats?.total_prompt_tokens ?? 0)} />
-            <SummaryCard title="缓存 Tokens" value={formatTokens(stats?.total_cached_tokens ?? 0)} />
-            <SummaryCard title="输出 Tokens" value={formatTokens(stats?.total_completion_tokens ?? 0)} />
-            <SummaryCard title="估算成本" value={formatCost(stats?.total_cost ?? 0)} hint="Estimated, not actual billing" />
+            <SummaryCard title={t("stats.totalRequests")} value={formatTokens(stats?.total_requests ?? 0)} />
+            <SummaryCard title={t("stats.inputTokens")} value={formatTokens(stats?.total_prompt_tokens ?? 0)} />
+            <SummaryCard title={t("stats.cachedTokens")} value={formatTokens(stats?.total_cached_tokens ?? 0)} />
+            <SummaryCard title={t("stats.outputTokens")} value={formatTokens(stats?.total_completion_tokens ?? 0)} />
+            <SummaryCard title={t("stats.estimatedCost")} value={formatCost(stats?.total_cost ?? 0)} hint={t("stats.estimatedCostHint")} />
           </div>
 
           {/* 最近 10 分钟迷你柱状图卡片 */}
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm">最近 10 分钟</CardTitle>
-              <CardDescription>按分钟聚合的 token 用量（输入 + 输出）</CardDescription>
+              <CardTitle className="text-sm">{t("stats.last10Minutes")}</CardTitle>
+              <CardDescription>{t("stats.last10MinutesDesc")}</CardDescription>
             </CardHeader>
             <CardContent className="pt-0">
               <UsageMiniBars buckets={stats?.last_10_minutes ?? []} />
@@ -304,15 +317,15 @@ export function StatsView() {
           <Card>
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
-                <CardTitle className="text-sm">用量趋势</CardTitle>
+                <CardTitle className="text-sm">{t("stats.usageTrend")}</CardTitle>
                 <Tabs value={chartMode} onValueChange={(v) => setChartMode(v as "tokens" | "cost")}>
                   <TabsList className="h-7">
                     <TabsTrigger value="tokens" className="text-xs">Tokens</TabsTrigger>
-                    <TabsTrigger value="cost" className="text-xs">成本</TabsTrigger>
+                    <TabsTrigger value="cost" className="text-xs">{t("stats.cost")}</TabsTrigger>
                   </TabsList>
                 </Tabs>
               </div>
-              <CardDescription>近 {PERIODS.find((p) => p.value === period)?.label ?? ""} · 按小时/天聚合</CardDescription>
+              <CardDescription>{t("stats.trendDesc", { p0: periodLabels[period] })}</CardDescription>
             </CardHeader>
             <CardContent className="pt-0">
               <UsageTrendChart points={chart} mode={chartMode} />
@@ -323,35 +336,35 @@ export function StatsView() {
           <Card>
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
-                <CardTitle className="text-sm">用量明细</CardTitle>
+                <CardTitle className="text-sm">{t("stats.usageDetail")}</CardTitle>
                 <Select value={groupBy} onValueChange={(v) => setGroupBy(v as "model" | "endpoint")}>
                   <SelectTrigger className="h-8 w-32">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="model">按模型</SelectItem>
-                    <SelectItem value="endpoint">按端点</SelectItem>
+                    <SelectItem value="model">{t("stats.byModel")}</SelectItem>
+                    <SelectItem value="endpoint">{t("stats.byEndpoint")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
-              <CardDescription>请求数 / 输入 / 输出 / 总 Tokens / 成本</CardDescription>
+              <CardDescription>{t("stats.detailColumns")}</CardDescription>
             </CardHeader>
             <CardContent className="pt-0">
               {groupRows.length === 0 ? (
                 <p className="py-8 text-center text-sm text-muted-foreground">
-                  当前时间范围内暂无用量数据。启动代理发起请求后，这里会按模型/端点汇总。
+                  {t("stats.noUsageInRange")}
                 </p>
               ) : (
                 <div className="space-y-1">
                   {/* 表头 */}
                   <div className="flex items-center gap-3 px-3 pb-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
                     <span className="w-4 shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">{groupBy === "model" ? "模型" : "端点"}</span>
-                    <span className="w-14 text-right">请求</span>
-                    <span className="w-20 text-right">输入</span>
-                    <span className="w-20 text-right">输出</span>
-                    <span className="w-16 text-right">总 Tokens</span>
-                    <span className="w-16 text-right">成本</span>
+                    <span className="min-w-0 flex-1 truncate">{groupBy === "model" ? t("stats.model") : t("stats.endpoint")}</span>
+                    <span className="w-14 text-right">{t("stats.requests")}</span>
+                    <span className="w-20 text-right">{t("stats.input")}</span>
+                    <span className="w-20 text-right">{t("stats.output")}</span>
+                    <span className="w-16 text-right">{t("stats.totalTokens")}</span>
+                    <span className="w-16 text-right">{t("stats.cost")}</span>
                   </div>
                   {groupRows.map((r) => (
                     <GroupRowLine key={r.key} row={r} />
@@ -364,13 +377,13 @@ export function StatsView() {
           {/* 最近请求卡片 */}
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm">最近请求</CardTitle>
-              <CardDescription>全时段最近 20 条成功计费请求的 token 用量（不随上方时间范围变化）</CardDescription>
+              <CardTitle className="text-sm">{t("stats.recentRequests")}</CardTitle>
+              <CardDescription>{t("stats.recentRequestsDesc")}</CardDescription>
             </CardHeader>
             <CardContent className="pt-0">
               {!stats || stats.recent_requests.length === 0 ? (
                 <p className="py-8 text-center text-sm text-muted-foreground">
-                  暂无最近请求记录。请求完成且产出 token 后显示在此。
+                  {t("stats.noRecentRequests")}
                 </p>
               ) : (
                 <div className="space-y-1">
@@ -415,17 +428,17 @@ export function StatsView() {
       <Dialog open={confirmClear} onOpenChange={setConfirmClear}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>清空用量统计</DialogTitle>
+            <DialogTitle>{t("stats.clearDialogTitle")}</DialogTitle>
             <DialogDescription>
-              将删除全部历史用量记录与趋势数据，且不可恢复。确认继续？
+              {t("stats.clearDialogDesc")}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="secondary" onClick={() => setConfirmClear(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button variant="destructive" onClick={clearAll}>
-              确认清空
+              {t("stats.confirmClear")}
             </Button>
           </DialogFooter>
         </DialogContent>

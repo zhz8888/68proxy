@@ -23,6 +23,8 @@ use std::sync::OnceLock;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
+use crate::i18n;
+
 /// 事件广播缓冲：调试时日志可能突发；订阅端落后过多会收到 Lagged 并跳过。
 const EVENT_BUFFER: usize = 1024;
 
@@ -65,12 +67,20 @@ pub fn start(app: tauri::AppHandle) {
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 crate::proxy::log::info(&format!(
-                    "调试桥接已启动：浏览器直连前端页面时将经 http://127.0.0.1:{port}/rpc 调用后端"
+                    "{}: http://127.0.0.1:{port}/rpc",
+                    i18n::pick(
+                        "调试桥接已启动，浏览器直连前端页面时将经此调用后端",
+                        "Debug bridge started; browser pages call the backend through"
+                    )
                 ));
                 let _ = axum::serve(listener, router).await;
             }
             Err(e) => crate::proxy::log::warn(&format!(
-                "调试桥接启动失败（端口 {port} 可能被占用，可用 CC_DEV_BRIDGE_PORT 指定其它端口）: {e}"
+                "{}: {e}",
+                i18n::pick(
+                    "调试桥接启动失败（端口可能被占用，可用 CC_DEV_BRIDGE_PORT 指定其它端口）",
+                    "Failed to start the debug bridge (port may be in use; set CC_DEV_BRIDGE_PORT to use another)"
+                )
             )),
         }
     });
@@ -121,7 +131,8 @@ async fn events() -> Sse<impl futures_util::Stream<Item = Result<Event, Infallib
 
 /// 把可序列化的命令返回值转成 JSON（失败给出中文描述）。
 fn to_value<T: serde::Serialize>(v: T) -> Result<Value, String> {
-    serde_json::to_value(v).map_err(|e| format!("序列化返回值失败: {e}"))
+    serde_json::to_value(v)
+        .map_err(|e| i18n::err_args("serialize_result_failed", &[&e.to_string()]))
 }
 
 /// 按命令名分发到对应的 Tauri 命令函数。
@@ -137,7 +148,7 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
     };
     let b = |k: &str| args.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
     let n = |k: &str| args.get(k).and_then(|v| v.as_u64());
-    let app = || APP.get().cloned().ok_or_else(|| "应用尚未就绪".to_string());
+    let app = || APP.get().cloned().ok_or_else(|| i18n::err("app_not_ready"));
 
     match cmd {
         // ── 代理生命周期 ──
@@ -152,7 +163,7 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
             let cfg: crate::proxy::config::Config = serde_json::from_value(
                 args.get("config").cloned().unwrap_or(Value::Null),
             )
-            .map_err(|e| format!("config 参数解析失败: {e}"))?;
+            .map_err(|e| i18n::err_args("config_parse_failed", &[&e.to_string()]))?;
             Ok(to_value(crate::config_save(app()?, cfg)?)?)
         }
 
@@ -209,7 +220,7 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
             let models: Vec<crate::proxy::pricing::ModelPricing> = serde_json::from_value(
                 args.get("models").cloned().unwrap_or_else(|| json!([])),
             )
-            .map_err(|e| format!("models 参数解析失败: {e}"))?;
+            .map_err(|e| i18n::err_args("models_parse_failed", &[&e.to_string()]))?;
             let source = args.get("source").and_then(|v| v.as_str()).map(str::to_string);
             Ok(to_value(crate::models_catalog_update(app()?, models, source)?)?)
         }
@@ -219,6 +230,13 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
         "theme_get" => Ok(crate::theme_get(app()?)),
         "theme_set" => {
             crate::theme_set(app()?, s("theme"))?;
+            Ok(Value::Null)
+        }
+
+        // ── 语言 ──
+        "language_get" => Ok(crate::language_get(app()?)),
+        "language_set" => {
+            crate::language_set(app()?, s("language"))?;
             Ok(Value::Null)
         }
 
@@ -248,6 +266,6 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
             Ok(Value::Null)
         }
 
-        other => Err(format!("未知命令: {other}")),
+        other => Err(i18n::err_args("unknown_command", &[other])),
     }
 }

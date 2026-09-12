@@ -6,6 +6,7 @@
 //! - **本地转发 key**（`sk_` 开头）：仅本机服务鉴权用，客户端统一用它接入本地代理，
 //!   可一键随机生成；该 key 不会发送给 CC 上游。
 
+use crate::i18n;
 use crate::proxy::config::Account;
 use rand::Rng;
 use rusqlite::Connection;
@@ -78,7 +79,7 @@ pub fn load_accounts(conn: &Connection) -> Result<Vec<Account>, String> {
 pub fn add_account(conn: &Connection, acct: &Account) -> Result<Vec<Account>, String> {
     let key = acct.key.trim().to_string();
     if key.is_empty() {
-        return Err("账户 key 不能为空".into());
+        return Err(i18n::err("account_key_empty"));
     }
     let mut accounts = load_accounts(conn)?;
     if let Some(existing) = accounts.iter_mut().find(|a| !a.user_id.is_empty() && a.user_id == acct.user_id) {
@@ -107,7 +108,8 @@ pub fn add_account(conn: &Connection, acct: &Account) -> Result<Vec<Account>, St
 pub fn remove_account_at(conn: &Connection, index: usize) -> Result<Vec<Account>, String> {
     let mut accounts = load_accounts(conn)?;
     if index >= accounts.len() {
-        return Err(format!("账户下标越界: {index}"));
+        let index = index.to_string();
+        return Err(i18n::err_args("account_index_out_of_range", &[&index]));
     }
     accounts.remove(index);
     save_accounts(conn, &accounts)?;
@@ -119,11 +121,11 @@ pub fn remove_account_at(conn: &Connection, index: usize) -> Result<Vec<Account>
 pub fn rename_account(conn: &Connection, user_id: &str, user_name: &str) -> Result<Vec<Account>, String> {
     let name = user_name.trim().to_string();
     if name.is_empty() {
-        return Err("显示名不能为空".into());
+        return Err(i18n::err("account_name_empty"));
     }
     let mut accounts = load_accounts(conn)?;
     let Some(existing) = accounts.iter_mut().find(|a| a.user_id == user_id) else {
-        return Err(format!("未找到 userId 为 {user_id} 的账户"));
+        return Err(i18n::err_args("account_not_found", &[user_id]));
     };
     existing.user_name = name;
     save_accounts(conn, &accounts)?;
@@ -278,7 +280,10 @@ pub fn route_account(
             if !exhausted {
                 return Some(bound);
             }
-            crate::proxy::log::info("会话绑定账户额度已耗尽，重新选择账户");
+            crate::proxy::log::info(crate::i18n::pick(
+                "会话绑定账户额度已耗尽，重新选择账户",
+                "The session-bound account is exhausted; selecting another account",
+            ));
         }
     }
 
@@ -312,7 +317,10 @@ pub async fn verify_account_key(api_base: &str, api_key: &str) -> Result<(String
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|e| format!("构建请求客户端失败: {e}"))?;
+        .map_err(|e| {
+            let e = e.to_string();
+            i18n::err_args("client_build_failed", &[&e])
+        })?;
     let url = format!("{api_base}/alpha/whoami");
     let res = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         client
@@ -323,15 +331,21 @@ pub async fn verify_account_key(api_base: &str, api_key: &str) -> Result<(String
             .await
     })
     .await
-    .map_err(|_| "验证请求超时，请检查网络".to_string())?
-    .map_err(|e| format!("验证请求失败: {e}"))?;
+    .map_err(|_| i18n::err("verify_timeout"))?
+    .map_err(|e| {
+        let e = e.to_string();
+        i18n::err_args("verify_failed", &[&e])
+    })?;
 
     match res.status().as_u16() {
         200 => {
             let v: serde_json::Value = res
                 .json()
                 .await
-                .map_err(|e| format!("解析 whoami 响应失败: {e}"))?;
+                .map_err(|e| {
+                    let e = e.to_string();
+                    i18n::err_args("whoami_parse_failed", &[&e])
+                })?;
             let user_id = v
                 .pointer("/user/id")
                 .and_then(|x| x.as_str())
@@ -345,12 +359,15 @@ pub async fn verify_account_key(api_base: &str, api_key: &str) -> Result<(String
                 .unwrap_or("")
                 .to_string();
             if user_id.is_empty() {
-                return Err("whoami 响应缺少用户 id，请重试或改用浏览器登录".into());
+                return Err(i18n::err("whoami_missing_id"));
             }
             Ok((user_id, user_name))
         }
-        401 => Err("该 API Key 无效（未授权），请检查是否正确".into()),
-        s => Err(format!("上游验证失败（HTTP {s}），请稍后重试")),
+        401 => Err(i18n::err("api_key_invalid")),
+        s => {
+            let s = s.to_string();
+            Err(i18n::err_args("upstream_verify_failed", &[&s]))
+        }
     }
 }
 

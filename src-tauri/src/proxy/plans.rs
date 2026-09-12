@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use super::log;
 use super::state::{now_millis, AppState};
+use crate::i18n;
 
 /// 模型分类：premium（高级）与 opensource（开源）。
 const CAT_PREMIUM: &str = "premium";
@@ -34,7 +35,7 @@ static CACHE: Mutex<Option<(PlanContext, u64)>> = Mutex::new(None);
 pub struct PlanContext {
     /// 套餐 ID（如 individual-go）；无有效订阅时为 null。
     pub plan_id: Option<String>,
-    /// 套餐展示名（如 Go / GOAT / Pro / Max）；无套餐时为「无订阅」。
+    /// 套餐展示名（如 Go / GOAT / Pro / Max）；无套餐时为空字符串（前端按当前语言显示「无订阅」）。
     pub plan_name: String,
     /// 已购买按量额度（美元）。
     pub purchased_credits: u64,
@@ -42,16 +43,17 @@ pub struct PlanContext {
     pub free_credits: u64,
     /// 是否拉取失败（失败时不做任何限制）。
     pub fetch_failed: bool,
-    /// 附加说明（失败原因/无账户等）。
+    /// 附加说明：不展示给用户的内部原因码（如 `plan_fetch_failed` / `no_account`），空串表示无。
     pub note: String,
 }
 
 impl PlanContext {
-    /// 拉取失败或不可用时的放行上下文。
+    /// 拉取失败或不可用时的放行上下文。`note` 为原因码（见模块说明），前端按需映射。
     fn unavailable(reason: &str) -> Self {
         Self {
             plan_id: None,
-            plan_name: "无订阅".into(),
+            // 空串作为「无订阅」哨兵：文案由前端按当前语言渲染
+            plan_name: String::new(),
             purchased_credits: 0,
             free_credits: 0,
             fetch_failed: true,
@@ -67,7 +69,7 @@ pub struct AccessInfo {
     pub allowed: bool,
     /// 不可用时给出最低需要的套餐名（如 GOAT / Provider）。
     pub minimum_plan: Option<String>,
-    /// 不可用原因（可直接展示）。
+    /// 不可用原因：留空，由前端按当前语言结合 `minimum_plan` 组装提示文案。
     pub reason: Option<String>,
 }
 
@@ -331,11 +333,11 @@ pub fn evaluate_access(model_id: &str, ctx: &PlanContext) -> AccessInfo {
         (r.categories.contains(&category) && !is_blocked(r.blocked, &norm))
             .then(|| plan_display_name(id))
     });
-    let name = minimum.clone().unwrap_or_else(|| "Ultra".into());
     AccessInfo {
         allowed: false,
         minimum_plan: minimum,
-        reason: Some(format!("需 {name} 及以上套餐，或购买按量额度")),
+        // 原因文案由前端按当前语言结合 minimum_plan 组装（见 ModelsView）
+        reason: None,
     }
 }
 
@@ -404,12 +406,15 @@ pub async fn fetch_plan_context(state: &AppState, api_key: &str) -> PlanContext 
 
     // 与 CLI 一致：whoami / subscriptions / credits.credits 任一缺失即视为拉取失败（放行）
     if whoami.is_none() || subs.is_none() || credits_obj.is_none() {
-        log::warn("套餐信息拉取失败：whoami / subscriptions / credits 不完整");
-        return PlanContext::unavailable("套餐信息拉取失败（可在配置中检查账户与网络）");
+        log::warn(i18n::pick(
+            "套餐信息拉取失败：whoami / subscriptions / credits 不完整",
+            "Failed to fetch plan info: whoami / subscriptions / credits incomplete",
+        ));
+        return PlanContext::unavailable("plan_fetch_failed");
     }
 
     let ctx = PlanContext {
-        plan_name: plan_id.as_deref().map(plan_display_name).unwrap_or_else(|| "无订阅".into()),
+        plan_name: plan_id.as_deref().map(plan_display_name).unwrap_or_default(),
         plan_id,
         purchased_credits: purchased,
         free_credits: free,
@@ -417,8 +422,17 @@ pub async fn fetch_plan_context(state: &AppState, api_key: &str) -> PlanContext 
         note: String::new(),
     };
     log::info(&format!(
-        "套餐信息已更新：{}（购买额度 {} / 赠送额度 {}）",
-        ctx.plan_name, ctx.purchased_credits, ctx.free_credits
+        "{}: {} ({} {} / {} {})",
+        i18n::pick("套餐信息已更新", "Plan info updated"),
+        if ctx.plan_name.is_empty() {
+            i18n::pick("无订阅", "No subscription")
+        } else {
+            &ctx.plan_name
+        },
+        i18n::pick("购买额度", "purchased"),
+        ctx.purchased_credits,
+        i18n::pick("赠送额度", "free"),
+        ctx.free_credits
     ));
     ctx
 }
@@ -434,7 +448,7 @@ pub async fn plan_context(state: &AppState, api_key: Option<&str>, force: bool) 
     }
     let ctx = match api_key {
         Some(k) => fetch_plan_context(state, k).await,
-        None => PlanContext::unavailable("未配置 CC 账户，无法获取套餐"),
+        None => PlanContext::unavailable("no_account"),
     };
     *CACHE.lock().unwrap() = Some((ctx.clone(), now_millis()));
     ctx
