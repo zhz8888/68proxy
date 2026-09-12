@@ -34,6 +34,11 @@ const DEFAULTS: Config = {
   close_to_tray: true,
   usage_enabled: true,
   usage_retention_days: 0,
+  empty_system_placeholder: true,
+  zdr: false,
+  max_body_mb: 10,
+  client_drain_timeout_ms: 0,
+  max_inflight: 0,
 };
 
 /** 配置页通用区块卡片：标题 + 可选描述 + 内容。 */
@@ -252,6 +257,26 @@ export function ConfigView() {
                 onChange={(e) => update("model_refresh_interval_ms", Number(e.target.value))}
               />
             </Field>
+          </Section>
+
+          <Section title="代理" desc="CC 上游调用行为">
+            <div className="flex items-center justify-between">
+              <Label>空 system 占位符</Label>
+              <Switch
+                checked={cfg.empty_system_placeholder}
+                onCheckedChange={(v) => update("empty_system_placeholder", v)}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              无 system prompt 时发送空格占位，阻止 CC 上游注入约 7.5K token 的默认提示词。
+            </p>
+            <div className="flex items-center justify-between pt-2">
+              <Label>ZDR 模式</Label>
+              <Switch checked={cfg.zdr} onCheckedChange={(v) => update("zdr", v)} />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              向 CC 上游发送 x-cmd-zdr: 1 请求头（生成与初始化预请求均生效）。
+            </p>
           </Section>
 
           <Section title="偏好" desc="应用与代理的启动方式">

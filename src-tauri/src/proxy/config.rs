@@ -39,6 +39,16 @@ pub struct Config {
     pub usage_retention_days: u32,
     /// 本地明文保存的 API Key（user_ 开头），随配置文件读写。
     pub api_key: String,
+    /// 无 system prompt 时是否发空格占位（阻止 CC 上游注入默认提示词）。
+    pub empty_system_placeholder: bool,
+    /// 是否启用 ZDR 模式（向 CC 上游发送 x-cmd-zdr: 1 请求头）。
+    pub zdr: bool,
+    /// 请求体大小上限（MB），超限请求返回 413（连接保持排空可复用）。
+    pub max_body_mb: u32,
+    /// 下游写缓冲背压僵死看门狗（毫秒），0 表示禁用（不主动断开僵死客户端）。
+    pub client_drain_timeout_ms: u64,
+    /// 进程内在途请求上限，0 表示不限；超限返回 503 + Retry-After。
+    pub max_inflight: u32,
 }
 
 impl Default for Config {
@@ -60,6 +70,11 @@ impl Default for Config {
             usage_enabled: true,
             usage_retention_days: 0,
             api_key: String::new(),
+            empty_system_placeholder: true,
+            zdr: false,
+            max_body_mb: 10,
+            client_drain_timeout_ms: 0,
+            max_inflight: 0,
         }
     }
 }
@@ -108,7 +123,9 @@ impl Config {
     }
 
     /// 用环境变量覆写对应字段：PORT / HOST / CC_API_BASE / PROJECT_SLUG / LOG_FILE /
-    /// CC_USE_PROVIDER_MODELS（仅显式 "false" 时关闭）。
+    /// CC_USE_PROVIDER_MODELS（仅显式 "false" 时关闭）/ CC_EMPTY_SYSTEM_PLACEHOLDER
+    /// （仅显式 "false" 时关闭）/ CMD_ZDR（仅显式 "1" 或 "true" 时开启）/
+    /// CC_MAX_BODY_MB / CC_CLIENT_DRAIN_TIMEOUT_MS / CC_MAX_INFLIGHT。
     fn apply_env(&mut self) {
         if let Ok(v) = std::env::var("PORT") {
             if let Ok(p) = v.parse::<u16>() {
@@ -129,6 +146,29 @@ impl Config {
         }
         if let Ok(v) = std::env::var("CC_USE_PROVIDER_MODELS") {
             self.use_provider_models = v != "false";
+        }
+        if let Ok(v) = std::env::var("CC_EMPTY_SYSTEM_PLACEHOLDER") {
+            self.empty_system_placeholder = v != "false";
+        }
+        if let Ok(v) = std::env::var("CMD_ZDR") {
+            self.zdr = matches!(v.as_str(), "1" | "true");
+        }
+        if let Ok(v) = std::env::var("CC_MAX_BODY_MB") {
+            if let Ok(p) = v.parse::<u32>() {
+                if p > 0 {
+                    self.max_body_mb = p;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("CC_CLIENT_DRAIN_TIMEOUT_MS") {
+            if let Ok(p) = v.parse::<u64>() {
+                self.client_drain_timeout_ms = p;
+            }
+        }
+        if let Ok(v) = std::env::var("CC_MAX_INFLIGHT") {
+            if let Ok(p) = v.parse::<u32>() {
+                self.max_inflight = p;
+            }
         }
     }
 }

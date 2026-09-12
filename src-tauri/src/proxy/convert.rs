@@ -21,13 +21,28 @@ fn as_str_or_empty(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
 }
 
+/// 判断 CC 消息列表里是否已存在 cache_control 标记（用于避免重复注入）。
+fn has_cache_marker(cc_messages: &[Value]) -> bool {
+    cc_messages.iter().any(|m| {
+        m.get("content")
+            .and_then(|c| c.as_array())
+            .map(|parts| parts.iter().any(|p| p.get("cache_control").is_some()))
+            .unwrap_or(false)
+    })
+}
+
 /// OpenAI Chat Completions 请求 → CC 请求体（CLI 信封格式）。
 ///
-/// 主要转换：system/developer 消息提取为 params.system；user/assistant/tool 消息
-/// 转为 CC 的 content parts 结构（text/image/tool-call/tool-result）；tools 扁平化为
-/// `{type, name, description, input_schema}`；tool_choice 的 required 映射为 any；
-/// max_tokens 缺省 64000 并封顶 200000；stream 恒为 true（上游只支持流式）。
-pub fn build_cc_request(openai_req: &Value) -> Value {
+/// 主要转换：system/developer 消息提取为 params.system（为空且开关开启时发空格占位，
+/// 阻止上游注入默认提示词）；user/assistant/tool 消息转为 CC 的 content parts 结构
+/// （text/image/tool-call/tool-result）；assistant 的 reasoning_content 与 content 内
+/// reasoning part 回传为 `{type:"reasoning"}`；tools 扁平化为 `{type, name, description,
+/// input_schema}`；tool_choice 的 required 映射为 any；max_tokens 缺省 64000 并封顶
+/// 200000；stream 恒为 true（上游只支持流式）。
+///
+/// - `empty_system_placeholder`：无 system 时是否发 `" "` 占位，防止 CC 上游注入
+///   约 7.5K token 的默认提示词。
+pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> Value {
     let model = openai_req
         .get("model")
         .and_then(|v| v.as_str())
@@ -71,7 +86,7 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
         }
     }
 
-    let cc_messages: Vec<Value> = chat_messages
+    let mut cc_messages: Vec<Value> = chat_messages
         .iter()
         .map(|msg| match msg.get("role").and_then(|r| r.as_str()) {
             Some("user") => {
@@ -101,16 +116,32 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
             }
             Some("assistant") => {
                 let mut parts: Vec<Value> = Vec::new();
+                // 思考内容必须回传：CC 在 thinking 模式下校验 reasoning 是否随历史带回，
+                // 丢弃会让上游直接拒绝。reasoning 须置于文本之前。
+                let reasoning_field = msg
+                    .get("reasoning_content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !reasoning_field.is_empty() {
+                    parts.push(json!({ "type": "reasoning", "text": reasoning_field }));
+                }
+                let mut reasoning_part_seen = !reasoning_field.is_empty();
                 match msg.get("content") {
-                    Some(Value::String(s)) => {
-                        if !s.is_empty() {
-                            parts.push(json!({ "type": "text", "text": s }));
-                        }
+                    Some(Value::String(s)) if !s.is_empty() => {
+                        parts.push(json!({ "type": "text", "text": s }));
                     }
+                    Some(Value::String(_)) | None => {}
                     Some(Value::Array(arr)) => {
                         for part in arr {
-                            if part.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                parts.push(part.clone());
+                            match part.get("type").and_then(|t| t.as_str()) {
+                                Some("text") => parts.push(part.clone()),
+                                // 客户端直接把 reasoning 放在 content 数组里时同样透传；
+                                // 已有 reasoning_content 字段则不重复
+                                Some("reasoning") if !reasoning_part_seen => {
+                                    reasoning_part_seen = true;
+                                    parts.push(part.clone());
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -147,7 +178,7 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
                 };
                 let output = match msg.get("content") {
                     Some(Value::String(s)) => s.clone(),
-                    Some(v) => v.to_string(),
+                    Some(v) => serde_json::to_string(v).unwrap_or_default(),
                     None => String::new(),
                 };
                 json!({
@@ -163,6 +194,28 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
             _ => (*msg).clone(),
         })
         .collect();
+
+    // prompt_cache_key：在首个 user 消息的最后一个 text 块上注入 cache_control，
+    // 让上游把该块之前的内容作为 prompt cache 命中（OpenAI 风格缓存标记）。
+    // 消息中已有任何 cache_control 标记时跳过注入，避免重复标记。
+    if let Some(cache_key) = openai_req.get("prompt_cache_key").and_then(|v| v.as_str()) {
+        if !cache_key.is_empty() && !has_cache_marker(&cc_messages) {
+            if let Some(first_user) = cc_messages
+                .iter_mut()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            {
+                if let Some(content) = first_user.get_mut("content").and_then(|c| c.as_array_mut()) {
+                    if let Some(last_text) = content
+                        .iter_mut()
+                        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .last()
+                    {
+                        last_text["cache_control"] = json!({ "type": "ephemeral" });
+                    }
+                }
+            }
+        }
+    }
 
     let max_tokens = openai_req
         .get("max_tokens")
@@ -201,6 +254,11 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
 
     if !system_prompt.is_empty() {
         params.insert("system".into(), json!(system_prompt));
+    } else if empty_system_placeholder {
+        // 上游在 params.system 缺省时会注入自身约 7.5K token 的默认提示词
+        // （进入默认上下文/前缀路径），既产生大量 cached tokens 又污染对话。
+        // 发一个空格占位即可绕过。
+        params.insert("system".into(), json!(" "));
     }
     if let Some(t) = openai_req.get("temperature") {
         params.insert("temperature".into(), t.clone());
@@ -256,8 +314,39 @@ pub fn build_cc_request(openai_req: &Value) -> Value {
     body
 }
 
+/// 冲刷累积中的 assistant 消息：清理空字段后（无内容则丢弃）入队。
+fn flush_pending(pending: &mut Option<Value>, messages: &mut Vec<Value>) {
+    if let Some(mut p) = pending.take() {
+        // 空字段不保留，避免 CC 校验拒绝
+        let tool_calls_empty = p
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(true);
+        if tool_calls_empty {
+            p.as_object_mut().map(|o| o.remove("tool_calls"));
+        }
+        let reasoning_empty = p
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.is_empty())
+            .unwrap_or(true);
+        if reasoning_empty {
+            p.as_object_mut().map(|o| o.remove("reasoning_content"));
+        }
+        let keep = p.get("content").map(|c| !c.is_null()).unwrap_or(false)
+            || p.get("tool_calls").is_some()
+            || p.get("reasoning_content").is_some();
+        if keep {
+            messages.push(p);
+        }
+    }
+}
+
 /// OpenAI Responses 请求 → Chat Completions 请求（供 build_cc_request 复用）。
-/// 支持 Codex CLI 等客户端：input 字符串/条目数组、instructions、function_call 回灌等。
+/// 支持 Codex CLI 等客户端：input 字符串/条目数组、instructions、reasoning 回灌、
+/// function_call 回灌等。Responses 把 reasoning / message / function_call 拆成并列
+/// item，Chat 要求它们挂在同一条 assistant 消息上，故用 pending 累积再冲刷。
 pub fn convert_responses_to_openai(resp: &Value) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     if let Some(instructions) = resp.get("instructions").and_then(|v| v.as_str()) {
@@ -265,6 +354,33 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
             messages.push(json!({ "role": "system", "content": instructions }));
         }
     }
+
+    // 累积中的 assistant 消息：reasoning / message(assistant) / function_call 都并入它
+    let mut pending: Option<Value> = None;
+    let reasoning_of = |item: &Value| -> String {
+        if let Some(arr) = item.get("summary").and_then(|v| v.as_array()) {
+            let t = arr
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("");
+            if !t.is_empty() {
+                return t;
+            }
+        }
+        if let Some(arr) = item.get("content").and_then(|v| v.as_array()) {
+            let t = arr
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("");
+            if !t.is_empty() {
+                return t;
+            }
+        }
+        item.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+
     match resp.get("input") {
         Some(Value::String(s)) => messages.push(json!({ "role": "user", "content": s })),
         Some(Value::Array(items)) => {
@@ -274,21 +390,28 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
                     continue;
                 }
                 match item.get("type").and_then(|v| v.as_str()) {
+                    // reasoning 条目不回灌上游：转成 reasoning_content 并入 assistant
+                    Some("reasoning") => {
+                        let t = reasoning_of(item);
+                        if !t.is_empty() {
+                            let p = pending.get_or_insert_with(|| json!({ "role": "assistant", "content": Value::Null }));
+                            p["reasoning_content"] = json!(t);
+                        }
+                    }
                     Some("function_call") => {
-                        messages.push(json!({
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [{
-                                "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
-                                "type": "function",
-                                "function": {
-                                    "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                                    "arguments": item.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}"),
-                                },
-                            }],
+                        let p = pending.get_or_insert_with(|| json!({ "role": "assistant", "content": Value::Null, "tool_calls": [] }));
+                        let tcs = p["tool_calls"].as_array_mut().expect("tool_calls is array");
+                        tcs.push(json!({
+                            "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                            "type": "function",
+                            "function": {
+                                "name": item.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                                "arguments": item.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}"),
+                            },
                         }));
                     }
                     Some("function_call_output") => {
+                        flush_pending(&mut pending, &mut messages);
                         let output = match item.get("output") {
                             Some(Value::String(s)) => s.clone(),
                             Some(Value::Array(arr)) => arr
@@ -296,7 +419,7 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
                                 .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
                                 .collect::<Vec<_>>()
                                 .join(""),
-                            Some(v) => v.to_string(),
+                            Some(v) => serde_json::to_string(v).unwrap_or_default(),
                             None => String::new(),
                         };
                         messages.push(json!({
@@ -305,38 +428,60 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
                             "content": output,
                         }));
                     }
-                    // 历史 reasoning 条目不回灌上游
-                    Some("reasoning") => {}
                     _ => {
                         let role = match item.get("role").and_then(|v| v.as_str()).unwrap_or("user") {
                             "assistant" => "assistant",
                             "system" | "developer" => "system",
                             _ => "user",
                         };
-                        match item.get("content") {
-                            Some(Value::String(s)) => messages.push(json!({ "role": role, "content": s })),
-                            Some(Value::Array(parts)) => {
-                                let mapped: Vec<Value> = parts
-                                    .iter()
-                                    .filter_map(|p| {
-                                        match p.get("type").and_then(|t| t.as_str()) {
-                                            Some("input_text") | Some("output_text") | Some("text") => Some(json!({
-                                                "type": "text",
-                                                "text": p.get("text").and_then(|t| t.as_str()).unwrap_or(""),
-                                            })),
-                                            Some("input_image") => Some(json!({
-                                                "type": "image_url",
-                                                "image_url": { "url": p.get("image_url").and_then(|v| v.as_str()).unwrap_or("") },
-                                            })),
-                                            _ => None,
-                                        }
-                                    })
-                                    .collect();
-                                if !mapped.is_empty() {
-                                    messages.push(json!({ "role": role, "content": mapped }));
-                                }
+                        let content = item.get("content");
+                        if role == "assistant" {
+                            // assistant 消息累积进 pending（文本、reasoning 与 function_call 合并）
+                            let text = content
+                                .map(|c| match c {
+                                    Value::String(s) => s.clone(),
+                                    Value::Array(parts) => parts
+                                        .iter()
+                                        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                        .collect::<Vec<_>>()
+                                        .join(""),
+                                    _ => String::new(),
+                                })
+                                .unwrap_or_default();
+                            let p = pending.get_or_insert_with(|| json!({ "role": "assistant", "content": Value::Null }));
+                            if !text.is_empty() {
+                                p["content"] = json!(text);
                             }
-                            _ => {}
+                        } else {
+                            flush_pending(&mut pending, &mut messages);
+                            // user/system：保留 content 数组结构（text/image），字符串原样
+                            let msg = match content {
+                                Some(Value::String(s)) => json!({ "role": role, "content": s }),
+                                Some(Value::Array(parts)) => {
+                                    let mapped: Vec<Value> = parts
+                                        .iter()
+                                        .filter_map(|p| {
+                                            match p.get("type").and_then(|t| t.as_str()) {
+                                                Some("input_text") | Some("output_text") | Some("text") => Some(json!({
+                                                    "type": "text",
+                                                    "text": p.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                                                })),
+                                                Some("input_image") => Some(json!({
+                                                    "type": "image_url",
+                                                    "image_url": { "url": p.get("image_url").and_then(|v| v.as_str()).unwrap_or("") },
+                                                })),
+                                                _ => None,
+                                            }
+                                        })
+                                        .collect();
+                                    if mapped.is_empty() {
+                                        continue;
+                                    }
+                                    json!({ "role": role, "content": mapped })
+                                }
+                                _ => continue,
+                            };
+                            messages.push(msg);
                         }
                     }
                 }
@@ -344,6 +489,7 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
         }
         _ => {}
     }
+    flush_pending(&mut pending, &mut messages);
 
     let mut openai_req = json!({
         "model": resp.get("model").and_then(|v| v.as_str()).unwrap_or(DEFAULT_MODEL),
@@ -497,6 +643,7 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
         match msg.get("role").and_then(|r| r.as_str()) {
             Some("assistant") => {
                 let mut text_content = String::new();
+                let mut thinking_content = String::new();
                 let mut tool_calls: Vec<Value> = Vec::new();
                 let blocks = msg
                     .get("content")
@@ -513,6 +660,13 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                         Some("text") => {
                             if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
                                 text_content.push_str(t);
+                            }
+                        }
+                        // Anthropic 的 thinking 块承载思考内容，转成 reasoning_content
+                        // 交给 build_cc_request 回传，否则 CC 会因缺少 reasoning 而拒绝
+                        Some("thinking") => {
+                            if let Some(t) = block.get("thinking").and_then(|t| t.as_str()) {
+                                thinking_content.push_str(t);
                             }
                         }
                         Some("tool_use") => {
@@ -535,6 +689,9 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                     "role": "assistant",
                     "content": if text_content.is_empty() { Value::Null } else { json!(text_content) },
                 });
+                if !thinking_content.is_empty() {
+                    assistant_msg["reasoning_content"] = json!(thinking_content);
+                }
                 if !tool_calls.is_empty() {
                     assistant_msg["tool_calls"] = Value::Array(tool_calls);
                 }

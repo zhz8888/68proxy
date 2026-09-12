@@ -4,11 +4,12 @@
 //! 设备指纹与项目 slug 生成；集成测试用 axum 搭建 mock CC 上游，端到端验证
 //! 代理服务的流式/非流式转发、零输出限流、上游错误映射与鉴权行为。
 
+use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::Router;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::cc_client;
@@ -35,7 +36,7 @@ fn build_cc_request_basic_envelope() {
         "max_tokens": 1000,
         "stream": true,
     });
-    let cc = convert::build_cc_request(&req);
+    let cc = convert::build_cc_request(&req, true);
     assert_eq!(cc["params"]["model"], "deepseek/deepseek-v4-flash");
     assert_eq!(cc["params"]["system"], "你是助手");
     assert_eq!(cc["params"]["messages"][0]["role"], "user");
@@ -59,7 +60,7 @@ fn build_cc_request_developer_role_merged_into_system() {
             { "role": "user", "content": "你好" },
         ],
     });
-    let cc = convert::build_cc_request(&req);
+    let cc = convert::build_cc_request(&req, true);
     assert_eq!(cc["params"]["system"], "系统指令\n补充说明");
     let msgs = cc["params"]["messages"].as_array().unwrap();
     assert_eq!(msgs.len(), 1);
@@ -92,7 +93,7 @@ fn build_cc_request_image_and_tools() {
         "tools": [{ "type": "function", "function": { "name": "get_weather", "description": "天气", "parameters": { "type": "object" } } }],
         "tool_choice": "required",
     });
-    let cc = convert::build_cc_request(&req);
+    let cc = convert::build_cc_request(&req, true);
     let user_content = &cc["params"]["messages"][0]["content"];
     assert_eq!(user_content[0]["type"], "text");
     assert_eq!(user_content[1]["type"], "image");
@@ -108,6 +109,153 @@ fn build_cc_request_image_and_tools() {
     assert_eq!(cc["params"]["tool_choice"]["type"], "any");
     assert_eq!(cc["params"]["tools"][0]["name"], "get_weather");
     assert_eq!(cc["params"]["tools"][0]["input_schema"]["type"], "object");
+}
+
+/// 验证无 system 时 params.system 发空格占位（开关开启），关闭时缺省字段。
+#[test]
+fn build_cc_request_empty_system_placeholder() {
+    let req = json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "messages": [{ "role": "user", "content": "你好" }],
+    });
+    // 开关开启：无 system 时发空格占位，阻止上游注入默认提示词
+    let cc = convert::build_cc_request(&req, true);
+    assert_eq!(cc["params"]["system"], " ");
+    // 开关关闭：不写 system 字段
+    let cc2 = convert::build_cc_request(&req, false);
+    assert!(cc2["params"].get("system").is_none());
+}
+
+/// 验证 assistant 消息的 reasoning 回传：reasoning_content 字段与 content 数组内的
+/// reasoning part 均转为 CC 的 `{type:"reasoning"}`，且顺序为 [reasoning, text, tool-call]。
+#[test]
+fn build_cc_request_assistant_reasoning() {
+    let req = json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "messages": [
+            { "role": "user", "content": "思考后回答" },
+            {
+                "role": "assistant",
+                "content": "结论",
+                "reasoning_content": "我先想想",
+                "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "f", "arguments": "{}" } }],
+            },
+        ],
+    });
+    let cc = convert::build_cc_request(&req, true);
+    let parts = cc["params"]["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0]["type"], "reasoning");
+    assert_eq!(parts[0]["text"], "我先想想");
+    assert_eq!(parts[1]["type"], "text");
+    assert_eq!(parts[1]["text"], "结论");
+    assert_eq!(parts[2]["type"], "tool-call");
+
+    // content 数组内直接携带 reasoning part 时同样透传
+    let req2 = json!({
+        "model": "m",
+        "messages": [
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "content": [ { "type": "reasoning", "text": "思考中" }, { "type": "text", "text": "答复" } ] },
+        ],
+    });
+    let cc2 = convert::build_cc_request(&req2, true);
+    let parts2 = cc2["params"]["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(parts2[0]["type"], "reasoning");
+    assert_eq!(parts2[0]["text"], "思考中");
+    assert_eq!(parts2[1]["type"], "text");
+}
+
+/// 验证 prompt_cache_key 在首个 user 消息最后一个 text 块注入 cache_control；
+/// 消息已有 cache_control 标记时跳过注入。
+#[test]
+fn build_cc_request_prompt_cache_key() {
+    let req = json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "prompt_cache_key": "cache-abc-123456",
+        "messages": [
+            { "role": "system", "content": "sys" },
+            { "role": "user", "content": [
+                { "type": "text", "text": "开头" },
+                { "type": "text", "text": "结尾" },
+            ] },
+        ],
+    });
+    let cc = convert::build_cc_request(&req, true);
+    let content = cc["params"]["messages"][0]["content"].as_array().unwrap();
+    // 最后一个 text 块获得 cache_control
+    assert!(content[0].get("cache_control").is_none());
+    assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
+
+    // 已有 cache_control 时不重复注入
+    let req2 = json!({
+        "model": "m",
+        "prompt_cache_key": "cache-abc-123456",
+        "messages": [
+            { "role": "user", "content": [
+                { "type": "text", "text": "x", "cache_control": { "type": "ephemeral" } },
+            ] },
+        ],
+    });
+    let cc2 = convert::build_cc_request(&req2, true);
+    let parts2 = cc2["params"]["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(parts2.iter().filter(|p| p.get("cache_control").is_some()).count(), 1);
+}
+
+/// 验证 fingerprint 序列化为 camelCase（字段名与上游期望的格式一致）。
+#[test]
+fn fingerprint_camelcase_serialization() {
+    let fp = fingerprint::generate();
+    let v = serde_json::to_value(&fp).unwrap();
+    assert!(v["components"]["machineIdHash"].is_string());
+    assert!(v["components"]["macHashes"].is_array());
+    assert!(v["components"]["osUserHash"].is_string());
+    assert!(v["components"]["hostnameHash"].is_string());
+    assert!(v["components"]["gitEmailHash"].is_string());
+    assert!(v["components"]["cpuModel"].is_string());
+    assert!(v["components"]["memGiB"].is_number());
+    assert!(v["components"]["osRelease"].is_string());
+    assert!(v["components"]["collectorVersion"].is_number());
+}
+
+/// 验证 Anthropic 的 thinking 块转成 OpenAI reasoning_content（供 build_cc_request 回传）。
+#[test]
+fn anthropic_thinking_to_reasoning_content() {
+    let req = json!({
+        "model": "claude-sonnet-4-6",
+        "messages": [
+            { "role": "user", "content": "hi" },
+            {
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": "内部推理" },
+                    { "type": "text", "text": "答复" },
+                ],
+            },
+        ],
+    });
+    let openai = convert::convert_anthropic_to_openai(&req);
+    let assistant = &openai["messages"][1];
+    assert_eq!(assistant["reasoning_content"], "内部推理");
+    assert_eq!(assistant["content"], "答复");
+}
+
+/// 验证 Responses 的 reasoning 条目回灌进 assistant 消息的 reasoning_content。
+#[test]
+fn responses_reasoning_to_assistant() {
+    let req = json!({
+        "model": "gpt-5-codex",
+        "input": [
+            { "type": "message", "role": "user", "content": "hi" },
+            { "type": "reasoning", "id": "rs_1", "summary": [{ "type": "summary_text", "text": "思考过程" }] },
+            { "type": "message", "role": "assistant", "content": "答复" },
+        ],
+    });
+    let openai = convert::convert_responses_to_openai(&req);
+    let msgs = openai["messages"].as_array().unwrap();
+    let assistant = msgs.iter().find(|m| m["role"] == "assistant").unwrap();
+    assert_eq!(assistant["reasoning_content"], "思考过程");
+    assert_eq!(assistant["content"], "答复");
 }
 
 /// 验证 Anthropic Messages 请求转 OpenAI Chat 格式：system 置顶、assistant 的
@@ -383,6 +531,46 @@ fn api_key_extraction() {
     assert!(server::extract_api_key(&headers).is_none());
 }
 
+/// 验证 API Key 提取的 x-api-key 回退（Anthropic SDK 风格）：无 Authorization 头时
+/// 从 x-api-key 提取 user_ 前缀片段；无效则返回 None。
+#[test]
+fn api_key_extraction_x_api_key_fallback() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-api-key", "Bearer token_user_xyz_789".parse().unwrap());
+    assert_eq!(server::extract_api_key(&headers).unwrap(), "user_xyz_789");
+    headers.insert("x-api-key", "sk-abc".parse().unwrap());
+    assert!(server::extract_api_key(&headers).is_none());
+}
+
+/// 验证 Anthropic 翻译器把 reasoning-delta 转成 thinking 块（thinking_delta），
+/// 关闭 thinking 块时先发 signature_delta 假签名再 content_block_stop。
+#[test]
+fn anthropic_translator_thinking_block() {
+    let mut t = AnthropicTranslator::new("claude-sonnet-4-6", "msg_think");
+    let frames = t.process_line(r#"{"type":"reasoning-delta","text":"我在推理"}"#);
+    assert!(frames.iter().any(|f| f.contains("content_block_start") && f.contains("\"type\":\"thinking\"")));
+    assert!(frames.iter().any(|f| f.contains("thinking_delta") && f.contains("我在推理")));
+
+    // 关闭 thinking 块：先 signature_delta（base64 假签名）再 content_block_stop
+    let frames = t.process_line(r#"{"type":"text-delta","text":"正文"}"#);
+    assert!(frames.iter().any(|f| f.contains("signature_delta") && f.contains("signature")));
+    assert!(frames.iter().any(|f| f.contains("content_block_stop")));
+    assert!(frames.iter().any(|f| f.contains("text_delta") && f.contains("正文")));
+}
+
+/// 验证 Responses 翻译器的事件带递增 sequence_number 字段。
+#[test]
+fn responses_translator_sequence_number() {
+    let mut t = ResponsesTranslator::new("gpt-5-codex", "resp_seq");
+    let start = t.response_start();
+    assert!(start.contains("sequence_number"));
+    assert!(start.contains("\"sequence_number\":0"));
+    let frames = t.process_line(r#"{"type":"text-delta","text":"Hi"}"#);
+    assert!(frames[0].contains("sequence_number"));
+    // 首事件后 sequence_number 已递增到 1
+    assert!(frames[0].contains("\"sequence_number\":1"));
+}
+
 /// 验证生成指纹的结构约束：thumbmark 为 64 位十六进制、平台固定 win32、
 /// collector_version=1、MAC 哈希数量在 2-5 之间。
 #[test]
@@ -408,32 +596,48 @@ fn project_slug_format() {
 // ── 集成测试：mock 上游 ───────────────────────────────
 
 /// mock CC 上游路由：/alpha/generate 按模型名返回正常 NDJSON、零输出 NDJSON
-/// 或 429 错误；另提供指纹/生命周期/模型列表端点。
-fn mock_upstream() -> Router {
+/// 或 429 错误；model 为 `capture` 时把请求体与 zdr 头记录进 `captured` 供断言。
+fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
+    async fn generate(
+        State(captured): State<Option<Arc<Mutex<Value>>>>,
+        headers: axum::http::HeaderMap,
+        body: String,
+    ) -> axum::response::Response {
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        if let Some(cap) = &captured {
+            let mut c = cap.lock().unwrap();
+            c["body"] = parsed.clone();
+            c["zdr"] = json!(headers
+                .get("x-cmd-zdr")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(""));
+        }
+        if parsed["params"]["model"] == "zero-output" {
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":50,\"outputTokens\":0,\"cachedInputTokens\":40}}\n",
+            ));
+        }
+        if parsed["params"]["model"] == "slow" {
+            // 慢响应：sleep 300ms 模拟上游耗时，用于并发上限测试占用在途额度
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"Hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"cachedInputTokens\":3}}\n",
+            ));
+        }
+        if parsed["params"]["model"] == "upstream-error" {
+            return axum::response::Response::builder()
+                .status(429)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(r#"{"error":{"message":"rate limited"}}"#))
+                .unwrap();
+        }
+        axum::response::Response::new(axum::body::Body::from(
+            "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"Hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"cachedInputTokens\":3}}\n",
+        ))
+    }
+
     Router::new()
-        .route(
-            "/alpha/generate",
-            post(|body: String| async move {
-                let parsed: Value = serde_json::from_str(&body).unwrap();
-                if parsed["params"]["model"] == "zero-output" {
-                    return axum::response::Response::new(
-                        axum::body::Body::from(
-                            "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":50,\"outputTokens\":0,\"cachedInputTokens\":40}}\n",
-                        ),
-                    );
-                }
-                if parsed["params"]["model"] == "upstream-error" {
-                    return axum::response::Response::builder()
-                        .status(429)
-                        .header("Content-Type", "application/json")
-                        .body(axum::body::Body::from(r#"{"error":{"message":"rate limited"}}"#))
-                        .unwrap();
-                }
-                axum::response::Response::new(axum::body::Body::from(
-                    "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"Hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"cachedInputTokens\":3}}\n",
-                ))
-            }),
-        )
+        .route("/alpha/generate", post(generate))
         .route(
             "/alpha/fingerprint/record",
             post(|| async { axum::response::Response::new(axum::body::Body::from("{}")) }),
@@ -453,23 +657,30 @@ fn mock_upstream() -> Router {
                     .unwrap()
             }),
         )
+        .with_state(captured)
 }
 
 /// 启动 mock 上游与真实代理服务（api_base 指向 mock，不启用后台任务），
 /// 轮询等待服务就绪后返回（代理 base URL, 共享状态）。
-async fn start_proxy() -> (String, Arc<AppState>) {
+/// `captured` 传入时 mock 会把 generate 请求体记录进该容器；
+/// `adjust` 可对默认配置做覆盖（如 max_inflight）。
+async fn start_proxy_impl(
+    captured: Option<Arc<Mutex<Value>>>,
+    adjust: impl FnOnce(&mut Config),
+) -> (String, Arc<AppState>) {
     let mock = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mock_addr = mock.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(mock, mock_upstream()).await;
+        let _ = axum::serve(mock, mock_upstream(captured)).await;
     });
 
-    let cfg = Config {
+    let mut cfg = Config {
         api_base: format!("http://{mock_addr}"),
         port: 0, // 下面绑定真实端口
         auto_start_proxy: false,
         ..Config::default()
     };
+    adjust(&mut cfg);
     let state = AppState::new(cfg);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -486,6 +697,62 @@ async fn start_proxy() -> (String, Arc<AppState>) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     (format!("http://{addr}"), state)
+}
+
+/// 启动 mock 上游与真实代理服务（无捕获）。
+async fn start_proxy() -> (String, Arc<AppState>) {
+    start_proxy_impl(None, |_| {}).await
+}
+
+/// 启动 mock 上游与真实代理服务（带捕获）。
+async fn start_proxy_with_capture(captured: Option<Arc<Mutex<Value>>>) -> (String, Arc<AppState>) {
+    start_proxy_impl(captured, |_| {}).await
+}
+
+/// 端到端：max_inflight=1 时，第一个慢请求占用在途额度期间，第二个业务请求返回 503
+/// server_busy + Retry-After；/health 不受限制。
+#[tokio::test]
+async fn max_inflight_caps_concurrency() {
+    let (base, state) = start_proxy_impl(None, |c| c.max_inflight = 1).await;
+    let client = reqwest::Client::new();
+    // 慢请求在 mock 上游 sleep 300ms，期间占用在途额度
+    let slow_base = base.clone();
+    let client2 = client.clone();
+    let slow_handle = tokio::spawn(async move {
+        client2
+            .post(format!("{slow_base}/v1/chat/completions"))
+            .header("Authorization", "Bearer user_test_key")
+            .json(&json!({
+                "model": "slow",
+                "messages": [{ "role": "user", "content": "hi" }],
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+    // 等待慢请求进入在途（中间件计数 +1、mock 开始 sleep）
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 第二个业务请求超限 → 503
+    let second = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer user_test_key")
+        .json(&json!({
+            "model": "deepseek/deepseek-v4-flash",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 503);
+    let body: Value = second.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "server_busy");
+    assert_eq!(body["retry_after"], 5);
+
+    // 慢请求最终正常完成
+    let slow_res = slow_handle.await.unwrap();
+    assert_eq!(slow_res.status(), 200);
+    state.mark_stopped();
 }
 
 /// 端到端：Chat Completions 非流式请求返回 200，聚合文本为 Hello，
@@ -578,6 +845,36 @@ async fn upstream_error_mapped() {
     let body: Value = res.json().await.unwrap();
     assert_eq!(body["retry_after"], 30);
     assert_eq!(body["error"]["message"], "rate limited");
+    state.mark_stopped();
+}
+
+/// 端到端：无 system 请求默认发空格占位、ZDR 模式开启时上游收到 x-cmd-zdr 头。
+#[tokio::test]
+async fn empty_system_placeholder_and_zdr_header() {
+    let captured = Arc::new(Mutex::new(json!({})));
+    let (base, state) = start_proxy_with_capture(Some(captured.clone())).await;
+    // 开启 ZDR 模式并写入共享状态（模拟 config_save 后运行时配置热更新）
+    state.config.write().unwrap().zdr = true;
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer user_test_key")
+        .json(&json!({
+            "model": "deepseek/deepseek-v4-flash",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    let cap = captured.lock().unwrap();
+    // 无 system 时 params.system 为空格占位
+    assert_eq!(cap["body"]["params"]["system"], " ");
+    // ZDR 模式开启时 generate 请求携带 x-cmd-zdr: 1
+    assert_eq!(cap["zdr"], "1");
+    drop(cap);
     state.mark_stopped();
 }
 

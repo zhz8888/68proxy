@@ -5,7 +5,7 @@
 //! mpsc 通道把后台读流任务产出的帧交给响应流，实现首帧前可回退为普通 JSON 错误。
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::State;
 use axum::http::{header, HeaderMap};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -31,8 +31,6 @@ use super::sse::{AnthropicTranslator, OpenAiTranslator, ResponsesTranslator};
 use super::state::{now_millis, now_secs, AppState, RequestInfo};
 use super::usage::UsageEntry;
 
-/// 请求体大小上限：10 MiB。
-const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 /// 流式响应两次上游数据之间的最大空闲时间，超时判定为 Timeout。
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// 非流式响应等待上游完整结果的最大空闲时间。
@@ -66,11 +64,23 @@ fn emit_request(info: &RequestInfo) {
     }
 }
 
-/// 从 `Authorization: Bearer <key>` 头提取合法 API Key（user_ 前缀片段），无效返回 None。
+/// 从请求头提取合法 API Key（user_ 前缀片段）。
+///
+/// 优先 `Authorization: Bearer <key>`（OpenAI SDK 风格），回退 `x-api-key` 头
+/// （Anthropic SDK 风格）；无效返回 None。
 pub(crate) fn extract_api_key(headers: &HeaderMap) -> Option<String> {
-    let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let auth = auth.strip_prefix("Bearer ")?;
-    key_re().find(auth).map(|m| m.as_str().to_string())
+    let from_auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|a| a.strip_prefix("Bearer "))
+        .and_then(|k| key_re().find(k).map(|m| m.as_str().to_string()));
+    if from_auth.is_some() {
+        return from_auth;
+    }
+    headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|k| key_re().find(k).map(|m| m.as_str().to_string()))
 }
 
 /// 读取配置中的代理监听端口。
@@ -79,6 +89,9 @@ fn config_port(cfg: &Config) -> u16 {
 }
 
 /// 组装全部路由：三个协议入口 + /v1/models + /health，附请求体大小限制与宽松 CORS。
+///
+/// 请求体大小由各 handler 的 read_json_body 按 config.max_body_mb 限制（超限 413 并排空），
+/// 不再依赖 DefaultBodyLimit；并挂载在途请求计数中间件（config.max_inflight > 0 时超限 503）。
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
@@ -87,9 +100,42 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/models", get(models))
         .route("/health", get(health))
         .fallback(not_found)
-        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), inflight_guard))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
+}
+
+/// 在途请求计数中间件：`max_inflight > 0` 时对业务路径（/health、/ 除外）计数，
+/// 超限直接返回 503 server_busy + Retry-After: 5（OpenAI/Anthropic SDK 认得并自动退避）。
+async fn inflight_guard(
+    State(st): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // 探活路径不计数、不受限
+    let path = req.uri().path().to_string();
+    if path == "/health" || path == "/" {
+        return next.run(req).await;
+    }
+    let max = st.config.read().unwrap().max_inflight;
+    if max == 0 {
+        return next.run(req).await;
+    }
+    let cur = st.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+    if cur > max {
+        st.inflight.fetch_sub(1, Ordering::SeqCst);
+        return json_response(
+            503,
+            json!({
+                "error": { "message": "Server busy, too many in-flight requests", "type": "server_busy" },
+                "retry_after": 5,
+            }),
+            Some(5),
+        );
+    }
+    let resp = next.run(req).await;
+    st.inflight.fetch_sub(1, Ordering::SeqCst);
+    resp
 }
 
 /// 在给定 listener 上启动服务，收到 `shutdown` 信号后优雅停机。
@@ -105,6 +151,40 @@ pub async fn serve(
     let addr = listener.local_addr().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap());
     state.mark_started();
     log::info(&format!("68proxy listening on http://{}", addr));
+    // 启动状态打印：会话策略、配置开关、空闲超时、在途上限与请求体内存告警。
+    {
+        let cfg = state.config.read().unwrap().clone();
+        log::info(&format!(
+            "session: 12h + 1h jitter per API key | zdr: {} | emptySystemPlaceholder: {} | model refresh: {}s | stream idle: {}s | nonstream idle: {}s",
+            cfg.zdr,
+            cfg.empty_system_placeholder,
+            cfg.model_refresh_interval_ms / 1000,
+            STREAM_IDLE_TIMEOUT.as_secs(),
+            NONSTREAM_IDLE_TIMEOUT.as_secs(),
+        ));
+        if cfg.client_drain_timeout_ms > 0 {
+            log::info(&format!(
+                "client drain watchdog enabled ({}ms): stalled clients will be disconnected",
+                cfg.client_drain_timeout_ms
+            ));
+        }
+        if cfg.max_inflight > 0 {
+            log::info(&format!(
+                "in-flight request cap enabled (max {}): overflow returns 503 + Retry-After",
+                cfg.max_inflight
+            ));
+        }
+        // 请求体内存告警：转发前存在多份副本，峰值 ≈ body × 5.1~7.4（取 5.5 估算），
+        // 隐含最坏单请求峰值 ≥ 500MB 时提示。
+        let worst_mb = (cfg.max_body_mb as f64) * 5.5;
+        if worst_mb >= 500.0 {
+            log::warn(&format!(
+                "memory warning: max_body_mb={} implies worst-case ~{}MB per request; consider lowering CC_MAX_BODY_MB or adding an in-flight cap",
+                cfg.max_body_mb,
+                worst_mb.round() as u64
+            ));
+        }
+    }
 
     if with_background {
         // 后台任务：CC 版本刷新（启动 + 每 24h）、会话清理（每小时）
@@ -347,9 +427,47 @@ enum Frame {
     Error(String),
 }
 
-/// 解析请求体为 JSON，失败返回 Err（调用方回 400）。
-fn parse_json_body(body: Bytes) -> Result<Value, ()> {
-    serde_json::from_slice(&body).map_err(|_| ())
+/// 发送帧到下游通道。返回 false 表示下游不可写（客户端断连，或僵死超过
+/// `drain_timeout`），调用方应立即中止上游并退出。
+///
+/// `client_drain_timeout_ms` 为 0 时禁用僵死看门狗，仅依赖通道背压与断连检测。
+async fn send_frame(tx: &mpsc::Sender<Frame>, frame: Frame, drain_timeout: Duration) -> bool {
+    if drain_timeout.is_zero() {
+        return tx.send(frame).await.is_ok();
+    }
+    match tokio::time::timeout(drain_timeout, tx.send(frame)).await {
+        Ok(Ok(())) => true,
+        _ => {
+            log::warn("Client stalled on backpressure, dropping connection");
+            false
+        }
+    }
+}
+
+/// 流式读取请求体为 JSON。超过 `max_size` 时返回 413——剩余请求体交由
+/// hyper 自动排空（丢弃未读数据），使连接保持 keep-alive 可复用，
+/// 客户端收到明确的 413 而非 Connection reset。
+async fn read_json_body(
+    body: axum::body::Body,
+    max_size: usize,
+) -> Result<Value, (u16, &'static str, &'static str)> {
+    use futures_util::StreamExt as _;
+    let mut stream = body.into_data_stream();
+    let mut chunks: Vec<Bytes> = Vec::new();
+    let mut total = 0usize;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(_) => return Err((400, "invalid_request_error", "Invalid JSON body")),
+        };
+        total += chunk.len();
+        if total > max_size {
+            return Err((413, "invalid_request_error", "Request body exceeds limit"));
+        }
+        chunks.push(chunk);
+    }
+    let bytes: Vec<u8> = chunks.into_iter().flatten().collect();
+    serde_json::from_slice(&bytes).map_err(|_| (400, "invalid_request_error", "Invalid JSON body"))
 }
 
 /// 鉴权：优先取请求头中的 API Key，其次用本地缓存的 Key；都没有则返回 401 响应。
@@ -379,14 +497,15 @@ async fn api_key_or_401(headers: &HeaderMap) -> Result<String, axum::response::R
 async fn chat_completions(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> axum::response::Response {
-    let req = match parse_json_body(body) {
+    let max_body = (st.config.read().unwrap().max_body_mb as usize) * 1024 * 1024;
+    let req = match read_json_body(body, max_body).await {
         Ok(v) => v,
-        Err(_) => {
+        Err((status, err_type, msg)) => {
             return json_response(
-                400,
-                json!({ "error": { "message": "Invalid JSON body", "type": "invalid_request_error" } }),
+                status,
+                json!({ "error": { "message": msg, "type": err_type } }),
                 None,
             )
         }
@@ -401,6 +520,10 @@ async fn chat_completions(
         .and_then(|v| v.as_str())
         .unwrap_or(DEFAULT_MODEL)
         .to_string();
+    let prompt_cache_key = req
+        .get("prompt_cache_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let completion_id = format!("chatcmpl-{}", &uuid::Uuid::new_v4().to_string()[..12]);
     let ctx = ReqCtx {
         id: completion_id.clone(),
@@ -415,9 +538,10 @@ async fn chat_completions(
     };
     record_start(&st, &ctx);
 
-    let cc_body = convert::build_cc_request(&req);
+    let empty_placeholder = st.config.read().unwrap().empty_system_placeholder;
+    let cc_body = convert::build_cc_request(&req, empty_placeholder);
     cc_client::ensure_initialized(&st, &api_key).await;
-    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &headers).await {
+    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &headers, prompt_cache_key).await {
         Ok(r) => r,
         Err(e) => {
             log::error(&format!("Upstream error: {e}"));
@@ -459,14 +583,15 @@ async fn chat_completions(
 async fn messages(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> axum::response::Response {
-    let req = match parse_json_body(body) {
+    let max_body = (st.config.read().unwrap().max_body_mb as usize) * 1024 * 1024;
+    let req = match read_json_body(body, max_body).await {
         Ok(v) => v,
-        Err(_) => {
+        Err((status, err_type, msg)) => {
             return json_response(
-                400,
-                errors::anthropic_error(400, "invalid_request_error", "Invalid JSON body", None).1,
+                status,
+                errors::anthropic_error(status, err_type, msg, None).1,
                 None,
             )
         }
@@ -508,9 +633,10 @@ async fn messages(
     record_start(&st, &ctx);
 
     let openai_req = convert::convert_anthropic_to_openai(&req);
-    let cc_body = convert::build_cc_request(&openai_req);
+    let empty_placeholder = st.config.read().unwrap().empty_system_placeholder;
+    let cc_body = convert::build_cc_request(&openai_req, empty_placeholder);
     cc_client::ensure_initialized(&st, &api_key).await;
-    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &headers).await {
+    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &headers, None).await {
         Ok(r) => r,
         Err(e) => {
             log::error(&format!("Upstream error: {e}"));
@@ -560,14 +686,15 @@ async fn messages(
 async fn responses(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> axum::response::Response {
-    let req = match parse_json_body(body) {
+    let max_body = (st.config.read().unwrap().max_body_mb as usize) * 1024 * 1024;
+    let req = match read_json_body(body, max_body).await {
         Ok(v) => v,
-        Err(_) => {
+        Err((status, err_type, msg)) => {
             return json_response(
-                400,
-                json!({ "error": { "message": "Invalid JSON body", "type": "invalid_request_error" } }),
+                status,
+                json!({ "error": { "message": msg, "type": err_type } }),
                 None,
             )
         }
@@ -582,6 +709,10 @@ async fn responses(
         .and_then(|v| v.as_str())
         .unwrap_or(DEFAULT_MODEL)
         .to_string();
+    let prompt_cache_key = req
+        .get("prompt_cache_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let response_id = format!("resp_{}", &uuid::Uuid::new_v4().to_string()[..12]);
     let ctx = ReqCtx {
         id: response_id.clone(),
@@ -597,9 +728,10 @@ async fn responses(
     record_start(&st, &ctx);
 
     let openai_req = convert::convert_responses_to_openai(&req);
-    let cc_body = convert::build_cc_request(&openai_req);
+    let empty_placeholder = st.config.read().unwrap().empty_system_placeholder;
+    let cc_body = convert::build_cc_request(&openai_req, empty_placeholder);
     cc_client::ensure_initialized(&st, &api_key).await;
-    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &headers).await {
+    let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &headers, prompt_cache_key).await {
         Ok(r) => r,
         Err(e) => {
             log::error(&format!("Upstream error: {e}"));
@@ -777,23 +909,29 @@ async fn stream_openai(
     completion_id: String,
     endpoint: &'static str,
 ) {
+    let drain = Duration::from_millis(st.config.read().unwrap().client_drain_timeout_ms);
     let mut translator = OpenAiTranslator::new(&model, &completion_id);
     let mut stream = upstream.bytes_stream();
     let mut buffer = String::new();
     let mut last_event = String::new();
 
     loop {
+        // 下游已断开（接收端 drop 通道）时立即停止读取并关闭上游连接
+        if tx.is_closed() {
+            log::info("Client disconnected, aborting upstream");
+            return;
+        }
         let chunk = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
             Ok(Some(Ok(c))) => c,
             Ok(Some(Err(e))) => {
                 log::error(&format!("Stream read error: {e}"));
-                let _ = tx.send(Frame::Error(e.to_string())).await;
+                let _ = send_frame(&tx, Frame::Error(e.to_string()), drain).await;
                 return;
             }
             Ok(None) => break,
             Err(_) => {
                 log::warn("Stream idle timeout");
-                let _ = tx.send(Frame::Timeout).await;
+                let _ = send_frame(&tx, Frame::Timeout, drain).await;
                 return;
             }
         };
@@ -810,18 +948,18 @@ async fn stream_openai(
                 last_event = translator.last_cc_event.clone();
             }
             for f in frames {
-                if tx.send(Frame::Sse(f)).await.is_err() {
+                if !send_frame(&tx, Frame::Sse(f), drain).await {
                     return;
                 }
             }
         }
-        if !had_output && tx.send(Frame::Sse(": keepalive\n\n".into())).await.is_err() {
+        if !had_output && !send_frame(&tx, Frame::Sse(": keepalive\n\n".into()), drain).await {
             return;
         }
     }
     if !buffer.trim().is_empty() {
         for f in translator.parse_line(&buffer) {
-            if tx.send(Frame::Sse(f)).await.is_err() {
+            if !send_frame(&tx, Frame::Sse(f), drain).await {
                 return;
             }
         }
@@ -829,11 +967,11 @@ async fn stream_openai(
     update_ctx_tokens(&st, &completion_id, &translator.input_tokens, &translator.output_tokens, &translator.cached_tokens, &last_event);
     record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, 0, true);
     if translator.output_tokens == 0 {
-        let _ = tx.send(Frame::Sse(translator.zero_output_error_frame())).await;
-        let _ = tx.send(Frame::Done { zero_output: true }).await;
+        let _ = send_frame(&tx, Frame::Sse(translator.zero_output_error_frame()), drain).await;
+        let _ = send_frame(&tx, Frame::Done { zero_output: true }, drain).await;
     } else {
-        let _ = tx.send(Frame::Sse(translator.done_event())).await;
-        let _ = tx.send(Frame::Done { zero_output: false }).await;
+        let _ = send_frame(&tx, Frame::Sse(translator.done_event()), drain).await;
+        let _ = send_frame(&tx, Frame::Done { zero_output: false }, drain).await;
     }
 }
 
@@ -847,8 +985,9 @@ async fn stream_anthropic(
     message_id: String,
     endpoint: &'static str,
 ) {
+    let drain = Duration::from_millis(st.config.read().unwrap().client_drain_timeout_ms);
     let mut translator = AnthropicTranslator::new(&model, &message_id);
-    if tx.send(Frame::Sse(translator.message_start())).await.is_err() {
+    if !send_frame(&tx, Frame::Sse(translator.message_start()), drain).await {
         return;
     }
     let mut stream = upstream.bytes_stream();
@@ -856,17 +995,22 @@ async fn stream_anthropic(
     let mut last_event = String::new();
 
     loop {
+        // 下游已断开（接收端 drop 通道）时立即停止读取并关闭上游连接
+        if tx.is_closed() {
+            log::info("Client disconnected, aborting upstream");
+            return;
+        }
         let chunk = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
             Ok(Some(Ok(c))) => c,
             Ok(Some(Err(e))) => {
                 log::error(&format!("Stream read error: {e}"));
-                let _ = tx.send(Frame::Error(e.to_string())).await;
+                let _ = send_frame(&tx, Frame::Error(e.to_string()), drain).await;
                 return;
             }
             Ok(None) => break,
             Err(_) => {
                 log::warn("Stream idle timeout");
-                let _ = tx.send(Frame::Timeout).await;
+                let _ = send_frame(&tx, Frame::Timeout, drain).await;
                 return;
             }
         };
@@ -883,25 +1027,25 @@ async fn stream_anthropic(
                 last_event = translator.last_cc_event.clone();
             }
             for f in frames {
-                if tx.send(Frame::Sse(f)).await.is_err() {
+                if !send_frame(&tx, Frame::Sse(f), drain).await {
                     return;
                 }
             }
         }
-        if !had_output && tx.send(Frame::Sse(": keepalive\n\n".into())).await.is_err() {
+        if !had_output && !send_frame(&tx, Frame::Sse(": keepalive\n\n".into()), drain).await {
             return;
         }
     }
     if !buffer.trim().is_empty() {
         for f in translator.process_line(&buffer) {
-            if tx.send(Frame::Sse(f)).await.is_err() {
+            if !send_frame(&tx, Frame::Sse(f), drain).await {
                 return;
             }
         }
     }
     let zero = translator.output_tokens == 0;
     for f in translator.finalize() {
-        if tx.send(Frame::Sse(f)).await.is_err() {
+        if !send_frame(&tx, Frame::Sse(f), drain).await {
             return;
         }
     }
@@ -916,7 +1060,7 @@ async fn stream_anthropic(
         translator.cache_write_tokens.unwrap_or(0),
         true,
     );
-    let _ = tx.send(Frame::Done { zero_output: zero }).await;
+    let _ = send_frame(&tx, Frame::Done { zero_output: zero }, drain).await;
 }
 
 /// 后台任务：读上游字节流并经 ResponsesTranslator 翻译（流程同 stream_openai，
@@ -929,8 +1073,9 @@ async fn stream_responses(
     response_id: String,
     endpoint: &'static str,
 ) {
+    let drain = Duration::from_millis(st.config.read().unwrap().client_drain_timeout_ms);
     let mut translator = ResponsesTranslator::new(&model, &response_id);
-    if tx.send(Frame::Sse(translator.response_start())).await.is_err() {
+    if !send_frame(&tx, Frame::Sse(translator.response_start()), drain).await {
         return;
     }
     let mut stream = upstream.bytes_stream();
@@ -938,17 +1083,22 @@ async fn stream_responses(
     let mut last_event = String::new();
 
     loop {
+        // 下游已断开（接收端 drop 通道）时立即停止读取并关闭上游连接
+        if tx.is_closed() {
+            log::info("Client disconnected, aborting upstream");
+            return;
+        }
         let chunk = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
             Ok(Some(Ok(c))) => c,
             Ok(Some(Err(e))) => {
                 log::error(&format!("Stream read error: {e}"));
-                let _ = tx.send(Frame::Error(e.to_string())).await;
+                let _ = send_frame(&tx, Frame::Error(e.to_string()), drain).await;
                 return;
             }
             Ok(None) => break,
             Err(_) => {
                 log::warn("Stream idle timeout");
-                let _ = tx.send(Frame::Timeout).await;
+                let _ = send_frame(&tx, Frame::Timeout, drain).await;
                 return;
             }
         };
@@ -965,31 +1115,31 @@ async fn stream_responses(
                 last_event = translator.last_cc_event.clone();
             }
             for f in frames {
-                if tx.send(Frame::Sse(f)).await.is_err() {
+                if !send_frame(&tx, Frame::Sse(f), drain).await {
                     return;
                 }
             }
         }
-        if !had_output && tx.send(Frame::Sse(": keepalive\n\n".into())).await.is_err() {
+        if !had_output && !send_frame(&tx, Frame::Sse(": keepalive\n\n".into()), drain).await {
             return;
         }
     }
     if !buffer.trim().is_empty() {
         for f in translator.process_line(&buffer) {
-            if tx.send(Frame::Sse(f)).await.is_err() {
+            if !send_frame(&tx, Frame::Sse(f), drain).await {
                 return;
             }
         }
     }
     let zero = translator.output_tokens == 0;
     for f in translator.finalize() {
-        if tx.send(Frame::Sse(f)).await.is_err() {
+        if !send_frame(&tx, Frame::Sse(f), drain).await {
             return;
         }
     }
     update_ctx_tokens(&st, &response_id, &translator.input_tokens, &translator.output_tokens, &translator.cached_tokens, &last_event);
     record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, 0, true);
-    let _ = tx.send(Frame::Done { zero_output: zero }).await;
+    let _ = send_frame(&tx, Frame::Done { zero_output: zero }, drain).await;
 }
 
 /// 流结束后把上游回报的 token 统计与最后事件类型回填到请求队列对应条目。

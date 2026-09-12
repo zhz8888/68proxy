@@ -18,6 +18,16 @@ export interface Config {
   close_to_tray: boolean;
   usage_enabled: boolean;
   usage_retention_days: number;
+  /** 无 system prompt 时发空格占位（阻止上游注入默认提示词）。 */
+  empty_system_placeholder: boolean;
+  /** ZDR 模式：向 CC 上游发送 x-cmd-zdr: 1 请求头。 */
+  zdr: boolean;
+  /** 请求体大小上限（MB），超限请求返回 413。 */
+  max_body_mb: number;
+  /** 下游写缓冲背压僵死看门狗（毫秒），0 表示禁用。 */
+  client_drain_timeout_ms: number;
+  /** 进程内在途请求上限，0 表示不限。 */
+  max_inflight: number;
 }
 
 /** 代理运行状态：是否运行、监听地址、OpenAI/Anthropic 接入 URL、上游版本与运行时长。 */

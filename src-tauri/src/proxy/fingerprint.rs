@@ -65,7 +65,11 @@ fn rand_hex(rng: &mut impl Rng, bytes: usize) -> String {
 }
 
 /// 指纹明细字段（随机伪造的机器信息，全部为哈希或固定伪装值）。
+///
+/// 序列化为 camelCase（machineIdHash / macHashes / osUserHash / …），
+/// 字段名与上游期望的格式一致。
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FingerprintComponents {
     /// 伪装的机器 ID 哈希（SHA-256）。
     pub machine_id_hash: String,
@@ -88,6 +92,7 @@ pub struct FingerprintComponents {
     /// 对应 CPU 型号的逻辑核心数。
     pub cpu_count: u32,
     /// 随机选取的内存容量（GiB）。
+    #[serde(rename = "memGiB")]
     pub mem_gib: u32,
     /// 是否运行在容器中，固定 false（避免触发上游容器检测）。
     pub is_container: bool,

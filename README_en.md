@@ -44,7 +44,7 @@
 | 📦 **Models** | Models dynamically fetched from the Provider API (falls back to 30 built-in models on failure), with provider badges, search and one-click copy of model IDs |
 | 🔌 **Tool Integration** | Enter a target tool name and model to auto-generate an integration prompt — let AI wire up Cursor / OpenCode / Cherry Studio for you; it replies 「not supported」 when the protocol is incompatible, and also offers a removal prompt |
 | 🐞 **Debug Logs** | In-memory ring buffer with live push, level filter, keyword search, auto-scroll and one-click clear, plus export of the latest 1,000 entries |
-| ⚙️ **Settings** | Port / listen address (with port-in-use detection and one-click release), model source and refresh interval, startup behavior (auto-run, autostart, tray), log level, token usage tracking toggle and retention days, plaintext API key storage — changes saved automatically |
+| ⚙️ **Settings** | Port / listen address (with port-in-use detection and one-click release), model source and refresh interval, startup behavior (auto-run, autostart, tray), log level, token usage tracking toggle and retention days, plaintext API key storage — changes saved automatically; plus two CC upstream behavior toggles: "empty system placeholder" and "ZDR mode" |
 | 🎛️ **System Tray** | Minimize to tray; tray menu shows the window and start / stop / restart the proxy or quit |
 
 <p align="center">

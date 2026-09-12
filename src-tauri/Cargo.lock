@@ -2881,6 +2881,7 @@ name = "proxy68"
 version = "1.0.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "futures-util",

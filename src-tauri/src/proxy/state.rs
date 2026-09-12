@@ -97,6 +97,8 @@ pub struct AppState {
     pub cc_version: RwLock<String>,
     /// 连续超时计数，达到阈值后在超时错误中提示缩减上下文。
     pub consecutive_timeouts: AtomicU32,
+    /// 进程内在途请求计数（业务路径，/health 不计），配合 max_inflight 做并发上限。
+    pub inflight: AtomicU32,
     /// 代理服务是否正在监听。
     pub running: AtomicBool,
     /// 本轮启动时间（Unix 毫秒），停止后置 None。
@@ -124,6 +126,7 @@ impl AppState {
             }),
             cc_version: RwLock::new("0.32.3".into()),
             consecutive_timeouts: AtomicU32::new(0),
+            inflight: AtomicU32::new(0),
             running: AtomicBool::new(false),
             started_at: Mutex::new(None),
             requests: Mutex::new(VecDeque::new()),

@@ -86,14 +86,20 @@ pub fn fake_project_slug(session_id: &str) -> String {
 
 /// 解析本次请求应使用的会话 ID。
 ///
-/// 优先透传下游客户端头 `x-session-id` / `x-claude-code-session-id`（长度 ≥8 才采信），
-/// 否则回退到本地为该 Key 维护的会话（见 ensure_session）。
-fn get_session_id(state: &AppState, headers: &HeaderMap, api_key: &str) -> String {
-    for name in ["x-session-id", "x-claude-code-session-id"] {
+/// 优先透传下游客户端头 `x-session-id` / `x-claude-code-session-id` / `session_id`
+/// （长度 ≥8 才采信），其次是请求体的 prompt_cache_key，否则回退到本地为该 Key
+/// 维护的会话（见 ensure_session）。
+fn get_session_id(state: &AppState, headers: &HeaderMap, api_key: &str, prompt_cache_key: Option<&str>) -> String {
+    for name in ["x-session-id", "x-claude-code-session-id", "session_id"] {
         if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
             if v.len() >= 8 {
                 return v.to_string();
             }
+        }
+    }
+    if let Some(k) = prompt_cache_key {
+        if k.len() >= 8 {
+            return k.to_string();
         }
     }
     ensure_session(state, api_key)
@@ -149,9 +155,13 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str) {
         return;
     }
 
-    let headers = base_headers(state, api_key);
-    let fingerprint = get_or_create_key_state(state, api_key).fingerprint;
     let cfg = state.config.read().unwrap().clone();
+    let mut headers = base_headers(state, api_key);
+    // ZDR 模式开启时预请求也携带 x-cmd-zdr（与生成请求一致）
+    if cfg.zdr {
+        headers.insert("x-cmd-zdr", "1".parse().unwrap());
+    }
+    let fingerprint = get_or_create_key_state(state, api_key).fingerprint;
     let client = state.client.clone();
 
     // 两个初始化预请求的 URL 与请求体：上报指纹 + 上报 CLI 会话存活事件
@@ -226,17 +236,19 @@ fn base_headers(state: &AppState, api_key: &str) -> reqwest::header::HeaderMap {
 /// 转发到 CC API /alpha/generate。
 ///
 /// - `body`：已由 convert 模块构造好的 CLI 信封请求体；
-/// - `incoming_headers`：下游客户端请求头，用于透传会话 ID；
+/// - `incoming_headers`：下游客户端请求头，用于透传会话 ID 与 zdr 开关；
+/// - `prompt_cache_key`：请求体的 prompt_cache_key（兼作会话 ID 候选）；
 /// - 返回上游原始 `Response`（调用方负责读取 NDJSON 流与状态码）。
 pub async fn forward_to_cc(
     state: &AppState,
     body: &Value,
     api_key: &str,
     incoming_headers: &HeaderMap,
+    prompt_cache_key: Option<&str>,
 ) -> Result<Response, reqwest::Error> {
     let cfg = state.config.read().unwrap().clone();
     let url = format!("{}/alpha/generate", cfg.api_base);
-    let session_id = get_session_id(state, incoming_headers, api_key);
+    let session_id = get_session_id(state, incoming_headers, api_key, prompt_cache_key);
     let slug = fake_project_slug(&session_id);
 
     // 在公共头基础上补齐 CLI 会话/项目/链路追踪等伪装头
@@ -246,6 +258,10 @@ pub async fn forward_to_cc(
     headers.insert("x-taste-learning", "false".parse().unwrap());
     headers.insert("x-project-slug", slug.parse().unwrap());
     headers.insert("traceparent", generate_traceparent().parse().unwrap());
+    // ZDR 模式：配置开启或客户端请求头显式要求时发送 x-cmd-zdr: 1
+    if cfg.zdr || incoming_headers.get("x-cmd-zdr").and_then(|v| v.to_str().ok()) == Some("1") {
+        headers.insert("x-cmd-zdr", "1".parse().unwrap());
+    }
 
     state
         .client

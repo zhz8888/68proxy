@@ -1,8 +1,31 @@
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::convert::{map_anthropic_stop_reason, map_finish_reason};
 use super::log;
 use super::state::now_secs;
+
+/// 生成 Claude 格式的 thinking 假签名。
+///
+/// Anthropic 对 thinking signature 有密码学校验，第三方代理无法生成真签名；
+/// Claude Code 的浅校验只要求 base64 以 'E'（单层）/ 'R'（双层）开头且 payload
+/// 首字节为 0x12——此实现恰好满足，让 CC 能正常显示 thinking。payload 由思考文本
+/// SHA-256 派生，使每个块的签名互不相同。
+fn fake_thinking_signature(thinking_text: &str) -> String {
+    let source = if thinking_text.is_empty() {
+        "dsh-proxy-thinking"
+    } else {
+        thinking_text
+    };
+    let seed = Sha256::digest(source.as_bytes());
+    let seed = &seed[..seed.len().min(64)];
+    let mut raw = Vec::with_capacity(2 + seed.len());
+    raw.push(0x12);
+    raw.push(seed.len() as u8);
+    raw.extend_from_slice(seed);
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(&raw)
+}
 
 /// 组装一个 OpenAI chat.completion.chunk SSE 帧（`data: {...}\n\n`）。
 ///
@@ -235,6 +258,8 @@ pub struct ResponsesTranslator {
     /// 响应创建时间（Unix 秒）。
     created_at: u64,
     model: String,
+    /// 每个事件的递增序号（Responses 规范要求 sequence_number）。
+    seq: u32,
     /// 下一个 output 条目的全局下标（message 与 function_call 共享编号）。
     next_output_index: u32,
     /// 是否有尚未关闭的 message 文本条目。
@@ -268,6 +293,7 @@ impl ResponsesTranslator {
             response_id: response_id.to_string(),
             created_at: now_secs(),
             model: model.to_string(),
+            seq: 0,
             next_output_index: 0,
             text_open: false,
             text_item_id: String::new(),
@@ -296,9 +322,19 @@ impl ResponsesTranslator {
         })
     }
 
+    /// 组装带事件名的 Responses SSE 帧，payload 自动带 `type` 与递增的 `sequence_number`
+    /// （Responses 协议要求）。
+    fn sse(&mut self, name: &str, mut payload: Value) -> String {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("sequence_number".into(), serde_json::json!(self.seq));
+        }
+        self.seq += 1;
+        sse_event(name, payload)
+    }
+
     /// 流开始时的 response.created 事件（status 为 in_progress、output 为空）。
-    pub fn response_start(&self) -> String {
-        sse_event(
+    pub fn response_start(&mut self) -> String {
+        self.sse(
             "response.created",
             serde_json::json!({ "type": "response.created", "response": self.skeleton("in_progress", vec![]) }),
         )
@@ -324,11 +360,11 @@ impl ResponsesTranslator {
         let item_id = self.text_item_id.clone();
         let idx = self.text_item_index;
         let text = std::mem::take(&mut self.item_text);
-        out.push(sse_event(
+        out.push(self.sse(
             "response.output_text.done",
             serde_json::json!({ "type": "response.output_text.done", "item_id": item_id, "output_index": idx, "content_index": 0, "text": text }),
         ));
-        out.push(sse_event(
+        out.push(self.sse(
             "response.content_part.done",
             serde_json::json!({ "type": "response.content_part.done", "item_id": item_id, "output_index": idx, "content_index": 0, "part": { "type": "output_text", "text": text, "annotations": [] } }),
         ));
@@ -336,7 +372,7 @@ impl ResponsesTranslator {
             "type": "message", "id": item_id, "role": "assistant", "status": "completed",
             "content": [{ "type": "output_text", "text": text, "annotations": [] }],
         });
-        out.push(sse_event(
+        out.push(self.sse(
             "response.output_item.done",
             serde_json::json!({ "type": "response.output_item.done", "output_index": idx, "item": item }),
         ));
@@ -379,14 +415,14 @@ impl ResponsesTranslator {
                     self.text_item_id = format!("msg_{}", &uuid::Uuid::new_v4().to_string()[..12]);
                     self.text_open = true;
                     let item_id = self.text_item_id.clone();
-                    out.push(sse_event(
+                    out.push(self.sse(
                         "response.output_item.added",
                         serde_json::json!({
                             "type": "response.output_item.added", "output_index": idx,
                             "item": { "type": "message", "id": item_id, "role": "assistant", "status": "in_progress", "content": [] },
                         }),
                     ));
-                    out.push(sse_event(
+                    out.push(self.sse(
                         "response.content_part.added",
                         serde_json::json!({
                             "type": "response.content_part.added", "item_id": item_id, "output_index": idx, "content_index": 0,
@@ -395,7 +431,7 @@ impl ResponsesTranslator {
                     ));
                 }
                 self.item_text.push_str(text);
-                out.push(sse_event(
+                out.push(self.sse(
                     "response.output_text.delta",
                     serde_json::json!({
                         "type": "response.output_text.delta", "item_id": self.text_item_id,
@@ -424,21 +460,21 @@ impl ResponsesTranslator {
                     "type": "function_call", "id": format!("fc_{}", &uuid::Uuid::new_v4().to_string()[..12]),
                     "call_id": call_id, "name": name, "arguments": arguments, "status": "completed",
                 });
-                out.push(sse_event(
+                out.push(self.sse(
                     "response.output_item.added",
                     serde_json::json!({ "type": "response.output_item.added", "output_index": idx, "item": {
                         "type": "function_call", "id": item["id"], "call_id": call_id, "name": name, "arguments": "", "status": "in_progress",
                     } }),
                 ));
-                out.push(sse_event(
+                out.push(self.sse(
                     "response.function_call_arguments.delta",
                     serde_json::json!({ "type": "response.function_call_arguments.delta", "item_id": item["id"], "output_index": idx, "delta": arguments }),
                 ));
-                out.push(sse_event(
+                out.push(self.sse(
                     "response.function_call_arguments.done",
                     serde_json::json!({ "type": "response.function_call_arguments.done", "item_id": item["id"], "output_index": idx, "arguments": arguments }),
                 ));
-                out.push(sse_event(
+                out.push(self.sse(
                     "response.output_item.done",
                     serde_json::json!({ "type": "response.output_item.done", "output_index": idx, "item": item }),
                 ));
@@ -471,7 +507,7 @@ impl ResponsesTranslator {
                     .and_then(|v| v.as_str())
                     .or_else(|| event.get("message").and_then(|v| v.as_str()))
                     .unwrap_or("Unknown CC error");
-                out.push(sse_event(
+                out.push(self.sse(
                     "response.failed",
                     serde_json::json!({
                         "type": "response.failed",
@@ -499,7 +535,7 @@ impl ResponsesTranslator {
         }
         self.close_text_item(&mut out);
         if self.output_tokens == 0 {
-            out.push(sse_event(
+            out.push(self.sse(
                 "response.failed",
                 serde_json::json!({
                     "type": "response.failed",
@@ -517,7 +553,7 @@ impl ResponsesTranslator {
             response["incomplete_details"] = serde_json::json!({ "reason": "max_output_tokens" });
         }
         response["usage"] = self.usage_value();
-        out.push(sse_event(
+        out.push(self.sse(
             "response.completed",
             serde_json::json!({ "type": "response.completed", "response": response }),
         ));
@@ -534,10 +570,14 @@ pub struct AnthropicTranslator {
     next_block_index: u32,
     /// 当前打开的 content block index，-1 表示没有打开的块。
     current_block_index: i32,
-    /// 当前打开块的类型（"text" 或空）。
+    /// 当前打开块的类型（"text"、"thinking" 或空）。
     current_block_type: &'static str,
     /// 是否已发出当前块的 content_block_start 事件。
     block_started: bool,
+    /// 当前打开的 thinking 块累计文本（关闭时用于派生假签名）。
+    current_thinking_text: String,
+    /// 上游 inputTokenDetails.noCacheTokens（Anthropic 的 input_tokens 只计非缓存部分）。
+    no_cache_tokens: Option<u64>,
     /// 上游 finishReason 映射后的 Anthropic stop_reason。
     stop_reason: Option<String>,
     /// 最近一次解析到的 CC 事件类型（供请求追踪展示）。
@@ -564,6 +604,8 @@ impl AnthropicTranslator {
             current_block_index: -1,
             current_block_type: "",
             block_started: false,
+            current_thinking_text: String::new(),
+            no_cache_tokens: None,
             stop_reason: None,
             last_cc_event: String::new(),
             input_tokens: 0,
@@ -592,38 +634,63 @@ impl AnthropicTranslator {
         )
     }
 
-    /// 若当前打开的是 text 块则发出 content_block_stop，否则返回空串。
-    fn close_text_block(&mut self) -> String {
-        if self.block_started && self.current_block_type == "text" {
+    /// 关闭当前打开的块（text 或 thinking），返回需要下发的帧；无打开块时返回空串。
+    ///
+    /// thinking 块关闭前先发 `signature_delta`（Anthropic 标准，供 Claude Code 显示
+    /// 思考内容），签名由累计的思考文本派生。
+    fn close_block(&mut self) -> String {
+        if self.block_started {
+            let idx = self.current_block_index;
+            let block_type = self.current_block_type;
+            let mut out = String::new();
+            if block_type == "thinking" {
+                let signature = fake_thinking_signature(&self.current_thinking_text);
+                self.current_thinking_text.clear();
+                out.push_str(&format!(
+                    "event: content_block_delta\ndata: {}\n\n",
+                    serde_json::json!({ "type": "content_block_delta", "index": idx, "delta": { "type": "signature_delta", "signature": signature } })
+                ));
+            }
             self.block_started = false;
             self.current_block_type = "";
-            let idx = self.current_block_index;
-            return format!(
+            out.push_str(&format!(
                 "event: content_block_stop\ndata: {}\n\n",
                 serde_json::json!({ "type": "content_block_stop", "index": idx })
-            );
+            ));
+            out
+        } else {
+            String::new()
         }
-        String::new()
     }
 
-    /// 确保有一个打开的 text 块：若当前块类型不符，先关闭旧块再发出新的
+    /// 确保有一个打开的指定类型块：若当前块类型不符，先关闭旧块再发出新的
     /// content_block_start，返回需要下发的帧（可能包含关闭旧块的事件）。
-    fn start_text_block(&mut self) -> String {
-        if !self.block_started || self.current_block_type != "text" {
-            let close = self.close_text_block();
+    fn start_block(&mut self, block_type: &'static str, content_block: Value) -> String {
+        if !self.block_started || self.current_block_type != block_type {
+            let close = self.close_block();
             self.current_block_index = self.next_block_index as i32;
             self.next_block_index += 1;
-            self.current_block_type = "text";
+            self.current_block_type = block_type;
             self.block_started = true;
             let idx = self.current_block_index;
             close
                 + &format!(
                     "event: content_block_start\ndata: {}\n\n",
-                    serde_json::json!({ "type": "content_block_start", "index": idx, "content_block": { "type": "text", "text": "" } })
+                    serde_json::json!({ "type": "content_block_start", "index": idx, "content_block": content_block })
                 )
         } else {
             String::new()
         }
+    }
+
+    /// 确保有一个打开的 text 块。
+    fn start_text_block(&mut self) -> String {
+        self.start_block("text", serde_json::json!({ "type": "text", "text": "" }))
+    }
+
+    /// 确保有一个打开的 thinking 块。
+    fn start_thinking_block(&mut self) -> String {
+        self.start_block("thinking", serde_json::json!({ "type": "thinking", "thinking": "" }))
     }
 
     /// 解析一行 CC NDJSON 事件，返回需下发的 Anthropic SSE 事件列表（可能为空）。
@@ -648,8 +715,24 @@ impl AnthropicTranslator {
 
         match event_type {
             "start" | "start-step" | "text-start" | "reasoning-start" => {}
-            // Anthropic 协议无对应增量类型，推理内容直接丢弃
-            "reasoning-delta" => {}
+            // CC reasoning → Anthropic thinking 块（Claude Code 将其显示为思考内容）
+            "reasoning-delta" => {
+                let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    return out;
+                }
+                let start_block = self.start_thinking_block();
+                if !start_block.is_empty() {
+                    out.push(start_block);
+                }
+                self.current_thinking_text.push_str(text);
+                let idx = self.current_block_index;
+                out.push(format!(
+                    "event: content_block_delta\ndata: {}\n\n",
+                    serde_json::json!({ "type": "content_block_delta", "index": idx, "delta": { "type": "thinking_delta", "thinking": text } })
+                ));
+                // thinking 文本不计入 output_tokens（Anthropic 的 output_tokens 只含正文）
+            }
             "text-delta" => {
                 let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
                 let start_block = self.start_text_block();
@@ -664,7 +747,7 @@ impl AnthropicTranslator {
                 self.output_tokens += 1;
             }
             "tool-call" => {
-                let close_block = self.close_text_block();
+                let close_block = self.close_block();
                 if !close_block.is_empty() {
                     out.push(close_block);
                 }
@@ -717,6 +800,9 @@ impl AnthropicTranslator {
                     self.cache_write_tokens = u
                         .pointer("/inputTokenDetails/cacheWriteTokens")
                         .and_then(|v| v.as_u64());
+                    if let Some(nc) = u.pointer("/inputTokenDetails/noCacheTokens").and_then(|v| v.as_u64()) {
+                        self.no_cache_tokens = Some(nc);
+                    }
                 } else {
                     // 上游未回报 usage：清零估算值，避免 message_delta 上报虚高 token
                     self.input_tokens = 0;
@@ -745,14 +831,15 @@ impl AnthropicTranslator {
         out
     }
 
-    /// 流结束收尾：关闭 text 块后补发 message_delta + message_stop；
-    /// 零输出时改发 error 帧（rate_limit_error + retry_after），已出错过则返回空。
+    /// 流结束收尾：关闭打开的块（thinking 先发 signature_delta）后补发
+    /// message_delta + message_stop；零输出时改发 error 帧（rate_limit_error +
+    /// retry_after），已出错过则返回空。
     pub fn finalize(&mut self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         if self.has_error {
             return out;
         }
-        let close_block = self.close_text_block();
+        let close_block = self.close_block();
         if !close_block.is_empty() {
             out.push(close_block);
         }
@@ -766,6 +853,15 @@ impl AnthropicTranslator {
                 })
             ));
         } else {
+            // Anthropic 的 input_tokens 只计非缓存部分：优先取上游
+            // noCacheTokens，缺失时用总数减缓存命中与缓存写入估算。
+            let input_tokens = match self.no_cache_tokens {
+                Some(nc) => nc,
+                None => self
+                    .input_tokens
+                    .saturating_sub(self.cached_tokens)
+                    .saturating_sub(self.cache_write_tokens.unwrap_or(0)),
+            };
             out.push(format!(
                 "event: message_delta\ndata: {}\n\n",
                 serde_json::json!({
@@ -775,7 +871,7 @@ impl AnthropicTranslator {
                         "output_tokens": self.output_tokens,
                         "cache_read_input_tokens": self.cached_tokens,
                         "cache_creation_input_tokens": self.cache_write_tokens,
-                        "input_tokens": self.input_tokens,
+                        "input_tokens": input_tokens,
                     },
                 })
             ));
