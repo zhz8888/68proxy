@@ -41,7 +41,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { api, type AccountEntry, type ApiKeyState, type Config } from "@/lib/api";
+import { api, type AccountEntry, type AccountQuota, type ApiKeyState, type Config } from "@/lib/api";
+import { QuotaDetail } from "@/components/QuotaDetail";
 
 // 配置项默认值，字段与后端 config.json 一一对应
 const DEFAULTS: Config = {
@@ -137,6 +138,11 @@ export function ConfigView() {
   // 账户改名状态（editingId 为正在改名的 userId）
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  // 账户详情弹窗（展示该账户完整额度）
+  const [detailAccount, setDetailAccount] = useState<AccountEntry | null>(null);
+  const [detailQuota, setDetailQuota] = useState<AccountQuota | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
   const [portInUse, setPortInUse] = useState<{ in_use: boolean; pid: number | null }>({
     in_use: false,
     pid: null,
@@ -286,6 +292,21 @@ export function ConfigView() {
       toast.success("CC 账户已添加");
     } catch (e) {
       toast.error(String(e));
+    }
+  }
+
+  /** 打开账户详情弹窗并加载该账户的完整额度。 */
+  async function openAccountDetail(a: AccountEntry) {
+    setDetailAccount(a);
+    setDetailQuota(null);
+    setDetailError("");
+    setDetailLoading(true);
+    try {
+      setDetailQuota(await api.accountQuota(a.userId));
+    } catch (e) {
+      setDetailError(String(e));
+    } finally {
+      setDetailLoading(false);
     }
   }
 
@@ -638,10 +659,15 @@ export function ConfigView() {
                       </div>
                       <span className="truncate font-mono text-xs text-muted-foreground">{a.masked}</span>
                     </div>
-                    <Button variant="ghost" size="sm" onClick={() => removeAccount(a.index)}>
-                      <Trash2 />
-                      移除
-                    </Button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Button variant="ghost" size="sm" onClick={() => openAccountDetail(a)}>
+                        额度详情
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => removeAccount(a.index)}>
+                        <Trash2 />
+                        移除
+                      </Button>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -673,6 +699,33 @@ export function ConfigView() {
             </div>
           </div>
         </Section>
+
+        {/* 账户额度详情弹窗 */}
+        <Dialog open={detailAccount !== null} onOpenChange={(open) => { if (!open) setDetailAccount(null); }}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>账户额度详情</DialogTitle>
+              <DialogDescription>{detailAccount?.userName || detailAccount?.masked}</DialogDescription>
+            </DialogHeader>
+            <div className="py-2">
+              {detailLoading ? (
+                <p className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在获取账户额度…
+                </p>
+              ) : detailError ? (
+                <p className="py-4 text-sm text-destructive">{detailError}</p>
+              ) : detailQuota ? (
+                <QuotaDetail quota={detailQuota} />
+              ) : null}
+            </div>
+            <DialogFooter>
+              <Button variant="secondary" onClick={() => setDetailAccount(null)}>
+                关闭
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* 浏览器授权登录弹窗 */}
         <Dialog open={loginOpen} onOpenChange={(open) => { if (!open) closeLoginDialog(); }}>

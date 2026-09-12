@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, AlertTriangle, Trash2 } from "lucide-react";
+import { Activity, AlertTriangle, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ModelLogo } from "@/components/ModelLogo";
@@ -25,10 +25,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api, onStats, type UsageChartPoint, type UsageGroupRow, type UsagePeriod, type UsageStats } from "@/lib/api";
+import { api, onStats, type AccountQuota, type UsageChartPoint, type UsageGroupRow, type UsagePeriod, type UsageStats } from "@/lib/api";
 import { formatCost, formatLogTime, formatTokens } from "@/lib/format";
 import { lampForStatus } from "@/lib/status";
 import { cn } from "@/lib/utils";
+import { LimitWindowRow, MeterBar } from "@/components/QuotaDetail";
 
 /** 时间范围选项：值与中文标签。 */
 const PERIODS: Array<{ value: UsagePeriod; label: string }> = [
@@ -80,6 +81,52 @@ function GroupRowLine({ row }: { row: UsageGroupRow }) {
   );
 }
 
+/** 账户额度紧凑行：套餐 + 剩余额度 + 月/购买/赠送 + 5h/周窗口限额。 */
+function QuotaRow({ q }: { q: AccountQuota }) {
+  return (
+    <div className="space-y-2 rounded-md border border-border/70 bg-secondary/20 px-3 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-sm font-medium text-foreground">{q.user_name}</span>
+          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {q.plan_name}
+          </span>
+          {q.status && (
+            <span className={cn("shrink-0 text-[10px]", q.status === "active" ? "text-signal-success" : "text-signal-warn")}>
+              {q.status}
+            </span>
+          )}
+        </div>
+        <span className="shrink-0 font-mono text-xs">
+          {formatCost(q.total_remaining)}
+          {q.total_pool > 0 && <span className="text-muted-foreground"> / {formatCost(q.total_pool)}</span>}
+        </span>
+      </div>
+      {q.error ? (
+        <p className="text-xs text-destructive">额度获取失败：{q.error}</p>
+      ) : !q.has_billing ? (
+        <p className="text-xs text-muted-foreground">暂无计费数据</p>
+      ) : (
+        <>
+          <MeterBar pct={q.usage_percent} />
+          <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+            <span>月 <span className="font-mono text-foreground/80">{formatCost(q.monthly_remaining)}</span></span>
+            <span>购买 <span className="font-mono text-foreground/80">{formatCost(q.purchased_remaining)}</span></span>
+            <span>赠送 <span className="font-mono text-foreground/80">{formatCost(q.free_remaining)}</span></span>
+            {q.total_spent > 0 && <span>本期消耗 <span className="font-mono text-foreground/80">{formatCost(q.total_spent)}</span></span>}
+          </div>
+          {(q.five_hour || q.weekly) && (
+            <div className="grid grid-cols-2 gap-3 pt-0.5">
+              {q.five_hour && <LimitWindowRow label="5 小时" win={q.five_hour} />}
+              {q.weekly && <LimitWindowRow label="每周" win={q.weekly} />}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 /** 用量统计视图：汇总卡片、趋势图、按模型/端点分组表与最近请求明细。 */
 export function StatsView() {
   const [period, setPeriod] = useState<UsagePeriod>("7d");
@@ -89,6 +136,9 @@ export function StatsView() {
   const [groupBy, setGroupBy] = useState<"model" | "endpoint">("model");
   const [confirmClear, setConfirmClear] = useState(false);
   const [loadError, setLoadError] = useState("");
+  // 账户额度快照（全部 CC 账户）
+  const [quotas, setQuotas] = useState<AccountQuota[]>([]);
+  const [quotaLoading, setQuotaLoading] = useState(false);
   // 每次请求的序号：仅当结果仍属于最新一次请求时才落库，避免快速切换周期时旧结果覆盖新结果
   const reqSeq = useRef(0);
 
@@ -108,9 +158,23 @@ export function StatsView() {
     }
   }, []);
 
+  /** 拉取账户额度（失败不阻塞统计页其他数据）。 */
+  const refreshQuota = useCallback(async () => {
+    setQuotaLoading(true);
+    try {
+      setQuotas(await api.accountsQuota());
+    } catch {
+      // 额度是附加信息，拉取失败时清空即可，页面另有统计错误提示位
+      setQuotas([]);
+    } finally {
+      setQuotaLoading(false);
+    }
+  }, []);
+
   // 挂载时加载数据，订阅用量更新事件（节流合并），并以 3 秒轮询兜底
   useEffect(() => {
     refresh(period);
+    refreshQuota();
     // 后端用量事件最密可达约 5 次/秒，这里合并为最多每 1 秒刷新一次，避免高频重量级查询
     let debounce: ReturnType<typeof setTimeout> | null = null;
     const off = onStats(() => {
@@ -126,7 +190,7 @@ export function StatsView() {
       if (debounce) clearTimeout(debounce);
       clearInterval(timer);
     };
-  }, [period, refresh]);
+  }, [period, refresh, refreshQuota]);
 
   /** 清空统计：确认后调用后端并刷新。 */
   async function clearAll() {
@@ -189,6 +253,33 @@ export function StatsView() {
 
       <ScrollArea className="flex-1 rounded-lg border border-border bg-card/60">
         <div className="space-y-4 p-4">
+          {/* 账户剩余额度：显示全部 CC 账户的套餐余额与窗口限额 */}
+          {quotas.length > 0 && (
+            <Card>
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-sm">账户剩余额度</CardTitle>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    disabled={quotaLoading}
+                    onClick={refreshQuota}
+                  >
+                    <RefreshCw className={quotaLoading ? "animate-spin" : ""} />
+                    刷新
+                  </Button>
+                </div>
+                <CardDescription>各 CC 上游账户的套餐余额与 5 小时 / 周窗口限额（额度实时来自上游）</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2 pt-0">
+                {quotas.map((q, i) => (
+                  <QuotaRow key={`${q.masked_key}-${i}`} q={q} />
+                ))}
+              </CardContent>
+            </Card>
+          )}
+
           {/* 汇总卡片行 */}
           <div className="grid grid-cols-5 gap-3">
             <SummaryCard title="总请求数" value={formatTokens(stats?.total_requests ?? 0)} />

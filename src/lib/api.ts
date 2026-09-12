@@ -226,6 +226,44 @@ export interface PlanStatus {
   access: Record<string, ModelAccessInfo>;
 }
 
+/** 限额窗口（5 小时 / 周）：used 为已用量，cap 为上限，resetAt 为重置时间（毫秒）。 */
+export interface LimitWindow {
+  used: number;
+  cap: number;
+  reset_at: number | null;
+}
+
+/** 组织级消费限额行。 */
+export interface OrgLimit {
+  label: string;
+  pct: number;
+  reached: boolean;
+}
+
+/** 单个账户的额度快照（来自上游 whoami/subscriptions/credits/summary）。 */
+export interface AccountQuota {
+  user_name: string;
+  masked_key: string;
+  plan_id: string | null;
+  plan_name: string;
+  status: string | null;
+  monthly_remaining: number;
+  purchased_remaining: number;
+  free_remaining: number;
+  total_remaining: number;
+  total_pool: number;
+  total_spent: number;
+  usage_percent: number;
+  has_billing: boolean;
+  days_left: number | null;
+  period_start: number | null;
+  period_end: number | null;
+  five_hour: LimitWindow | null;
+  weekly: LimitWindow | null;
+  org_limits: OrgLimit[];
+  error: string | null;
+}
+
 /** 后端 Tauri 命令的类型化封装，前端所有 IPC 调用统一经由此对象。 */
 export const api = {
   // 代理生命周期：启动 / 停止 / 重启 / 查询状态，均返回最新 ProxyStatus
@@ -259,6 +297,9 @@ export const api = {
   modelsCatalog: () => invoke<ModelPricing[]>("models_catalog"),
   // 当前账户套餐信息与各模型准入结果（force 时强制刷新上游缓存）
   planStatus: (force = false) => invoke<PlanStatus>("plan_status", { force }),
+  // 全部账户的额度快照 / 指定账户的额度快照（账户详情）
+  accountsQuota: () => invoke<AccountQuota[]>("accounts_quota"),
+  accountQuota: (userId: string) => invoke<AccountQuota>("account_quota", { userId }),
   // 日志：按序号增量拉取 / 清空 / 导出到文件（返回条数）
   logsGet: (limit = 200, afterSeq = 0) => invoke<LogEntry[]>("logs_get", { limit, afterSeq }),
   logsClear: () => invoke<void>("logs_clear"),

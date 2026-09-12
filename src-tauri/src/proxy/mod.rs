@@ -13,6 +13,7 @@ pub mod fingerprint;
 pub mod log;
 pub mod plans;
 pub mod pricing;
+pub mod quota;
 pub mod server;
 pub mod settings;
 pub mod sse;

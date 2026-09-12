@@ -340,7 +340,7 @@ pub fn evaluate_access(model_id: &str, ctx: &PlanContext) -> AccessInfo {
 }
 
 /// 取一个 JSON 端点（GET，Bearer 鉴权，10s 超时），失败返回 None。
-async fn get_json(state: &AppState, url: &str, api_key: &str) -> Option<Value> {
+pub(crate) async fn get_json(state: &AppState, url: &str, api_key: &str) -> Option<Value> {
     let fut = state
         .client
         .get(url)

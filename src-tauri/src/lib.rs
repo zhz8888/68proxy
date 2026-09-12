@@ -317,6 +317,43 @@ async fn plan_status(app: AppHandle, force: bool) -> Result<Value, String> {
     Ok(proxy::plans::plan_status_json(&plan))
 }
 
+/// 获取全部 CC 账户的额度快照（套餐、月/购买/赠送余额、5 小时与周窗口限额、组织限额）。
+///
+/// 各账户并发拉取，单个账户失败只影响该条记录（带 `error` 字段），不影响其余账户。
+#[tauri::command]
+async fn accounts_quota(app: AppHandle) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let accounts = credentials::accounts_from_state(&ctx.proxy_state);
+    if accounts.is_empty() {
+        return Ok(json!([]));
+    }
+    let futs = accounts.into_iter().map(|a| {
+        let st = ctx.proxy_state.clone();
+        let name = if a.user_name.is_empty() { a.user_id.clone() } else { a.user_name.clone() };
+        let masked = credentials::mask_key(&a.key);
+        async move { proxy::quota::fetch_account_quota(&st, &name, &masked, &a.key).await }
+    });
+    let list = futures_util::future::join_all(futs).await;
+    Ok(serde_json::to_value(list).map_err(|e| format!("序列化额度失败: {e}"))?)
+}
+
+/// 获取指定 userId 账户的额度快照（账户详情用）。
+///
+/// `userId` 为账户唯一标识；未找到该账户时返回错误。
+#[tauri::command]
+async fn account_quota(app: AppHandle, #[allow(non_snake_case)] userId: String) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let accounts = credentials::accounts_from_state(&ctx.proxy_state);
+    let Some(a) = accounts.iter().find(|a| a.user_id == userId) else {
+        return Err(format!("未找到 userId 为 {userId} 的账户"));
+    };
+    let name = if a.user_name.is_empty() { a.user_id.clone() } else { a.user_name.clone() };
+    let masked = credentials::mask_key(&a.key);
+    let quota =
+        proxy::quota::fetch_account_quota(&ctx.proxy_state, &name, &masked, &a.key).await;
+    Ok(serde_json::to_value(quota).map_err(|e| format!("序列化额度失败: {e}"))?)
+}
+
 /// 增量拉取内存日志：`limit` 最多返回条数（默认 200），`after_seq` 只返回序号大于它的条目。
 #[tauri::command]
 fn logs_get(limit: Option<usize>, after_seq: Option<u64>) -> Value {
@@ -714,6 +751,8 @@ pub fn run() {
             models_get,
             models_catalog,
             plan_status,
+            accounts_quota,
+            account_quota,
             logs_get,
             logs_clear,
             logs_export,
