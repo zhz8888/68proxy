@@ -66,9 +66,55 @@ pub fn load_config(conn: &Connection) -> Config {
         .get("api_key")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let mut cfg: Config = serde_json::from_value(Value::Object(map)).unwrap_or_default();
+    let mut cfg = config_from_map(map);
     cfg.migrate_legacy(legacy.as_deref());
     cfg
+}
+
+/// 把 settings 表的字段映射反序列化为 `Config`，逐字段容错。
+///
+/// 直接 `from_value(...).unwrap_or_default()` 会因任一行 value 类型不符而让整份配置
+/// 静默回退默认（用户端口/账户/开关全部丢失且可能被写回），故先按单字段反序列化，
+/// 只丢弃/记录出错字段，其余字段照常生效。
+fn config_from_map(map: Map<String, Value>) -> Config {
+    let mut obj = Map::new();
+    let mut defaults = serde_json::to_value(Config::default())
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    for (k, v) in map {
+        // 已知字段逐个用其默认值的类型做校验：类型不符则告警并保留默认
+        let probe = defaults.get(&k).cloned().unwrap_or(Value::Null);
+        let same_kind = std::mem::discriminant(&probe) == std::mem::discriminant(&v)
+            || probe.is_null();
+        if same_kind {
+            obj.insert(k, v);
+        } else {
+            log::warn(&format!(
+                "设置项 {k} 类型不符（期望 {}），已忽略并使用默认值",
+                type_name(&probe)
+            ));
+            if let Some(d) = defaults.remove(&k) {
+                obj.insert(k, d);
+            }
+        }
+    }
+    serde_json::from_value(Value::Object(obj)).unwrap_or_else(|e| {
+        log::warn(&format!("设置反序列化失败，使用默认配置: {e}"));
+        Config::default()
+    })
+}
+
+/// 取 JSON 值的类型名，仅用于日志提示。
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// 清理旧版 `api_key` 残留行：旧字段已拆分为 `cc_accounts` + `local_api_key`，
@@ -216,5 +262,25 @@ mod tests {
         assert_eq!(load_config(&conn).port, 9999);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_config_tolerates_bad_field_types() {
+        // 单个字段类型损坏不应导致整份配置回退默认
+        let conn = temp_conn();
+        let mut cfg = Config::default();
+        cfg.port = 4567;
+        cfg.zdr = true;
+        save_config(&conn, &cfg).unwrap();
+        // 手工把 zdr 写成字符串（模拟跨版本/手改库）
+        conn.execute(
+            "UPDATE settings SET value = '\"yes\"' WHERE key = 'zdr'",
+            [],
+        )
+        .unwrap();
+        let got = load_config(&conn);
+        // 损坏字段回退默认，但 port 等其余字段照常生效
+        assert_eq!(got.port, 4567);
+        assert!(!got.zdr);
     }
 }

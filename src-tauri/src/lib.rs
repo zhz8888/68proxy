@@ -35,11 +35,11 @@ async fn proxy_stop(app: AppHandle) -> Result<Value, String> {
     Ok(status_value(&app))
 }
 
-/// 重启本地代理：先停止，等待 500ms 释放端口后再启动，返回新的代理状态 JSON。
+/// 重启本地代理：先停止，等待旧监听真正释放端口后再启动，返回新的代理状态 JSON。
 #[tauri::command]
 async fn proxy_restart(app: AppHandle) -> Result<Value, String> {
     stop_proxy_inner(&app);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_port_released(&app).await;
     start_proxy_inner(&app).await
 }
 
@@ -386,6 +386,13 @@ async fn port_check(port: u16) -> Result<Value, String> {
 async fn port_free(port: u16) -> Result<Value, String> {
     let pids = find_pids_for_port(port);
     if pids.is_empty() {
+        // 非 Windows 平台无法枚举/结束进程，给出准确提示而非「未被占用」
+        #[cfg(not(windows))]
+        return Ok(json!({
+            "killed": [],
+            "message": "当前平台暂不支持自动释放端口，请手动结束占用进程",
+        }));
+        #[cfg(windows)]
         return Ok(json!({ "killed": [], "message": "端口未被占用，无需释放" }));
     }
     let mut killed: Vec<u32> = Vec::new();
@@ -478,9 +485,31 @@ async fn start_proxy_inner(app: &AppHandle) -> Result<Value, String> {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // 等待结束后必须确认服务确实进入运行态，否则不能谎报启动成功
+    if !ctx.proxy_state.is_running() {
+        return Err("代理服务启动失败（未进入运行状态），请查看日志排查".into());
+    }
     proxy::log::info(&format!("代理已启动：{}:{}", cfg.host, cfg.port));
     emit_status(app);
     Ok(status_value(app))
+}
+
+/// 等待代理监听端口真正释放：轮询尝试绑定配置地址，成功即可再次启动。
+///
+/// 取代固定 sleep(500ms)：长连接/慢请求场景下旧 listener 可能尚未关闭，
+/// 立即重启会因端口占用失败。最多等待 5 秒，超时也让调用方继续尝试（由 bind 报错兜底）。
+async fn wait_port_released(app: &AppHandle) {
+    let ctx = app.state::<AppCtx>();
+    let cfg = ctx.proxy_state.config.read().unwrap().clone();
+    let addr = proxy::server::listen_addr(&cfg);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        // 端口已释放：能成功绑定即可退出（绑定后立即释放）
+        if std::net::TcpListener::bind(addr).is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// 停止代理的内部实现：发送关停信号、清理请求记录并广播状态；未运行时直接返回。
@@ -506,12 +535,29 @@ fn find_pids_for_port(port: u16) -> Vec<u32> {
             let text = String::from_utf8_lossy(&out.stdout);
             let mut pids: Vec<u32> = Vec::new();
             for line in text.lines() {
-                if line.contains(&format!(":{port}")) && line.to_uppercase().contains("LISTENING") {
-                    if let Some(pid) = line.split_whitespace().last() {
-                        if let Ok(p) = pid.parse::<u32>() {
-                            if !pids.contains(&p) {
-                                pids.push(p);
-                            }
+                if !line.to_uppercase().contains("LISTENING") {
+                    continue;
+                }
+                // 按列解析本地地址（Proto Local Foreign State PID），取最后一个冒号后的
+                // 端口做整数比较：不能用 `:{port}` 子串匹配，否则 :80 会误命中 :8080
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() < 2 {
+                    continue;
+                }
+                let Some(local_port) = cols[1]
+                    .rsplit(':')
+                    .next()
+                    .and_then(|s| s.parse::<u16>().ok())
+                else {
+                    continue;
+                };
+                if local_port != port {
+                    continue;
+                }
+                if let Some(pid) = cols.last() {
+                    if let Ok(p) = pid.parse::<u32>() {
+                        if !pids.contains(&p) {
+                            pids.push(p);
                         }
                     }
                 }
@@ -589,7 +635,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 let h = app.clone();
                 tauri::async_runtime::spawn(async move {
                     stop_proxy_inner(&h);
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    wait_port_released(&h).await;
                     let _ = start_proxy_inner(&h).await;
                 });
             }
@@ -670,13 +716,15 @@ pub fn run() {
             proxy::settings::migrate_from_config(&usage_conn, &config_path)?;
             // 旧版 api_key 行迁移到 cc_accounts 后清理，避免每次启动重复迁移
             let _ = proxy::settings::purge_legacy_api_key(&usage_conn);
-            // 从 SQLite 加载配置（缺字段走默认），再应用环境变量覆写
+            // 从 SQLite 加载配置（缺字段走默认）
             let mut cfg = proxy::settings::load_config(&usage_conn);
-            cfg.apply_env();
-            // config.json 无内容时首次落盘默认值（镜像兜底）
+            // 首次落盘镜像时使用「未叠加环境变量」的副本：否则下次启动
+            // migrate_from_config 会把 env 值当作普通设置导入 settings 表并永久生效
             if !config_path.exists() {
                 let _ = cfg.save(&config_path);
             }
+            // 再应用环境变量覆写（仅作用于本次运行的内存配置）
+            cfg.apply_env();
 
             let proxy_state = proxy::state::AppState::new(cfg.clone());
             *proxy_state.usage.lock().unwrap() = Some(usage_conn);

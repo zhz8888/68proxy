@@ -244,8 +244,14 @@ impl Config {
     }
 
     /// 将配置以缩进 JSON 写入 `path`，父目录不存在时自动创建。
+    ///
+    /// 凭据（本地转发 key 与 CC 账户）只存 SQLite settings 表，镜像文件不落盘明文：
+    /// 写入前把这两项清空，避免 config.json 泄露 key（与 credentials 模块声明一致）。
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(self)
+        let mut mirrored = self.clone();
+        mirrored.local_api_key = String::new();
+        mirrored.cc_accounts = Vec::new();
+        let text = serde_json::to_string_pretty(&mirrored)
             .map_err(|e| format!("配置序列化失败: {e}"))?;
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -351,5 +357,33 @@ mod tests {
         assert_eq!(legacy_user_id("user_abc"), legacy_user_id("user_abc"));
         assert_ne!(legacy_user_id("user_abc"), legacy_user_id("user_def"));
         assert!(legacy_user_id("user_abc").starts_with("legacy-"));
+    }
+
+    #[test]
+    fn save_mirror_strips_credentials() {
+        // 镜像文件不能落盘明文 key：写盘内容中 local_api_key/cc_accounts 必须为空
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("cc-config-save-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut cfg = Config::default();
+        cfg.port = 3456;
+        cfg.local_api_key = "sk-secret".into();
+        cfg.cc_accounts = vec![Account {
+            key: "user_secret".into(),
+            user_id: "id_1".into(),
+            ..Account::default()
+        }];
+        cfg.save(&path).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("sk-secret"), "镜像文件不应包含本地 key");
+        assert!(!raw.contains("user_secret"), "镜像文件不应包含账户 key");
+        // 非敏感字段仍正常持久化
+        let loaded = Config::load_file(&path);
+        assert_eq!(loaded.port, 3456);
+        assert!(loaded.local_api_key.is_empty());
+        assert!(loaded.cc_accounts.is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 }
