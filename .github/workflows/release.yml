@@ -221,7 +221,7 @@ jobs:
               echo '### 使用前提'
               echo '- 需要 \`user_\` 开头的 Command Code API Key'
               echo '- 支持 OpenAI / Anthropic 兼容协议接入'
-              echo '- 详见 [README](https://github.com/evanfu0110/68proxy#readme)'
+              echo '- 详见 [README](https://github.com/zhz8888/68proxy#readme)'
               echo
               echo '__RELEASE_NOTES__'
             } >> "$GITHUB_OUTPUT"

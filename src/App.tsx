@@ -139,7 +139,7 @@ function App() {
           </nav>
           <div className="mt-auto p-4">
             <p className="font-mono text-[10px] leading-relaxed text-muted-foreground/70">
-              Developed by 6ix8ight
+              by 6ix8ight · fork by zhz8888
               <br />
               V1.0
             </p>

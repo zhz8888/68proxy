@@ -1,4 +1,4 @@
-import { Github, Globe, Mail, ServerCog, ShieldCheck, Workflow } from "lucide-react";
+import { Github, ServerCog, ShieldCheck, Workflow } from "lucide-react";
 import type { IconType } from "react-icons";
 import { FaFile } from "react-icons/fa6";
 import { SiReact, SiRust, SiTauri, SiTypescript, SiVite } from "react-icons/si";
@@ -45,11 +45,10 @@ async function openLink(url: string) {
   }
 }
 
-// 作者联系方式与主页链接
+// 作者署名与本 fork 仓库链接
 const LINKS: Array<{ icon: typeof Github; label: string; value: string; href: string }> = [
-  { icon: Github, label: "GitHub", value: "evanfu0110", href: "https://github.com/evanfu0110" },
-  { icon: Globe, label: "网站", value: "www.110.wtf", href: "https://www.110.wtf" },
-  { icon: Mail, label: "邮箱", value: "1771005798@qq.com", href: "mailto:1771005798@qq.com" },
+  { icon: Github, label: "原始作者", value: "6ix8ight", href: "https://github.com/evanfu0110" },
+  { icon: Github, label: "Fork 维护", value: "zhz8888", href: "https://github.com/zhz8888/68proxy" },
 ];
 
 /** 关于视图：项目简介、实现逻辑、技术栈与作者联系方式。 */
@@ -119,13 +118,13 @@ export function AboutView() {
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-sm">
             <ShieldCheck className="h-4 w-4" />
-            作者与联系方式
+            作者
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 pt-0">
           <p className="text-sm leading-6 text-muted-foreground">
-            68proxy 由 <span className="font-semibold text-foreground">6ix8ight</span> 开发维护，
-            欢迎 Star、提 Issue 或邮件交流：
+            68proxy 由 <span className="font-semibold text-foreground">6ix8ight</span> 开发，
+            本 fork 由 <span className="font-semibold text-foreground">zhz8888</span> 维护与增强：
           </p>
           <Separator />
           <div className="flex flex-col gap-2">
@@ -138,7 +137,7 @@ export function AboutView() {
                   className="group flex items-center gap-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-left transition-colors hover:bg-secondary"
                 >
                   <Icon className="h-4 w-4 text-muted-foreground group-hover:text-foreground" />
-                  <span className="w-14 shrink-0 text-xs text-muted-foreground">{l.label}</span>
+                  <span className="w-20 shrink-0 text-xs text-muted-foreground">{l.label}</span>
                   <span className="min-w-0 truncate font-mono text-[13px] text-foreground">{l.value}</span>
                 </button>
               );
