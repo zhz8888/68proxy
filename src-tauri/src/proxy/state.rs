@@ -118,6 +118,8 @@ pub struct AppState {
     pub fingerprint_path: Mutex<Option<std::path::PathBuf>>,
     /// 浏览器授权登录会话（进行中或已完成；None 表示无进行中登录）。
     pub auth_login: Mutex<Option<AuthLoginSession>>,
+    /// 进行中 loopback 回调服务器的优雅停机信号（新一轮登录时用于关停旧实例）。
+    pub auth_login_shutdown: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 impl AppState {
@@ -146,6 +148,7 @@ impl AppState {
             usage: Mutex::new(None),
             fingerprint_path: Mutex::new(None),
             auth_login: Mutex::new(None),
+            auth_login_shutdown: Mutex::new(None),
         })
     }
 
