@@ -225,7 +225,9 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
 
     let mut body = json!({
         "config": {
-            "workingDir": "",
+            "workingDir": std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
             "date": chrono::Utc::now().format("%Y-%m-%d").to_string(),
             "environment": ENV_STRING,
             "structure": [],
@@ -542,12 +544,14 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
 
 /// CC 完成结果 → OpenAI Responses 非流式响应体。
 ///
+/// - `thinking_text`：推理内容，非空时作为首个 output 条目输出 `reasoning` 类型；
 /// - `tool_calls`：可选的工具调用列表（OpenAI Chat 格式的 tool_call 对象）；
 /// - `finish_reason == "length"` 时 status 置 incomplete 并附 max_output_tokens 原因。
 pub fn build_responses_response(
     response_id: &str,
     model: &str,
     full_text: &str,
+    thinking_text: &str,
     tool_calls: Option<&[Value]>,
     finish_reason: &str,
     input_tokens: u64,
@@ -556,6 +560,14 @@ pub fn build_responses_response(
 ) -> Value {
     let short_id = || uuid::Uuid::new_v4().to_string()[..12].to_string();
     let mut output: Vec<Value> = Vec::new();
+    if !thinking_text.is_empty() {
+        output.push(json!({
+            "type": "reasoning",
+            "id": format!("rs_{}", short_id()),
+            "status": "completed",
+            "summary": [{ "type": "summary_text", "text": thinking_text }],
+        }));
+    }
     if !full_text.is_empty() {
         output.push(json!({
             "type": "message",
@@ -895,12 +907,14 @@ pub fn build_openai_response(
 
 /// 非流式 Anthropic 响应构建。
 ///
-/// tool_call 的 arguments 字符串会尽力解析为 JSON 对象写入 tool_use.input；
-/// `finish_reason` 经 map_anthropic_stop_reason 折算为 Anthropic 的 stop_reason。
+/// - `thinking_text`：推理内容，非空时作为首个 content 块输出 `thinking` 类型（附假签名）；
+/// - tool_call 的 arguments 字符串会尽力解析为 JSON 对象写入 tool_use.input；
+/// - `finish_reason` 经 map_anthropic_stop_reason 折算为 Anthropic 的 stop_reason。
 pub fn build_anthropic_response(
     message_id: &str,
     model: &str,
     full_text: &str,
+    thinking_text: &str,
     tool_calls: Option<&[Value]>,
     finish_reason: &str,
     input_tokens: u64,
@@ -909,6 +923,13 @@ pub fn build_anthropic_response(
     cache_write_tokens: Option<u64>,
 ) -> Value {
     let mut content: Vec<Value> = Vec::new();
+    if !thinking_text.is_empty() {
+        content.push(json!({
+            "type": "thinking",
+            "thinking": thinking_text,
+            "signature": crate::proxy::sse::fake_thinking_signature(thinking_text),
+        }));
+    }
     if !full_text.is_empty() {
         content.push(json!({ "type": "text", "text": full_text }));
     }
@@ -927,6 +948,15 @@ pub fn build_anthropic_response(
             }));
         }
     }
+    // 上游未回报 output token 时按内容长度估算，避免客户端展示/记账为 0
+    let tool_count = tool_calls.map(|t| t.len()).unwrap_or(0);
+    let est_out = ((full_text.chars().count() + thinking_text.chars().count()) / 4) as u64
+        + (tool_count as u64) * 20;
+    let output_tokens = if output_tokens == 0 && est_out > 0 {
+        est_out
+    } else {
+        output_tokens
+    };
     json!({
         "id": message_id,
         "type": "message",

@@ -11,7 +11,7 @@ use super::state::now_secs;
 /// Claude Code 的浅校验只要求 base64 以 'E'（单层）/ 'R'（双层）开头且 payload
 /// 首字节为 0x12——此实现恰好满足，让 CC 能正常显示 thinking。payload 由思考文本
 /// SHA-256 派生，使每个块的签名互不相同。
-fn fake_thinking_signature(thinking_text: &str) -> String {
+pub(crate) fn fake_thinking_signature(thinking_text: &str) -> String {
     let source = if thinking_text.is_empty() {
         "dsh-proxy-thinking"
     } else {
@@ -270,6 +270,14 @@ pub struct ResponsesTranslator {
     text_item_index: u32,
     /// 当前文本条目累计的完整文本（done 事件需要全文）。
     item_text: String,
+    /// 是否有尚未关闭的 reasoning（思考）条目。
+    reasoning_open: bool,
+    /// 当前 reasoning 条目的 item id。
+    reasoning_item_id: String,
+    /// 当前 reasoning 条目在 output 数组中的下标。
+    reasoning_item_index: u32,
+    /// 当前 reasoning 条目累计的完整思考文本。
+    reasoning_text: String,
     /// 已完成的 output 条目，写入最终 response.completed 的 output 数组。
     output_items: Vec<Value>,
     /// 上游 finishReason 原始值（"length" 时最终置为 incomplete）。
@@ -299,6 +307,10 @@ impl ResponsesTranslator {
             text_item_id: String::new(),
             text_item_index: 0,
             item_text: String::new(),
+            reasoning_open: false,
+            reasoning_item_id: String::new(),
+            reasoning_item_index: 0,
+            reasoning_text: String::new(),
             output_items: Vec::new(),
             stop_reason: None,
             last_cc_event: String::new(),
@@ -379,7 +391,58 @@ impl ResponsesTranslator {
         self.output_items.push(item);
     }
 
-    /// 解析一行 CC NDJSON 事件，返回需下发的 Responses SSE 事件列表（可能为空）。
+    /// 关闭当前未完结的 reasoning 条目，发出 summary 收尾事件与 output_item.done。
+    fn close_reasoning_item(&mut self, out: &mut Vec<String>) {
+        if !self.reasoning_open {
+            return;
+        }
+        self.reasoning_open = false;
+        let item_id = self.reasoning_item_id.clone();
+        let idx = self.reasoning_item_index;
+        let text = std::mem::take(&mut self.reasoning_text);
+        out.push(self.sse(
+            "response.reasoning_summary_text.done",
+            serde_json::json!({ "type": "response.reasoning_summary_text.done", "item_id": item_id, "output_index": idx, "summary_index": 0, "text": text }),
+        ));
+        out.push(self.sse(
+            "response.reasoning_summary_part.done",
+            serde_json::json!({ "type": "response.reasoning_summary_part.done", "item_id": item_id, "output_index": idx, "summary_index": 0,
+                "part": { "type": "summary_text", "text": text } }),
+        ));
+        let item = serde_json::json!({
+            "type": "reasoning", "id": item_id, "status": "completed",
+            "summary": [{ "type": "summary_text", "text": text }],
+        });
+        out.push(self.sse(
+            "response.output_item.done",
+            serde_json::json!({ "type": "response.output_item.done", "output_index": idx, "item": item }),
+        ));
+        self.output_items.push(item);
+    }
+
+    /// 打开一个新的 reasoning 条目（reasoning_summary_part.added）。
+    fn open_reasoning_item(&mut self, out: &mut Vec<String>) {
+        let idx = self.next_output_index;
+        self.next_output_index += 1;
+        self.reasoning_item_index = idx;
+        self.reasoning_item_id = format!("rs_{}", &uuid::Uuid::new_v4().to_string()[..12]);
+        self.reasoning_open = true;
+        let item_id = self.reasoning_item_id.clone();
+        out.push(self.sse(
+            "response.output_item.added",
+            serde_json::json!({
+                "type": "response.output_item.added", "output_index": idx,
+                "item": { "type": "reasoning", "id": item_id, "status": "in_progress", "summary": [] },
+            }),
+        ));
+        out.push(self.sse(
+            "response.reasoning_summary_part.added",
+            serde_json::json!({
+                "type": "response.reasoning_summary_part.added", "item_id": item_id, "output_index": idx, "summary_index": 0,
+                "part": { "type": "summary_text", "text": "" },
+            }),
+        ));
+    }
     ///
     /// 文本增量会自动开启/延续 message 条目；tool-call 会先关闭未完结的文本条目，
     /// 再发出 function_call 的完整事件序列（added → arguments.delta/done → item.done）。
@@ -400,14 +463,34 @@ impl ResponsesTranslator {
         let mut out: Vec<String> = Vec::new();
 
         match event_type {
-            "start" | "start-step" | "text-start" | "reasoning-start" | "reasoning-delta"
+            "start" | "start-step" | "text-start" | "reasoning-start"
             | "reasoning-end" | "provider-metadata" | "tool-input-start" | "tool-input-delta"
             | "tool-input-end" | "tool-error" | "text-end" => {}
+            // 思考增量 → reasoning 条目的 summary 文本增量
+            "reasoning-delta" => {
+                let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    return out;
+                }
+                if !self.reasoning_open {
+                    self.open_reasoning_item(&mut out);
+                }
+                self.reasoning_text.push_str(text);
+                out.push(self.sse(
+                    "response.reasoning_summary_text.delta",
+                    serde_json::json!({
+                        "type": "response.reasoning_summary_text.delta", "item_id": self.reasoning_item_id,
+                        "output_index": self.reasoning_item_index, "summary_index": 0, "delta": text,
+                    }),
+                ));
+            }
             "text-delta" => {
                 let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
                 if text.is_empty() {
                     return out;
                 }
+                // 正文开始前先收尾思考条目
+                self.close_reasoning_item(&mut out);
                 if !self.text_open {
                     let idx = self.next_output_index;
                     self.next_output_index += 1;
@@ -442,6 +525,7 @@ impl ResponsesTranslator {
                 self.output_tokens += 1;
             }
             "tool-call" => {
+                self.close_reasoning_item(&mut out);
                 self.close_text_item(&mut out);
                 let call_id = event
                     .get("toolCallId")
@@ -526,21 +610,23 @@ impl ResponsesTranslator {
 
     /// 流结束收尾：关闭未完结条目并补发 response.completed / response.failed。
     ///
-    /// 已出错过（has_error）时返回空；零输出视为上游空响应，发 failed + rate_limit_error；
-    /// finishReason 为 length 时 status 置 incomplete 并附 max_output_tokens 原因。
+    /// 已出错过（has_error）时返回空；无任何实际内容（文本/思考/工具调用）视为上游
+    /// 空响应，发 failed + rate_limit_error；finishReason 为 length 时 status 置
+    /// incomplete 并附 max_output_tokens 原因。
     pub fn finalize(&mut self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         if self.has_error {
             return out;
         }
+        self.close_reasoning_item(&mut out);
         self.close_text_item(&mut out);
-        if self.output_tokens == 0 {
+        if self.output_items.is_empty() {
             out.push(self.sse(
                 "response.failed",
                 serde_json::json!({
                     "type": "response.failed",
                     "response": { "id": self.response_id, "object": "response", "created_at": self.created_at,
-                        "status": "failed", "model": self.model, "output": self.output_items,
+                        "status": "failed", "model": self.model, "output": [],
                         "error": { "type": "rate_limit_error", "message": "Empty response from upstream (zero output tokens)" } },
                 }),
             ));

@@ -240,6 +240,22 @@ fn anthropic_thinking_to_reasoning_content() {
     assert_eq!(assistant["content"], "答复");
 }
 
+/// 验证 Anthropic 非流式响应把 thinking 文本输出为首个 thinking 内容块（附假签名），
+/// 且上游未回报 output_tokens 时按内容长度估算。
+#[test]
+fn build_anthropic_response_with_thinking() {
+    let body = convert::build_anthropic_response(
+        "msg_1", "claude-sonnet-4-6", "答复", "思考内容", None, "stop", 10, 0, 0, None,
+    );
+    assert_eq!(body["content"][0]["type"], "thinking");
+    assert_eq!(body["content"][0]["thinking"], "思考内容");
+    assert!(body["content"][0]["signature"].as_str().unwrap().starts_with('E')
+        || body["content"][0]["signature"].as_str().unwrap().starts_with('R'));
+    assert_eq!(body["content"][1]["type"], "text");
+    // 上游 output_tokens=0 → 按内容长度估算（(答复2+思考内容4)/4 = 1）
+    assert!(body["usage"]["output_tokens"].as_u64().unwrap() > 0);
+}
+
 /// 验证 Responses 的 reasoning 条目回灌进 assistant 消息的 reasoning_content。
 #[test]
 fn responses_reasoning_to_assistant() {
@@ -368,7 +384,7 @@ fn responses_to_openai_conversion() {
     assert_eq!(convert::convert_responses_to_openai(&req3)["tool_choice"], "auto");
 }
 
-/// 验证 Responses 非流式响应体结构：text 与 function_call 两类 output 条目、
+/// 验证 Responses 非流式响应体结构：reasoning 与 text、function_call 三类 output 条目、
 /// usage 字段命名，以及 finish_reason=length 时 status=incomplete 并附
 /// incomplete_details.reason=max_output_tokens。
 #[test]
@@ -377,19 +393,22 @@ fn build_responses_response_shape() {
         "id": "call_1", "type": "function",
         "function": { "name": "shell", "arguments": "{\"cmd\":\"ls\"}" },
     })];
-    let body = convert::build_responses_response("resp_1", "gpt-5-codex", "Hi", Some(&tool_calls), "tool_calls", 10, 5, 3);
+    let body = convert::build_responses_response("resp_1", "gpt-5-codex", "Hi", "思考中", Some(&tool_calls), "tool_calls", 10, 5, 3);
     assert_eq!(body["id"], "resp_1");
     assert_eq!(body["object"], "response");
     assert_eq!(body["status"], "completed");
-    assert_eq!(body["output"][0]["type"], "message");
-    assert_eq!(body["output"][0]["content"][0]["text"], "Hi");
-    assert_eq!(body["output"][1]["type"], "function_call");
-    assert_eq!(body["output"][1]["call_id"], "call_1");
-    assert_eq!(body["output"][1]["name"], "shell");
+    // thinking 非空时首先输出 reasoning 条目
+    assert_eq!(body["output"][0]["type"], "reasoning");
+    assert_eq!(body["output"][0]["summary"][0]["text"], "思考中");
+    assert_eq!(body["output"][1]["type"], "message");
+    assert_eq!(body["output"][1]["content"][0]["text"], "Hi");
+    assert_eq!(body["output"][2]["type"], "function_call");
+    assert_eq!(body["output"][2]["call_id"], "call_1");
+    assert_eq!(body["output"][2]["name"], "shell");
     assert_eq!(body["usage"]["output_tokens"], 5);
     assert_eq!(body["usage"]["input_tokens_details"]["cached_tokens"], 3);
 
-    let truncated = convert::build_responses_response("resp_2", "m", "abc", None, "length", 1, 2, 0);
+    let truncated = convert::build_responses_response("resp_2", "m", "abc", "", None, "length", 1, 2, 0);
     assert_eq!(truncated["status"], "incomplete");
     assert_eq!(truncated["incomplete_details"]["reason"], "max_output_tokens");
 }
@@ -475,6 +494,44 @@ fn responses_translator_text_and_tool_events() {
     let end = t.finalize();
     assert!(end.iter().any(|f| f.contains("response.completed")));
     assert!(end.iter().any(|f| f.contains("\"output_tokens\":5")));
+}
+
+/// 验证 Responses 翻译器把 reasoning-delta 翻译成 reasoning 条目的 summary 事件：
+/// output_item.added（reasoning）+ reasoning_summary_part.added + summary_text.delta；
+/// 正文开始前收尾 reasoning 条目（summary_text.done / summary_part.done）。
+#[test]
+fn responses_translator_reasoning_events() {
+    let mut t = ResponsesTranslator::new("gpt-5-codex", "resp_reason");
+    assert!(t.response_start().contains("response.created"));
+
+    let frames = t.process_line(r#"{"type":"reasoning-delta","text":"我在思考"}"#);
+    assert!(frames.iter().any(|f| f.contains("response.output_item.added") && f.contains("\"type\":\"reasoning\"")));
+    assert!(frames.iter().any(|f| f.contains("response.reasoning_summary_part.added")));
+    assert!(frames.iter().any(|f| f.contains("response.reasoning_summary_text.delta") && f.contains("我在思考")));
+
+    // 正文开始先收尾 reasoning 条目
+    let frames = t.process_line(r#"{"type":"text-delta","text":"答复"}"#);
+    assert!(frames.iter().any(|f| f.contains("response.reasoning_summary_text.done")));
+    assert!(frames.iter().any(|f| f.contains("response.reasoning_summary_part.done")));
+    assert!(frames.iter().any(|f| f.contains("response.output_text.delta")));
+
+    t.process_line(
+        r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":8,"outputTokens":4,"cachedInputTokens":0}}"#,
+    );
+    let end = t.finalize();
+    assert!(end.iter().any(|f| f.contains("response.completed")));
+    // 完成响应里同时含 reasoning 与 message 两个条目
+    assert!(end.iter().any(|f| f.contains("\"type\":\"reasoning\"") && f.contains("我在思考")));
+}
+
+/// 验证 Responses 翻译器仅含 reasoning、无正文时不会被误判为零输出。
+#[test]
+fn responses_translator_reasoning_only_not_empty() {
+    let mut t = ResponsesTranslator::new("m", "resp_r2");
+    t.process_line(r#"{"type":"reasoning-delta","text":"只有思考"}"#);
+    let end = t.finalize();
+    assert!(end.iter().any(|f| f.contains("response.completed")));
+    assert!(!end.iter().any(|f| f.contains("response.failed")));
 }
 
 /// 验证 Responses 翻译器异常路径：零输出时 finalize 发 response.failed（限流）；
@@ -622,6 +679,12 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
             tokio::time::sleep(Duration::from_millis(300)).await;
             return axum::response::Response::new(axum::body::Body::from(
                 "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"Hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"cachedInputTokens\":3}}\n",
+            ));
+        }
+        if parsed["params"]["model"] == "no-usage" {
+            // 有正文但 finish 不回报 usage：验证非流式零输出按实际内容判定而非 usage
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"正文内容\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\"}\n",
             ));
         }
         if parsed["params"]["model"] == "upstream-error" {
@@ -899,6 +962,11 @@ async fn models_and_health_and_401() {
     assert_eq!(res.status(), 200);
     assert_eq!(res.text().await.unwrap(), "OK");
 
+    // 根路径同样映射到健康检查
+    let res = client.get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.text().await.unwrap(), "OK");
+
     let res = client
         .post(format!("{base}/v1/chat/completions"))
         .json(&json!({ "messages": [] }))
@@ -906,6 +974,29 @@ async fn models_and_health_and_401() {
         .await
         .unwrap();
     assert_eq!(res.status(), 401);
+    state.mark_stopped();
+}
+
+/// 端到端：/v1/responses 带 previous_response_id 时显式返回 400（无状态代理不支持会话续接）。
+#[tokio::test]
+async fn responses_previous_response_id_rejected() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer user_test_key")
+        .json(&json!({
+            "model": "gpt-5-codex",
+            "previous_response_id": "resp_prev",
+            "input": "hi",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert!(body["error"]["message"].as_str().unwrap().contains("previous_response_id"));
     state.mark_stopped();
 }
 
@@ -1011,6 +1102,31 @@ async fn anthropic_messages_nonstream() {
     assert_eq!(body["content"][0]["text"], "Hello");
     assert_eq!(body["stop_reason"], "end_turn");
     assert_eq!(body["usage"]["output_tokens"], 5);
+    state.mark_stopped();
+}
+
+/// 端到端：上游有正文但 finish 不回报 usage 时，Anthropic 非流式按实际内容判定，
+/// 返回 200（而非按 usage 误判为 429 零输出）。
+#[tokio::test]
+async fn anthropic_nonstream_content_without_usage() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/messages"))
+        .header("Authorization", "Bearer user_test_key")
+        .json(&json!({
+            "model": "no-usage",
+            "max_tokens": 1000,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["content"][0]["text"], "正文内容");
+    // 上游未回报 output_tokens，按内容长度估算得到非 0
+    assert!(body["usage"]["output_tokens"].as_u64().unwrap() > 0);
     state.mark_stopped();
 }
 

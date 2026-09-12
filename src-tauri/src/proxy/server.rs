@@ -37,6 +37,8 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const NONSTREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// 连续超时达到该阈值后，超时错误消息提示客户端缩减上下文长度。
 const TIMEOUT_REDUCE_CONTEXT_THRESHOLD: u32 = 3;
+/// Anthropic 流式静默超过该时长时主动发 ping 事件保活（覆盖上游排队/长思考窗口）。
+const ANTHROPIC_PING_IDLE: Duration = Duration::from_secs(15);
 
 /// 合法 API Key 的正则（OnceLock 惰性编译一次，避免每次请求重复构建）。
 static KEY_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -99,6 +101,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/responses", post(responses))
         .route("/v1/models", get(models))
         .route("/health", get(health))
+        .route("/", get(health))
         .fallback(not_found)
         .layer(axum::middleware::from_fn_with_state(state.clone(), inflight_guard))
         .layer(tower_http::cors::CorsLayer::permissive())
@@ -259,26 +262,40 @@ fn sse_response(
                 if ended {
                     return None;
                 }
-                match rx.recv().await {
-                    Some(Frame::Sse(s)) => {
+                // Anthropic 客户端会吞掉 signal 事件、正文前可能长时间静默（上游排队/
+                // 长思考）：静默超过阈值时主动发标准 ping 事件（官方 SDK 会忽略）保活。
+                let next = if matches!(protocol, Protocol::Anthropic) {
+                    match tokio::time::timeout(ANTHROPIC_PING_IDLE, rx.recv()).await {
+                        Ok(v) => Some(v),
+                        Err(_) => {
+                            return Some((
+                                Ok::<_, Infallible>("event: ping\ndata: {\"type\":\"ping\"}\n\n".to_string()),
+                                (rx, protocol, st, ctx, ended, None),
+                            ));
+                        }
+                    }
+                } else {
+                    Some(rx.recv().await)
+                };
+                match next {
+                    Some(Some(Frame::Sse(s))) => {
                         return Some((Ok(s), (rx, protocol, st, ctx, ended, None)));
                     }
-                    Some(Frame::Done { .. }) => {
+                    Some(Some(Frame::Done { .. })) => {
                         finish_request(&st, &ctx, "ok");
                         return None;
                     }
-                    Some(Frame::Timeout) => {
+                    Some(Some(Frame::Timeout)) => {
                         finish_request(&st, &ctx, "timeout");
-                        let f = protocol_error_frame(protocol, &timeout_message(&st), None);
-                        pending = Some(f);
+                        pending = Some(protocol_error_frame(protocol, &timeout_message(&st), None));
                         ended = true;
                     }
-                    Some(Frame::Error(msg)) => {
+                    Some(Some(Frame::Error(msg))) => {
                         finish_request(&st, &ctx, "error");
                         pending = Some(protocol_error_frame(protocol, &msg, None));
                         ended = true;
                     }
-                    None => return None,
+                    Some(None) | None => return None,
                 }
             }
         },
@@ -562,7 +579,7 @@ async fn chat_completions(
             .chars()
             .take(500)
             .collect::<String>();
-        log::error(&format!("CC API error: {status}"));
+        log::error(&format!("CC API error: {status} — {}", summarize_upstream_error(&text)));
         let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
         let retry_after = mapped_body.get("retry_after").and_then(|v| v.as_u64());
         finish_request(&st, &ctx, "error");
@@ -657,7 +674,7 @@ async fn messages(
             .chars()
             .take(500)
             .collect::<String>();
-        log::error(&format!("CC API error (Anthropic): {status}"));
+        log::error(&format!("CC API error (Anthropic): {status} — {}", summarize_upstream_error(&text)));
         let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
         let err_type = mapped_body
             .pointer("/error/type")
@@ -709,6 +726,17 @@ async fn responses(
         .and_then(|v| v.as_str())
         .unwrap_or(DEFAULT_MODEL)
         .to_string();
+    // 本代理无状态、不保存会话：显式拒绝 previous_response_id，避免静默降级给出错误答案
+    if req.get("previous_response_id").map(|v| !v.is_null()).unwrap_or(false) {
+        return json_response(
+            400,
+            json!({ "error": {
+                "message": "previous_response_id is not supported (this proxy is stateless); send the full input each turn",
+                "type": "invalid_request_error",
+            } }),
+            None,
+        );
+    }
     let prompt_cache_key = req
         .get("prompt_cache_key")
         .and_then(|v| v.as_str())
@@ -752,7 +780,7 @@ async fn responses(
             .chars()
             .take(500)
             .collect::<String>();
-        log::error(&format!("CC API error (Responses): {status}"));
+        log::error(&format!("CC API error (Responses): {status} — {}", summarize_upstream_error(&text)));
         let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
         let retry_after = mapped_body.get("retry_after").and_then(|v| v.as_u64());
         finish_request(&st, &ctx, "error");
@@ -935,9 +963,7 @@ async fn stream_openai(
                 return;
             }
         };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        let (complete, last) = split_lines(&buffer);
-        buffer = last;
+        let complete = push_and_split(&mut buffer, &String::from_utf8_lossy(&chunk));
         let mut had_output = false;
         for line in &complete {
             let frames = translator.parse_line(line);
@@ -1014,9 +1040,7 @@ async fn stream_anthropic(
                 return;
             }
         };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        let (complete, last) = split_lines(&buffer);
-        buffer = last;
+        let complete = push_and_split(&mut buffer, &String::from_utf8_lossy(&chunk));
         let mut had_output = false;
         for line in &complete {
             let frames = translator.process_line(line);
@@ -1102,9 +1126,7 @@ async fn stream_responses(
                 return;
             }
         };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        let (complete, last) = split_lines(&buffer);
-        buffer = last;
+        let complete = push_and_split(&mut buffer, &String::from_utf8_lossy(&chunk));
         let mut had_output = false;
         for line in &complete {
             let frames = translator.process_line(line);
@@ -1239,13 +1261,10 @@ async fn handle_nonstream(
                 return nonstream_error(protocol, 429, &msg, Some(5));
             }
         };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        let (complete, last) = split_lines(&buffer);
-        buffer = last;
+        let complete = push_and_split(&mut buffer, &String::from_utf8_lossy(&chunk));
         for line in &complete {
             parse_ndjson_line(
                 line,
-                protocol,
                 &mut full_text,
                 &mut reasoning,
                 &mut finish_reason,
@@ -1258,7 +1277,6 @@ async fn handle_nonstream(
     if !buffer.trim().is_empty() {
         parse_ndjson_line(
             &buffer,
-            protocol,
             &mut full_text,
             &mut reasoning,
             &mut finish_reason,
@@ -1274,11 +1292,19 @@ async fn handle_nonstream(
         .and_then(|u| u.pointer("/inputTokenDetails/cacheWriteTokens"))
         .and_then(|v| v.as_u64());
     if output == 0 {
-        // 与流式路径一致的归一化：输出为 0 说明是无效响应，输入/缓存计数一并清零
+        // usage 未回报输出：输入/缓存计数一并清零，避免无效请求计入统计
         input = 0;
         cached = 0;
     }
-    if output == 0 {
+    // 零输出判定：chat 端按 usage 回报值；Anthropic/Responses 按实际内容——
+    // 上游偶发不回 totalUsage 时，按 usage 判定会把有完整文本的响应误杀成 429。
+    let empty = match protocol {
+        Protocol::OpenAi => output == 0,
+        Protocol::Anthropic | Protocol::Responses => {
+            full_text.is_empty() && reasoning.is_empty() && tool_calls.is_empty()
+        }
+    };
+    if empty {
         finish_request(&st, &ctx, "error");
         return nonstream_error(
             protocol,
@@ -1320,6 +1346,7 @@ async fn handle_nonstream(
                 &ctx.id,
                 &ctx.model,
                 &full_text,
+                &reasoning,
                 if tool_calls.is_empty() { None } else { Some(&tool_calls) },
                 &finish_reason,
                 input,
@@ -1334,6 +1361,7 @@ async fn handle_nonstream(
                 &ctx.id,
                 &ctx.model,
                 &full_text,
+                &reasoning,
                 if tool_calls.is_empty() { None } else { Some(&tool_calls) },
                 &finish_reason,
                 input,
@@ -1356,6 +1384,38 @@ fn split_lines(buffer: &str) -> (Vec<String>, String) {
         complete.iter().map(|s| s.to_string()).collect(),
         last[0].to_string(),
     )
+}
+
+/// 追加新到的数据并按需切分：仅当新数据含换行时才做行切分。
+///
+/// `buffer` 中永不残留 `\n`，故无换行即无完整行；避免对增长中的超长单行
+/// （大 tool-call / tool-result）反复做全量 split —— O(n²) → O(n)。
+fn push_and_split(buffer: &mut String, chunk: &str) -> Vec<String> {
+    buffer.push_str(chunk);
+    if !chunk.contains('\n') {
+        return Vec::new();
+    }
+    let (complete, last) = split_lines(buffer);
+    *buffer = last;
+    complete
+}
+
+/// 把上游错误体摘要成单行，便于日志排查：压掉换行、截断到 500 字符，
+/// 避免异常大的 body 刷爆日志，同时保证一条日志一行。
+fn summarize_upstream_error(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = flat.trim();
+    const LIMIT: usize = 500;
+    let chars: Vec<char> = flat.chars().collect();
+    if chars.len() > LIMIT {
+        let head: String = chars[..LIMIT].iter().collect();
+        format!("{head}…({} more)", chars.len() - LIMIT)
+    } else {
+        flat.to_string()
+    }
 }
 
 /// 非流式路径的协议化错误响应：429 记限流类型，其余记代理错误类型。
@@ -1387,7 +1447,6 @@ fn usage_tokens(usage: &Option<Value>) -> (u64, u64, u64) {
 #[allow(clippy::too_many_arguments)]
 fn parse_ndjson_line(
     line: &str,
-    protocol: Protocol,
     full_text: &mut String,
     reasoning: &mut String,
     finish_reason: &mut String,
@@ -1414,9 +1473,9 @@ fn parse_ndjson_line(
             full_text.push_str(event.get("text").and_then(|t| t.as_str()).unwrap_or(""));
         }
         "reasoning-delta" => {
-            if matches!(protocol, Protocol::OpenAi) {
-                reasoning.push_str(event.get("text").and_then(|t| t.as_str()).unwrap_or(""));
-            }
+            // 三种协议都保留推理文本：OpenAI 走 reasoning_content，Responses 走
+            // reasoning 条目，Anthropic 走 thinking 内容块。
+            reasoning.push_str(event.get("text").and_then(|t| t.as_str()).unwrap_or(""));
         }
         "tool-call" => {
             let id = event
