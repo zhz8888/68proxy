@@ -63,6 +63,12 @@ const DEFAULTS: Config = {
   max_inflight: 0,
   theme: "system",
   language: "zh",
+  proxy_mode: "none",
+  proxy_type: "socks5",
+  proxy_host: "",
+  proxy_port: 0,
+  proxy_username: "",
+  proxy_password: "",
 };
 
 /** 主题选项：值与 i18n key、图标（文案在组件内按当前语言取）。 */
@@ -76,6 +82,19 @@ const THEME_OPTIONS: Array<{ value: ThemeMode; labelKey: string; icon: LucideIco
 const LANGUAGE_OPTIONS: Array<{ value: Language; labelKey: string }> = [
   { value: "zh", labelKey: "theme.langZh" },
   { value: "en", labelKey: "theme.langEn" },
+];
+
+/** 出站代理模式选项：值与 i18n key（复用主题三段式 Tabs 范式）。 */
+const PROXY_MODE_OPTIONS: Array<{ value: string; labelKey: string }> = [
+  { value: "none", labelKey: "config.proxyModeNone" },
+  { value: "system", labelKey: "config.proxyModeSystem" },
+  { value: "custom", labelKey: "config.proxyModeCustom" },
+];
+
+/** 出站代理类型选项：SOCKS5 / HTTP。 */
+const PROXY_TYPE_OPTIONS: Array<{ value: string; labelKey: string }> = [
+  { value: "socks5", labelKey: "config.proxyTypeSocks5" },
+  { value: "http", labelKey: "config.proxyTypeHttp" },
 ];
 
 /** 配置页通用区块卡片：标题 + 可选描述 + 内容。 */
@@ -132,6 +151,10 @@ export function ConfigView() {
   const [loadError, setLoadError] = useState("");
   // 端口以字符串保存，允许输入过程中的空值/非法值，仅在合法时同步到 cfg.port
   const [portInput, setPortInput] = useState(String(DEFAULTS.port));
+  // 代理端口以字符串保存（同端口输入模式），仅在合法时同步到 cfg.proxy_port
+  const [proxyPortInput, setProxyPortInput] = useState(
+    DEFAULTS.proxy_port > 0 ? String(DEFAULTS.proxy_port) : "",
+  );
   // 是否已完成一次成功的加载：用于跳过一次「加载后立即自动保存」
   const skipNextAutosave = useRef(true);
   // 本地转发 Key（sk-）的凭据状态
@@ -151,6 +174,7 @@ export function ConfigView() {
         // 语言字段做兜底（旧后端/旧配置可能缺失），保证下拉框始终有合法选中值
         setCfg({ ...c, language: c.language === "en" ? "en" : "zh" });
         setPortInput(String(c.port));
+        setProxyPortInput(c.proxy_port > 0 ? String(c.proxy_port) : "");
         setLocalKey(k);
         setLoaded(true);
       })
@@ -177,6 +201,15 @@ export function ConfigView() {
     const n = Number(raw);
     if (raw.trim() !== "" && Number.isInteger(n) && n >= 1 && n <= 65535) {
       update("port", n);
+    }
+  }
+
+  /** 更新代理端口输入：仅在 1-65535 时同步到配置，空值/非法值期间不触发保存。 */
+  function updateProxyPort(raw: string) {
+    setProxyPortInput(raw);
+    const n = Number(raw);
+    if (raw.trim() !== "" && Number.isInteger(n) && n >= 1 && n <= 65535) {
+      update("proxy_port", n);
     }
   }
 
@@ -358,6 +391,82 @@ export function ConfigView() {
               <Switch checked={cfg.zdr} onCheckedChange={(v) => update("zdr", v)} />
             </div>
             <p className="text-xs text-muted-foreground">{t("config.zdrHint")}</p>
+          </Section>
+
+          <Section title={t("config.outboundProxyTitle")} desc={t("config.outboundProxyDesc")}>
+            <Field label={t("config.proxyModeLabel")}>
+              {/* 三段式模式切换：不走代理 / 跟随系统 / 自定义 */}
+              <Tabs
+                value={cfg.proxy_mode}
+                onValueChange={(v) => update("proxy_mode", v)}
+              >
+                <TabsList className="h-11 w-full">
+                  {PROXY_MODE_OPTIONS.map((opt) => (
+                    <TabsTrigger key={opt.value} value={opt.value} className="h-9 flex-1">
+                      {translate(opt.labelKey)}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+              </Tabs>
+              {/* 模式说明独占一行，避免长文案与标签同行被挤压折叠 */}
+              <p className="text-xs text-muted-foreground">{t("config.proxyModeHint")}</p>
+            </Field>
+            {cfg.proxy_mode === "custom" && (
+              <>
+                <Field label={t("config.proxyTypeLabel")}>
+                  <Select value={cfg.proxy_type} onValueChange={(v) => update("proxy_type", v)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PROXY_TYPE_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {translate(opt.labelKey)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label={t("config.proxyHostLabel")}>
+                    <Input
+                      value={cfg.proxy_host}
+                      onChange={(e) => update("proxy_host", e.target.value)}
+                      placeholder="127.0.0.1"
+                      className="font-mono"
+                    />
+                  </Field>
+                  <Field label={t("config.proxyPortLabel")}>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={65535}
+                      value={proxyPortInput}
+                      onChange={(e) => updateProxyPort(e.target.value)}
+                      placeholder="1080"
+                      className="font-mono"
+                    />
+                  </Field>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label={t("config.proxyUsernameLabel")}>
+                    <Input
+                      value={cfg.proxy_username}
+                      onChange={(e) => update("proxy_username", e.target.value)}
+                      autoComplete="off"
+                    />
+                  </Field>
+                  <Field label={t("config.proxyPasswordLabel")}>
+                    <Input
+                      type="password"
+                      value={cfg.proxy_password}
+                      onChange={(e) => update("proxy_password", e.target.value)}
+                      autoComplete="new-password"
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
           </Section>
 
           <Section title={t("config.programTitle")} desc={t("config.programDesc")}>

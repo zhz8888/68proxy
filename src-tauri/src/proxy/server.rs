@@ -611,7 +611,7 @@ async fn api_key_or_401(
         Some(a) => Ok((a.key, a.user_id)),
         None => Err((
             401,
-            "No CC account configured. Add a user_ account key on the Accounts page.",
+            "No Command Code account configured. Add a user_ account key on the Accounts page.",
         )),
     }
 }
@@ -693,7 +693,7 @@ async fn chat_completions(
             .chars()
             .take(500)
             .collect::<String>();
-        log::error(&format!("CC API error: {status} — {}", summarize_upstream_error(&text)));
+        log::error(&format!("Command Code API error: {status} — {}", summarize_upstream_error(&text)));
         // 上游明确报额度耗尽：即时失效该账户的路由绑定，下一次请求改走其他账户
         if super::quota::looks_exhausted_error(status, &text) {
             log::warn(i18n::pick(
@@ -788,7 +788,7 @@ async fn messages(
             .chars()
             .take(500)
             .collect::<String>();
-        log::error(&format!("CC API error (Anthropic): {status} — {}", summarize_upstream_error(&text)));
+        log::error(&format!("Command Code API error (Anthropic): {status} — {}", summarize_upstream_error(&text)));
         // 上游明确报额度耗尽：即时失效该账户的路由绑定（与 OpenAI 路径一致）
         if super::quota::looks_exhausted_error(status, &text) {
             log::warn(i18n::pick(
@@ -805,7 +805,7 @@ async fn messages(
         let msg = mapped_body
             .pointer("/error/message")
             .and_then(|v| v.as_str())
-            .unwrap_or("CC API error");
+            .unwrap_or("Command Code API error");
         let retry_after = mapped_body.get("retry_after").and_then(|v| v.as_u64());
         let (status2, body2) = errors::anthropic_error(mapped_status, err_type, msg, retry_after);
         finish_request(&st, &ctx, "error");
@@ -906,7 +906,7 @@ async fn responses(
             .chars()
             .take(500)
             .collect::<String>();
-        log::error(&format!("CC API error (Responses): {status} — {}", summarize_upstream_error(&text)));
+        log::error(&format!("Command Code API error (Responses): {status} — {}", summarize_upstream_error(&text)));
         // 上游明确报额度耗尽：即时失效该账户的路由绑定（三条协议入口保持一致）
         if super::quota::looks_exhausted_error(status, &text) {
             log::warn(i18n::pick(
@@ -1680,11 +1680,11 @@ fn parse_ndjson_line(
                 .and_then(|v| v.as_str())
                 .or_else(|| event.get("message").and_then(|v| v.as_str()))
                 .unwrap_or("Unknown error");
-            log::warn(&format!("CC error (non-stream): {msg}"));
+            log::warn(&format!("Command Code error (non-stream): {msg}"));
         }
         "reasoning-end" | "provider-metadata" | "tool-input-start" | "tool-input-delta" | "tool-input-end" | "tool-error" | "text-end" => {}
         other => {
-            log::warn(&format!("Unknown CC event type: {other}"));
+            log::warn(&format!("Unknown Command Code event type: {other}"));
         }
     }
 }

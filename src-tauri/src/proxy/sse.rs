@@ -238,11 +238,11 @@ impl OpenAiTranslator {
                     .and_then(|v| v.as_str())
                     .or_else(|| event.get("message").and_then(|v| v.as_str()))
                     .unwrap_or("Unknown error");
-                log::warn(&format!("CC stream error: {msg}"));
+                log::warn(&format!("Command Code stream error: {msg}"));
             }
             "reasoning-end" | "provider-metadata" | "tool-input-start" | "tool-input-delta" | "tool-input-end" | "tool-error" | "text-end" => {}
             other => {
-                log::warn(&format!("Unknown CC event type: {other}"));
+                log::warn(&format!("Unknown Command Code event type: {other}"));
             }
         }
         out
@@ -634,7 +634,7 @@ impl ResponsesTranslator {
                     .pointer("/error/message")
                     .and_then(|v| v.as_str())
                     .or_else(|| event.get("message").and_then(|v| v.as_str()))
-                    .unwrap_or("Unknown CC error");
+                    .unwrap_or("Unknown Command Code error");
                 out.push(self.sse(
                     "response.failed",
                     serde_json::json!({
@@ -646,7 +646,7 @@ impl ResponsesTranslator {
                 ));
             }
             other => {
-                log::warn(&format!("Unknown CC event type: {other}"));
+                log::warn(&format!("Unknown Command Code event type: {other}"));
             }
         }
         out
@@ -950,7 +950,7 @@ impl AnthropicTranslator {
                     .pointer("/error/message")
                     .and_then(|v| v.as_str())
                     .or_else(|| event.get("message").and_then(|v| v.as_str()))
-                    .unwrap_or("Unknown CC error");
+                    .unwrap_or("Unknown Command Code error");
                 out.push(format!(
                     "event: error\ndata: {}\n\n",
                     serde_json::json!({ "type": "error", "error": { "type": "internal_error", "message": msg } })
@@ -958,7 +958,7 @@ impl AnthropicTranslator {
             }
             "reasoning-end" | "provider-metadata" | "tool-input-start" | "tool-input-delta" | "tool-input-end" | "tool-error" | "text-end" => {}
             other => {
-                log::warn(&format!("Unknown CC event type: {other}"));
+                log::warn(&format!("Unknown Command Code event type: {other}"));
             }
         }
         out

@@ -22,7 +22,7 @@ pub fn map_cc_error(cc_status: u16, cc_body: &str) -> (u16, Value) {
         _ => (502, "upstream_error"),
     };
 
-    let mut message = format!("CC API error ({cc_status})");
+    let mut message = format!("Command Code API error ({cc_status})");
     if !cc_body.is_empty() {
         if let Ok(parsed) = serde_json::from_str::<Value>(cc_body) {
             if let Some(m) = parsed

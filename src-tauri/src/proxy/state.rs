@@ -126,8 +126,8 @@ pub struct AppState {
     pub started_at: Mutex<Option<u64>>,
     /// 最近请求队列（最新在前，上限 500 条）。
     pub requests: Mutex<VecDeque<RequestInfo>>,
-    /// 复用的上游 HTTP 客户端（带 10s 连接超时）。
-    pub client: reqwest::Client,
+    /// 复用的上游 HTTP 客户端（带 10s 连接超时；可随代理配置热更新）。
+    pub client: RwLock<reqwest::Client>,
     /// 优雅停机信号发送端，serve() 的 with_graceful_shutdown 持有接收端。
     pub shutdown: Mutex<Option<oneshot::Sender<()>>>,
     /// token 用量统计数据库连接（setup 阶段初始化；代理层经此记录/查询）。
@@ -141,8 +141,15 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// 以给定配置构建全局状态（连接超时 10s 的 HTTP 客户端、默认 CLI 版本 0.32.3）。
+    /// 以给定配置构建全局状态（按代理配置构建 HTTP 客户端、默认 CLI 版本 0.32.3）。
+    /// client 构建失败时回退到不带代理的客户端。
     pub fn new(config: Config) -> Arc<Self> {
+        let client = build_client(&config).unwrap_or_else(|_| {
+            reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("failed to build http client")
+        });
         Arc::new(Self {
             config: RwLock::new(config),
             sessions: Mutex::new(HashMap::new()),
@@ -161,16 +168,25 @@ impl AppState {
             running: AtomicBool::new(false),
             started_at: Mutex::new(None),
             requests: Mutex::new(VecDeque::new()),
-            client: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .build()
-                .expect("failed to build http client"),
+            client: RwLock::new(client),
             shutdown: Mutex::new(None),
             usage: Mutex::new(None),
             fingerprint_path: Mutex::new(None),
             auth_login: Mutex::new(None),
             auth_login_shutdown: Mutex::new(None),
         })
+    }
+
+    /// 取当前 HTTP 客户端（读锁 + clone；reqwest::Client 内部为 Arc 共享，clone 廉价）。
+    pub fn client(&self) -> reqwest::Client {
+        self.client.read().unwrap().clone()
+    }
+
+    /// 按配置重建 HTTP 客户端（代理配置变更后热更新用），失败返回错误描述。
+    pub fn rebuild_client(&self, config: &Config) -> Result<(), String> {
+        let client = build_client(config)?;
+        *self.client.write().unwrap() = client;
+        Ok(())
     }
 
     /// 注入指纹持久化文件路径（应用启动时调用一次；不注入则指纹仅存内存）。
@@ -259,4 +275,46 @@ impl AppState {
     pub fn init_jitter_ms() -> u64 {
         2 * 60 * 60 * 1000
     }
+}
+
+/// 按出站代理配置构建 HTTP 客户端（10s 连接超时）。
+///
+/// - `none`：显式禁用系统代理（不读环境变量）；
+/// - `system`：不设置代理，由 reqwest 的 system-proxy 特性自动读取
+///   HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY 环境变量；
+/// - `custom`：按 proxy_type 构造 socks5:// 或 http:// 代理 URL（带认证则内联用户名密码）。
+pub fn build_client(config: &Config) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10));
+    match config.proxy_mode.as_str() {
+        "none" => {
+            builder = builder.no_proxy();
+        }
+        "system" => {
+            // 不设置代理：reqwest 自动读系统环境变量代理
+        }
+        "custom" => {
+            let scheme = match config.proxy_type.as_str() {
+                "http" => "http",
+                _ => "socks5",
+            };
+            let auth = if config.proxy_username.is_empty() {
+                String::new()
+            } else {
+                format!("{}:{}@", config.proxy_username, config.proxy_password)
+            };
+            let url = format!("{scheme}://{auth}{}:{}", config.proxy_host, config.proxy_port);
+            let proxy = reqwest::Proxy::all(&url).map_err(|e| {
+                crate::i18n::err_args("proxy_build_failed", &[&e.to_string()])
+            })?;
+            builder = builder.proxy(proxy);
+        }
+        // 未知模式（validate 已拦截，防御性回退到不走代理）
+        _ => {
+            builder = builder.no_proxy();
+        }
+    }
+    builder.build().map_err(|e| {
+        crate::i18n::err_args("client_build_failed", &[&e.to_string()])
+    })
 }

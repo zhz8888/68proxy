@@ -192,7 +192,7 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str, user_id: &str) 
     }
     // 指纹同样以 user_id 键控：同一账户换 key 后保持同一设备身份
     let fingerprint = get_or_create_key_state(state, user_id).fingerprint;
-    let client = state.client.clone();
+    let client = state.client();
 
     // 两个初始化预请求的 URL 与请求体：上报指纹 + 上报 CLI 会话存活事件
     let fp_url = format!("{}/alpha/fingerprint/record", cfg.api_base);
@@ -303,7 +303,7 @@ pub async fn forward_to_cc(
     }
 
     state
-        .client
+        .client()
         .post(&url)
         .headers(headers)
         .json(body)
@@ -315,7 +315,7 @@ pub async fn forward_to_cc(
 pub async fn refresh_cc_version(state: &AppState) {
     let res = tokio::time::timeout(Duration::from_secs(10), async {
         state
-            .client
+            .client()
             .get("https://registry.npmjs.org/command-code/latest")
             .send()
             .await
@@ -357,7 +357,7 @@ pub async fn fetch_models(state: &AppState, api_key: Option<&str>) -> (Vec<Model
             let url = format!("{}/provider/v1/models", cfg.api_base);
             let headers = base_headers(state, key);
             match tokio::time::timeout(Duration::from_secs(10), async {
-                state.client.get(&url).headers(headers).send().await
+                state.client().get(&url).headers(headers).send().await
             })
             .await
             {

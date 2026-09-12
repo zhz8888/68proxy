@@ -161,6 +161,18 @@ pub struct Config {
     pub theme: String,
     /// 界面语言：`zh`（简体中文，默认）/ `en`（英文）。
     pub language: String,
+    /// 出站代理模式：`none`（不走代理，默认）/ `system`（跟随系统环境变量）/ `custom`（自定义代理）。
+    pub proxy_mode: String,
+    /// 自定义代理类型：`socks5` / `http`（仅 custom 模式生效）。
+    pub proxy_type: String,
+    /// 自定义代理主机（仅 custom 模式生效）。
+    pub proxy_host: String,
+    /// 自定义代理端口（仅 custom 模式生效）。
+    pub proxy_port: u16,
+    /// 自定义代理认证用户名（可选，仅 custom 模式生效）。
+    pub proxy_username: String,
+    /// 自定义代理认证密码（可选，仅 custom 模式生效）。
+    pub proxy_password: String,
 }
 
 impl Default for Config {
@@ -192,6 +204,12 @@ impl Default for Config {
             preferred_account_id: String::new(),
             theme: "system".into(),
             language: "zh".into(),
+            proxy_mode: "none".into(),
+            proxy_type: "socks5".into(),
+            proxy_host: String::new(),
+            proxy_port: 0,
+            proxy_username: String::new(),
+            proxy_password: String::new(),
         }
     }
 }
@@ -220,6 +238,20 @@ impl Config {
         }
         if !matches!(self.language.as_str(), "zh" | "en") {
             return Err(crate::i18n::err("config_invalid_language"));
+        }
+        if !matches!(self.proxy_mode.as_str(), "none" | "system" | "custom") {
+            return Err(crate::i18n::err("config_invalid_proxy_mode"));
+        }
+        if !matches!(self.proxy_type.as_str(), "socks5" | "http") {
+            return Err(crate::i18n::err("config_invalid_proxy_type"));
+        }
+        if self.proxy_mode == "custom" {
+            if self.proxy_host.trim().is_empty() {
+                return Err(crate::i18n::err("config_invalid_proxy_host"));
+            }
+            if !(1..=65535).contains(&self.proxy_port) {
+                return Err(crate::i18n::err("config_invalid_proxy_port"));
+            }
         }
         Ok(())
     }

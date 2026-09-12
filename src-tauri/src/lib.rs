@@ -102,7 +102,23 @@ fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Valu
     let prev = ctx.proxy_state.config.read().unwrap().clone();
     let needs_restart =
         (prev.port != config.port || prev.host != config.host) && ctx.proxy_state.is_running();
+    // 出站代理配置变更时热更新 HTTP 客户端（重建带代理的 client），无需重启
+    let proxy_changed = prev.proxy_mode != config.proxy_mode
+        || prev.proxy_type != config.proxy_type
+        || prev.proxy_host != config.proxy_host
+        || prev.proxy_port != config.proxy_port
+        || prev.proxy_username != config.proxy_username
+        || prev.proxy_password != config.proxy_password;
     *ctx.proxy_state.config.write().unwrap() = config.clone();
+    if proxy_changed {
+        if let Err(e) = ctx.proxy_state.rebuild_client(&config) {
+            // 重建失败（如代理地址非法）不阻断保存，仅记录并保留旧 client
+            proxy::log::warn(&format!(
+                "{}: {e}",
+                i18n::pick("代理客户端重建失败，沿用旧配置", "Failed to rebuild the proxy client; keeping the previous one")
+            ));
+        }
+    }
     proxy::log::info(i18n::pick("配置已保存", "Settings saved"));
     Ok(json!({ "needs_restart": needs_restart }))
 }
@@ -197,7 +213,8 @@ async fn account_add(app: AppHandle, key: String, user_name: Option<String>) -> 
     }
     let ctx = app.state::<AppCtx>();
     let api_base = ctx.proxy_state.config.read().unwrap().api_base.clone();
-    let (user_id, default_name) = credentials::verify_account_key(&api_base, &key).await?;
+    let (user_id, default_name) =
+        credentials::verify_account_key(&ctx.proxy_state.client(), &api_base, &key).await?;
     let display = user_name.unwrap_or(default_name);
     let accounts = {
         let guard = ctx.proxy_state.usage.lock().unwrap();

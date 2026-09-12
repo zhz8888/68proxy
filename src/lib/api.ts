@@ -40,6 +40,18 @@ export interface Config {
   theme: ThemeMode;
   /** 界面语言：zh（简体中文）/ en（英文）。 */
   language: Language;
+  /** 出站代理模式：none（不走代理，默认）/ system（跟随系统环境变量）/ custom（自定义代理）。 */
+  proxy_mode: string;
+  /** 自定义代理类型：socks5 / http（仅 custom 模式生效）。 */
+  proxy_type: string;
+  /** 自定义代理主机（仅 custom 模式生效）。 */
+  proxy_host: string;
+  /** 自定义代理端口（仅 custom 模式生效）。 */
+  proxy_port: number;
+  /** 自定义代理认证用户名（可选，仅 custom 模式生效）。 */
+  proxy_username: string;
+  /** 自定义代理认证密码（可选，仅 custom 模式生效）。 */
+  proxy_password: string;
 }
 
 /** 代理运行状态：是否运行、监听地址、OpenAI/Anthropic 接入 URL、上游版本与运行时长。 */

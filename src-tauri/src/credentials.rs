@@ -313,14 +313,12 @@ pub fn route_account(
 /// 用 API Key 调用上游 `/alpha/whoami` 验证有效性并取回账户身份（userId/userName）。
 ///
 /// 成功返回 `(userId, userName)`；401 表示 key 无效，其他状态/网络错误给出中文描述。
-pub async fn verify_account_key(api_base: &str, api_key: &str) -> Result<(String, String), String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| {
-            let e = e.to_string();
-            i18n::err_args("client_build_failed", &[&e])
-        })?;
+/// `client` 由调用方传入（AppState 的 HTTP 客户端，含出站代理配置），确保验证也走代理。
+pub async fn verify_account_key(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> Result<(String, String), String> {
     let url = format!("{api_base}/alpha/whoami");
     let res = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         client
