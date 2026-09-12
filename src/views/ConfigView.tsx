@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Download,
@@ -116,6 +116,12 @@ function Field({
 export function ConfigView() {
   const [cfg, setCfg] = useState<Config>(DEFAULTS);
   const [loaded, setLoaded] = useState(false);
+  // 加载失败提示（加载失败时禁用自动保存，避免用默认值覆盖后端配置）
+  const [loadError, setLoadError] = useState("");
+  // 端口以字符串保存，允许输入过程中的空值/非法值，仅在合法时同步到 cfg.port
+  const [portInput, setPortInput] = useState(String(DEFAULTS.port));
+  // 是否已完成一次成功的加载：用于跳过一次「加载后立即自动保存」
+  const skipNextAutosave = useRef(true);
   // 本地转发 Key（sk-）与 CC 账户（user_）的凭据状态
   const [localKey, setLocalKey] = useState<ApiKeyState>({ has_key: false, masked: "" });
   const [localKeyInput, setLocalKeyInput] = useState("");
@@ -139,12 +145,19 @@ export function ConfigView() {
 
   // 挂载时并行加载配置、本地 Key 与账户列表，loaded 用于区分“初始加载完成”
   useEffect(() => {
-    Promise.all([api.configGet(), api.localKeyGet(), api.accountList()]).then(([c, k, a]) => {
-      setCfg(c);
-      setLocalKey(k);
-      setAccounts(a.accounts);
-      setLoaded(true);
-    });
+    Promise.all([api.configGet(), api.localKeyGet(), api.accountList()])
+      .then(([c, k, a]) => {
+        setCfg(c);
+        setPortInput(String(c.port));
+        setLocalKey(k);
+        setAccounts(a.accounts);
+        setLoaded(true);
+      })
+      .catch((e) => {
+        // 加载失败不得静默：先前的实现会让 loaded 永远为 false，
+        // 页面显示假默认值且所有编辑都不落库
+        setLoadError(String(e));
+      });
   }, []);
 
   // 端口改动后防抖 400ms 再检测占用，避免逐字符输入时频繁请求
@@ -155,6 +168,15 @@ export function ConfigView() {
     }, 400);
     return () => clearTimeout(t);
   }, [cfg.port, loaded]);
+
+  /** 更新端口输入：仅在 1-65535 时同步到配置，空值/非法值期间不触发保存与检测。 */
+  function updatePort(raw: string) {
+    setPortInput(raw);
+    const n = Number(raw);
+    if (raw.trim() !== "" && Number.isInteger(n) && n >= 1 && n <= 65535) {
+      update("port", n);
+    }
+  }
 
   /** 更新单个配置字段（只改本地状态，实际保存由防抖 effect 完成）。 */
   function update<K extends keyof Config>(key: K, value: Config[K]) {
@@ -191,12 +213,17 @@ export function ConfigView() {
 
   // 配置改动后自动保存（防抖 600ms），无需手动点保存
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || loadError) return;
+    // 跳过「加载完成后」的第一次触发：否则每次进入页面都会无条件回写一次配置
+    if (skipNextAutosave.current) {
+      skipNextAutosave.current = false;
+      return;
+    }
     const t = setTimeout(() => {
       save();
     }, 600);
     return () => clearTimeout(t);
-  }, [cfg, loaded]);
+  }, [cfg, loaded, loadError]);
 
   /** 校验并保存本地转发 Key（必须以 sk- 开头）。 */
   async function saveLocalKey() {
@@ -380,14 +407,20 @@ export function ConfigView() {
 
   return (
     <div className="space-y-4 pb-8">
+        {loadError && (
+          <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            配置加载失败，自动保存已停用以免覆盖后端配置：{loadError}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-4">
           <Section title="服务" desc="代理监听地址与端口">
             <Field label="监听端口" hint="1-65535">
               <div className="space-y-1.5">
                 <Input
                   type="number"
-                  value={cfg.port}
-                  onChange={(e) => update("port", Number(e.target.value))}
+                  value={portInput}
+                  onChange={(e) => updatePort(e.target.value)}
                 />
                 {portInUse.in_use && (
                   <div className="space-y-1.5">

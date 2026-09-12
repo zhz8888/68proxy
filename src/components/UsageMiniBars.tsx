@@ -34,7 +34,7 @@ export function UsageMiniBars({ buckets }: { buckets: UsageMinuteBucket[] }) {
     const v = b.prompt_tokens + b.completion_tokens;
     const h = Math.max((v / max) * innerH, v > 0 ? 2 : 0);
     const y = PAD.top + innerH - h;
-    const minsAgo = buckets.length - 1 - i; // 新在前：i=0 为最近 1 分钟
+    const minsAgo = buckets.length - 1 - i; // 数组按时间从旧到新排列：i=0 最旧，末尾最新
     const label =
       minsAgo === 0
         ? "刚刚"

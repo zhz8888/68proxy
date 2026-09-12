@@ -69,7 +69,7 @@ pub struct UsageStats {
     pub by_model: Vec<GroupRow>,
     /// 按端点分组。
     pub by_endpoint: Vec<GroupRow>,
-    /// 最近 10 分钟（10 个分钟桶，新在前）。
+    /// 最近 10 分钟（10 个分钟桶，数组按时间从旧到新排列，index 0 最早）。
     pub last_10_minutes: Vec<MinuteBucket>,
     /// 最近请求明细（新在前，上限 20 条）。
     pub recent_requests: Vec<RecentRow>,
@@ -252,6 +252,27 @@ fn hour_label_of(ts: u64) -> String {
     format!("{:02}:00", d.hour())
 }
 
+/// 今天本地 0 点对应的 Unix 毫秒时间戳。
+///
+/// DST 跳变时午夜可能是「不存在」或「有歧义」的时刻，`.single()` 会返回 None；
+/// 此时回退 `earliest()`（跳到最早的有效时刻），**不能**回退 0，
+/// 否则「今日」统计会退化为统计全部历史。
+fn local_midnight_millis() -> u64 {
+    let n = chrono::Local::now();
+    let midnight = n
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap_or_else(|| n.date_naive().and_hms_opt(0, 0, 1).unwrap());
+    midnight
+        .and_local_timezone(Local)
+        .earliest()
+        .map(|dt| dt.timestamp_millis() as u64)
+        .unwrap_or_else(|| {
+            // 极端兜底：取当天 0 点前推 1 毫秒所在时刻，保证为「今日起点」量级
+            n.timestamp_millis().max(0) as u64
+        })
+}
+
 /// 读取某天的预聚合数据，不存在时返回默认空结构。
 fn load_day(conn: &Connection, key: &str) -> DayAgg {
     let raw: Option<String> = conn
@@ -407,18 +428,7 @@ pub fn get_stats(conn: &Connection, period: Period) -> Result<UsageStats, String
         // Today：从本地 0 点起；24h：从 now-24h 起 —— 均实时扫明细
         None => {
             let cutoff = match period {
-                Period::Today => {
-                    let n = chrono::Local::now();
-                    let midnight = n
-                        .date_naive()
-                        .and_hms_opt(0, 0, 0)
-                        .unwrap_or_else(|| n.date_naive().and_hms_opt(0, 0, 1).unwrap());
-                    midnight
-                        .and_local_timezone(Local)
-                        .single()
-                        .map(|dt| dt.timestamp_millis() as u64)
-                        .unwrap_or(0)
-                }
+                Period::Today => local_midnight_millis(),
                 Period::H24 => now.saturating_sub(24 * 60 * 60 * 1000),
                 _ => 0,
             };
@@ -476,7 +486,7 @@ pub fn get_stats(conn: &Connection, period: Period) -> Result<UsageStats, String
         .collect();
     by_endpoint.sort_by(|a, b| b.requests.cmp(&a.requests));
 
-    // 最近 10 分钟：10 个分钟桶（新在前）
+    // 最近 10 分钟：10 个分钟桶（数组按时间从旧到新排列，index 0 最早）
     let mut last_10_minutes = Vec::with_capacity(10);
     let min_cutoff = now.saturating_sub(10 * 60 * 1000);
     let recent = query_rows(conn, min_cutoff, i64::MAX as u64)?;
@@ -516,7 +526,8 @@ pub fn get_stats(conn: &Connection, period: Period) -> Result<UsageStats, String
     })
 }
 
-/// 趋势图数据：today/24h 按小时 24 桶，7D/30D/60D 按天 N 桶（新在前）。
+/// 趋势图数据：today/24h 按小时 24 桶，7D/30D/60D 按天 N 桶
+/// （数组按时间从旧到新排列，index 0 最早）。
 pub fn get_chart(conn: &Connection, period: Period) -> Result<Vec<ChartPoint>, String> {
     let now = super::state::now_millis();
     match period.days() {
@@ -538,22 +549,11 @@ pub fn get_chart(conn: &Connection, period: Period) -> Result<Vec<ChartPoint>, S
         }
         None => {
             let cutoff = match period {
-                Period::Today => {
-                    let n = chrono::Local::now();
-                    let midnight = n
-                        .date_naive()
-                        .and_hms_opt(0, 0, 0)
-                        .unwrap_or_else(|| n.date_naive().and_hms_opt(0, 0, 1).unwrap());
-                    midnight
-                        .and_local_timezone(Local)
-                        .single()
-                        .map(|dt| dt.timestamp_millis() as u64)
-                        .unwrap_or(0)
-                }
+                Period::Today => local_midnight_millis(),
                 _ => now.saturating_sub(24 * 60 * 60 * 1000),
             };
             let rows = query_rows(conn, cutoff, i64::MAX as u64)?;
-            // 24 个 1 小时桶（新在前）
+            // 24 个 1 小时桶（数组按时间从旧到新排列，index 0 最早）
             let mut buckets = vec![(0u64, 0u64, 0.0f64); 24];
             for r in &rows {
                 let idx = (now.saturating_sub(r.ts)) / (60 * 60 * 1000);

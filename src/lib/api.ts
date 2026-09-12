@@ -122,7 +122,7 @@ export interface UsageRecentRow {
   elapsed_ms: number;
 }
 
-/** 最近 10 分钟的一个分钟桶（新在前）。 */
+/** 最近 10 分钟的一个分钟桶（数组按时间从旧到新排列，index 0 最早）。 */
 export interface UsageMinuteBucket {
   requests: number;
   prompt_tokens: number;

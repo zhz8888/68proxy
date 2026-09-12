@@ -64,11 +64,20 @@ pub fn price_for(model: &str) -> Price {
         if let Some(p) = table.get(short) {
             return *p;
         }
-        // 短名前缀匹配，如 "claude-sonnet-4-6-xxxx" 命中 "claude-sonnet-4-6"
+        // 短名前缀匹配，如 "claude-sonnet-4-6-xxxx" 命中 "claude-sonnet-4-6"。
+        // 一个短名可能同时匹配多个 key（如 gpt-5 与 gpt-5.1-codex-mini），必须取
+        // 「最长前缀」而非遍历 HashMap 的首个命中，否则结果随哈希种子随机、不可复现。
+        let mut best: Option<(&str, Price)> = None;
         for (key, p) in &table {
             if short.starts_with(key) {
-                return *p;
+                let better = best.map(|(bk, _)| key.len() > bk.len()).unwrap_or(true);
+                if better {
+                    best = Some((key, *p));
+                }
             }
+        }
+        if let Some((_, p)) = best {
+            return p;
         }
     }
     FALLBACK_PRICE
@@ -135,5 +144,17 @@ mod tests {
         // 短名前缀匹配：claude-sonnet-4-6-xxx 命中 claude-sonnet-4-6
         let p = price_for("claude-sonnet-4-6-20250929");
         assert!((p.input - 3.00).abs() < 1e-9);
+    }
+
+    #[test]
+    fn price_longest_prefix_wins() {
+        // gpt-5.1-codex-mini-xxx 同时是 gpt-5 与 gpt-5.1-codex-mini 的前缀，
+        // 必须取最长者（mini 价 1.50），不能随 HashMap 迭代顺序随机命中 gpt-5
+        for _ in 0..32 {
+            let p = price_for("gpt-5.1-codex-mini-20250101");
+            assert!((p.input - 1.50).abs() < 1e-9, "应命中 gpt-5.1-codex-mini");
+        }
+        let p = price_for("gpt-5.1-codex-max-preview");
+        assert!((p.input - 8.00).abs() < 1e-9);
     }
 }

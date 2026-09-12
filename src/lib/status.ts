@@ -11,6 +11,9 @@ export function lampForStatus(status: string): LampState {
       return "timeout";
     case "error":
       return "error";
+    // 上游断连与错误同属异常收尾，用错误灯而非「未运行」灰灯，避免语义误导
+    case "disconnect":
+      return "error";
     default:
       return "stopped";
   }

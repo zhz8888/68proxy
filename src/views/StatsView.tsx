@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Activity, AlertTriangle, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ModelLogo } from "@/components/ModelLogo";
@@ -56,7 +56,7 @@ function SummaryCard({ title, value, hint }: { title: string; value: string; hin
 }
 
 /** 分组表格行：key + 请求数 + 各 token 列 + 成本。 */
-function GroupRowLine({ row, showCost }: { row: UsageGroupRow; showCost: boolean }) {
+function GroupRowLine({ row }: { row: UsageGroupRow }) {
   return (
     <div className="flex items-center gap-3 rounded-md border border-border/70 bg-secondary/30 px-3 py-2">
       <ModelLogo model={row.key} size={16} className="!p-0.5" />
@@ -73,11 +73,9 @@ function GroupRowLine({ row, showCost }: { row: UsageGroupRow; showCost: boolean
       <span className="w-16 text-right font-mono text-xs text-muted-foreground">
         {formatTokens(row.total_tokens)}
       </span>
-      {showCost && (
-        <span className="w-16 text-right font-mono text-xs text-muted-foreground">
-          {formatCost(row.cost)}
-        </span>
-      )}
+      <span className="w-16 text-right font-mono text-xs text-muted-foreground">
+        {formatCost(row.cost)}
+      </span>
     </div>
   );
 }
@@ -90,25 +88,42 @@ export function StatsView() {
   const [chartMode, setChartMode] = useState<"tokens" | "cost">("tokens");
   const [groupBy, setGroupBy] = useState<"model" | "endpoint">("model");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  // 每次请求的序号：仅当结果仍属于最新一次请求时才落库，避免快速切换周期时旧结果覆盖新结果
+  const reqSeq = useRef(0);
 
   /** 拉取当前时间范围的汇总与趋势数据。 */
   const refresh = useCallback(async (p: UsagePeriod) => {
+    const seq = ++reqSeq.current;
     try {
       const [s, c] = await Promise.all([api.statsGet(p), api.statsChart(p)]);
+      if (seq !== reqSeq.current) return; // 已有更新的请求，丢弃本次结果
       setStats(s);
       setChart(c);
-    } catch {
-      /* 忽略刷新错误，保留旧数据 */
+      setLoadError("");
+    } catch (e) {
+      if (seq !== reqSeq.current) return;
+      // 不再静默吞错：保留旧数据的同时给出可见提示，便于区分「无数据」与「查询失败」
+      setLoadError(String(e));
     }
   }, []);
 
-  // 挂载时加载数据，订阅用量更新事件，并以 3 秒轮询兜底
+  // 挂载时加载数据，订阅用量更新事件（节流合并），并以 3 秒轮询兜底
   useEffect(() => {
     refresh(period);
-    const off = onStats(() => refresh(period));
+    // 后端用量事件最密可达约 5 次/秒，这里合并为最多每 1 秒刷新一次，避免高频重量级查询
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const off = onStats(() => {
+      if (debounce) return;
+      debounce = setTimeout(() => {
+        debounce = null;
+        refresh(period);
+      }, 1000);
+    });
     const timer = setInterval(() => refresh(period), 3000);
     return () => {
       off.then((f) => f());
+      if (debounce) clearTimeout(debounce);
       clearInterval(timer);
     };
   }, [period, refresh]);
@@ -153,6 +168,12 @@ export function StatsView() {
           <Activity className="h-3.5 w-3.5" />
           共 {stats?.total_requests ?? 0} 次请求 · 估算成本仅供参考
         </div>
+        {loadError && (
+          <div className="flex items-center gap-1.5 rounded-lg bg-destructive/15 px-3 py-1.5 text-xs text-destructive">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            统计加载失败：{loadError}
+          </div>
+        )}
         <div className="flex-1" />
         <Button
           variant="secondary"
@@ -222,7 +243,7 @@ export function StatsView() {
                   </SelectContent>
                 </Select>
               </div>
-              <CardDescription>请求数 / 输入 / 输出 / 总 Tokens{chartMode === "cost" ? " / 成本" : ""}</CardDescription>
+              <CardDescription>请求数 / 输入 / 输出 / 总 Tokens / 成本</CardDescription>
             </CardHeader>
             <CardContent className="pt-0">
               {groupRows.length === 0 ? (
@@ -239,10 +260,10 @@ export function StatsView() {
                     <span className="w-20 text-right">输入</span>
                     <span className="w-20 text-right">输出</span>
                     <span className="w-16 text-right">总 Tokens</span>
-                    {chartMode === "cost" && <span className="w-16 text-right">成本</span>}
+                    <span className="w-16 text-right">成本</span>
                   </div>
                   {groupRows.map((r) => (
-                    <GroupRowLine key={r.key} row={r} showCost={chartMode === "cost"} />
+                    <GroupRowLine key={r.key} row={r} />
                   ))}
                 </div>
               )}
@@ -253,10 +274,10 @@ export function StatsView() {
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm">最近请求</CardTitle>
-              <CardDescription>最近 20 条成功计费请求的 token 用量</CardDescription>
+              <CardDescription>全时段最近 20 条成功计费请求的 token 用量（不随上方时间范围变化）</CardDescription>
             </CardHeader>
             <CardContent className="pt-0">
-              {!hasData || !stats || stats.recent_requests.length === 0 ? (
+              {!stats || stats.recent_requests.length === 0 ? (
                 <p className="py-8 text-center text-sm text-muted-foreground">
                   暂无最近请求记录。请求完成且产出 token 后显示在此。
                 </p>
