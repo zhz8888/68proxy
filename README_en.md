@@ -7,11 +7,13 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/evanfu0110/68proxy?style=flat-square&label=Stars&color=4B6BFB" alt="GitHub Stars">
-  <img src="https://img.shields.io/github/v/release/evanfu0110/68proxy?style=flat-square&label=Release&color=2E9E6B" alt="Latest Release">
-  <img src="https://img.shields.io/github/license/evanfu0110/68proxy?style=flat-square&label=License&color=E85642" alt="License">
+  <img src="https://img.shields.io/github/stars/zhz8888/68proxy?style=flat-square&label=Stars&color=4B6BFB" alt="GitHub Stars">
+  <img src="https://img.shields.io/github/v/release/zhz8888/68proxy?style=flat-square&label=Release&color=2E9E6B" alt="Latest Release">
+  <img src="https://img.shields.io/github/license/zhz8888/68proxy?style=flat-square&label=License&color=E85642" alt="License">
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-64748B?style=flat-square" alt="Platform">
 </p>
+
+> This repository is a personal fork of [evanfu0110/68proxy](https://github.com/evanfu0110/68proxy), actively maintained and enhanced on top of the original.
 
 **68PROXY** is a plug-and-play local **reverse proxy + protocol gateway**: a relay between your clients and Command Code that rewrites requests into the CC CLI envelope format and forwards them upstream, while exposing OpenAI / Anthropic compatible endpoints — so Cursor, OpenCode, Cherry Studio and your own tools can connect directly without any SDK adaptation. Your API key is stored in plaintext in a local config file — configure once, reuse everywhere.
 
@@ -170,16 +172,9 @@ Artifacts produced:
 - [axum](https://github.com/tokio-rs/axum) — Rust web framework
 
 <p align="center">
-  <img src="./assets/readme/section-contact.svg" width="100%" alt="Contact">
-</p>
-
-- GitHub: [evanfu0110](https://github.com/evanfu0110)
-- Website: [www.110.wtf](https://www.110.wtf)
-- Email: [1771005798@qq.com](mailto:1771005798@qq.com)
-- Telegram: [@Z6ix8ightBot](https://t.me/Z6ix8ightBot)
-
-<p align="center">
   <img src="./assets/readme/section-license.svg" width="100%" alt="License">
 </p>
 
-[MIT](LICENSE) © 6ix8ight
+This repository is a personal fork of [evanfu0110/68proxy](https://github.com/evanfu0110/68proxy), licensed under the upstream [MIT](LICENSE) license. Upstream copyright belongs to 6ix8ight; fork maintenance and enhancements are © zhz8888.
+
+[MIT](LICENSE) © 6ix8ight · fork © zhz8888

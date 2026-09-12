@@ -7,11 +7,13 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/evanfu0110/68proxy?style=flat-square&label=Stars&color=4B6BFB" alt="GitHub Stars">
-  <img src="https://img.shields.io/github/v/release/evanfu0110/68proxy?style=flat-square&label=Release&color=2E9E6B" alt="Latest Release">
-  <img src="https://img.shields.io/github/license/evanfu0110/68proxy?style=flat-square&label=License&color=E85642" alt="License">
+  <img src="https://img.shields.io/github/stars/zhz8888/68proxy?style=flat-square&label=Stars&color=4B6BFB" alt="GitHub Stars">
+  <img src="https://img.shields.io/github/v/release/zhz8888/68proxy?style=flat-square&label=Release&color=2E9E6B" alt="Latest Release">
+  <img src="https://img.shields.io/github/license/zhz8888/68proxy?style=flat-square&label=License&color=E85642" alt="License">
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-64748B?style=flat-square" alt="Platform">
 </p>
+
+> 本仓库为 [evanfu0110/68proxy](https://github.com/evanfu0110/68proxy) 的个人 fork，在原版基础上持续维护与增强。
 
 **68PROXY** 是一款开箱即用的本地**反向代理 + 协议转换网关**：作为客户端与 Command Code 之间的一层中转，它把请求改写成 CC CLI 信封格式并代理至上游，同时对外暴露 OpenAI Chat Completions / Responses 与 Anthropic Messages 兼容接口——让 Cursor、OpenCode、Cherry Studio、Codex CLI 以及自研工具无需任何 SDK 适配即可直接接入。API Key 明文保存在本地配置文件中，一次配置、全局复用。
 
@@ -171,16 +173,9 @@ pnpm tauri build --bundles dmg --target aarch64-apple-darwin
 - [axum](https://github.com/tokio-rs/axum) — Rust Web 框架
 
 <p align="center">
-  <img src="./assets/readme/section-contact.svg" width="100%" alt="联系 Contact">
-</p>
-
-- GitHub：[evanfu0110](https://github.com/evanfu0110)
-- 网站：[www.110.wtf](https://www.110.wtf)
-- 邮箱：[1771005798@qq.com](mailto:1771005798@qq.com)
-- Telegram：[@Z6ix8ightBot](https://t.me/Z6ix8ightBot)
-
-<p align="center">
   <img src="./assets/readme/section-license.svg" width="100%" alt="许可 License">
 </p>
 
-[MIT](LICENSE) © 6ix8ight
+本仓库为 [evanfu0110/68proxy](https://github.com/evanfu0110/68proxy) 的个人 fork，基于上游 [MIT](LICENSE) 许可。上游版权归 6ix8ight，fork 维护与增强部分归 zhz8888。
+
+[MIT](LICENSE) © 6ix8ight · fork © zhz8888
