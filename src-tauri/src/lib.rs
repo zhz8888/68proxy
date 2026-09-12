@@ -53,21 +53,31 @@ fn proxy_status(app: AppHandle) -> Value {
 #[tauri::command]
 fn config_get(app: AppHandle) -> proxy::config::Config {
     let ctx = app.state::<AppCtx>();
-    let mut cfg = proxy::config::Config::load(&ctx.config_path);
+    let mut cfg = ctx.proxy_state.config.read().unwrap().clone();
     cfg.api_key = String::new();
     cfg
 }
 
-/// 校验并保存配置，同时同步到内存中的代理状态。
+/// 校验并保存配置：写入 SQLite settings 表（主）+ config.json（镜像兜底），
+/// 并同步到内存中的代理状态。
 /// 返回 `needs_restart`：端口/主机变更且代理正在运行时需要重启才能生效。
 #[tauri::command]
 fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Value, String> {
     config.validate()?;
     let ctx = app.state::<AppCtx>();
     // API Key 由 api_key_set / api_key_delete 管理，config_save 不接收该字段，保存前保留原值
-    let stored = proxy::config::Config::load(&ctx.config_path);
+    let stored = ctx.proxy_state.config.read().unwrap().clone();
     config.api_key = stored.api_key;
-    config.save(&ctx.config_path)?;
+    // 主存 SQLite settings 表
+    {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        proxy::settings::save_config(conn, &config)?;
+    }
+    // 镜像到 config.json（兜底），失败仅记 warn 不阻断保存
+    if let Err(e) = config.save(&ctx.config_path) {
+        proxy::log::warn(&format!("config.json 镜像写入失败: {e}"));
+    }
     let prev = ctx.proxy_state.config.read().unwrap().clone();
     let needs_restart =
         (prev.port != config.port || prev.host != config.host) && ctx.proxy_state.is_running();
@@ -80,25 +90,33 @@ fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Valu
 #[tauri::command]
 fn api_key_get(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
-    let key = credentials::load_api_key(&ctx.config_path)?;
+    let key = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        credentials::load_api_key(conn)?
+    };
     Ok(json!({
         "has_key": key.is_some(),
         "masked": key.as_deref().map(credentials::mask_key).unwrap_or_default(),
     }))
 }
 
-/// 保存上游 API Key 到配置文件并刷新内存缓存。入参为完整的 Key 字符串。
+/// 保存上游 API Key 到设置库并刷新内存缓存。入参为完整的 Key 字符串。
 #[tauri::command]
 fn api_key_set(app: AppHandle, key: String) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
-    credentials::save_api_key(&ctx.config_path, &key)
+    let guard = ctx.proxy_state.usage.lock().unwrap();
+    let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+    credentials::save_api_key(conn, &key)
 }
 
-/// 删除已保存的 API Key（清空配置文件字段与内存缓存）。
+/// 删除已保存的 API Key（清空设置库字段与内存缓存）。
 #[tauri::command]
 fn api_key_delete(app: AppHandle) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
-    credentials::delete_api_key(&ctx.config_path)
+    let guard = ctx.proxy_state.usage.lock().unwrap();
+    let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+    credentials::delete_api_key(conn)
 }
 
 /// 获取可用模型列表。`force` 为 true 时先清空缓存再向上游拉取；
@@ -269,11 +287,15 @@ async fn start_proxy_inner(app: &AppHandle) -> Result<Value, String> {
         return Ok(status_value(app));
     }
     // 需要已保存的 API Key 才能启动代理
-    let stored_key = credentials::load_api_key(&ctx.config_path).map_err(|e| format!("读取 API Key 失败: {e}"))?;
+    let stored_key = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| "设置库未初始化".to_string())?;
+        credentials::load_api_key(conn).map_err(|e| format!("读取 API Key 失败: {e}"))?
+    };
     if stored_key.is_none() {
         return Err("未保存 API Key：请先在「配置 → 凭据」保存 user_ 开头的 Key 后再启动代理".into());
     }
-    let cfg = proxy::config::Config::load(&ctx.config_path);
+    let cfg = ctx.proxy_state.config.read().unwrap().clone();
     cfg.validate()?;
     *ctx.proxy_state.config.write().unwrap() = cfg.clone();
 
@@ -472,10 +494,25 @@ pub fn run() {
         ])
         .setup(|app| {
             let config_path = app.path().app_config_dir()?.join("config.json");
-            let cfg = proxy::config::Config::load(&config_path);
+            let usage_path = app.path().app_config_dir()?.join("usage.sqlite");
+
+            // 初始化设置库 + 流量统计库（同一 SQLite 文件），并注入代理状态
+            let usage_conn = proxy::usage::init_usage(&usage_path)?;
+            // 首次启动：config.json 存在且 settings 表为空时迁移到 SQLite
+            proxy::settings::migrate_from_config(&usage_conn, &config_path)?;
+            // 从 SQLite 加载配置（缺字段走默认），再应用环境变量覆写
+            let mut cfg = proxy::settings::load_config(&usage_conn);
+            cfg.apply_env();
+            // config.json 无内容时首次落盘默认值（镜像兜底）
             if !config_path.exists() {
                 let _ = cfg.save(&config_path);
             }
+
+            let proxy_state = proxy::state::AppState::new(cfg.clone());
+            *proxy_state.usage.lock().unwrap() = Some(usage_conn);
+            // 注入指纹持久化路径：同一 API Key 重启后复用同一设备指纹
+            proxy_state
+                .set_fingerprint_path(app.path().app_config_dir()?.join(proxy::fingerprint::STORE_FILE));
 
             // 开机自启跟随配置
             if cfg.autostart {
@@ -507,16 +544,13 @@ pub fn run() {
                 }
             });
 
-            let _ = credentials::load_api_key(&config_path);
-
-            // 初始化 token 用量统计库并注入代理状态
-            let usage_path = app.path().app_config_dir()?.join("usage.sqlite");
-            let usage_conn = proxy::usage::init_usage(&usage_path)?;
-            let proxy_state = proxy::state::AppState::new(cfg.clone());
-            *proxy_state.usage.lock().unwrap() = Some(usage_conn);
-            // 注入指纹持久化路径：同一 API Key 重启后复用同一设备指纹
-            proxy_state
-                .set_fingerprint_path(app.path().app_config_dir()?.join(proxy::fingerprint::STORE_FILE));
+            // 预热 API Key 内存缓存（设置库）
+            {
+                let guard = proxy_state.usage.lock().unwrap();
+                if let Some(conn) = guard.as_ref() {
+                    let _ = credentials::load_api_key(conn);
+                }
+            }
 
             app.manage(AppCtx {
                 config_path,

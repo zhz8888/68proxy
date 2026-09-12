@@ -12,6 +12,7 @@ pub mod fingerprint;
 pub mod log;
 pub mod pricing;
 pub mod server;
+pub mod settings;
 pub mod sse;
 pub mod state;
 pub mod usage;

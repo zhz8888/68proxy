@@ -196,6 +196,7 @@ pub fn init_usage(path: &Path) -> Result<Connection, String> {
 
 /// 在已有连接上建表与索引（供 init_usage 与内存库测试复用）。
 pub fn init_usage_on(conn: &Connection) -> Result<(), String> {
+    super::settings::init_settings_on(conn)?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| format!("设置 WAL 失败: {e}"))?;
     conn.pragma_update(None, "synchronous", "NORMAL").ok();
@@ -279,7 +280,8 @@ fn save_day(conn: &Connection, key: &str, agg: &DayAgg) -> Result<(), String> {
 
 /// 记录一次请求的用量：写明细 + 更新按天聚合 + 自增生命周期计数。
 ///
-/// 写入成本按当前单价表实时估算。返回 Err 时不回滚已写入的明细（尽力而为）。
+/// 三个写入包在单个事务内，保证崩溃时三者一致（明细 / 聚合 / 计数要么全落盘要么全不落），
+/// 并减少提交次数。写入成本按当前单价表实时估算。
 pub fn record_usage(conn: &Connection, entry: &UsageEntry) -> Result<(), String> {
     let cost = pricing::calculate_cost(
         &entry.model,
@@ -288,6 +290,9 @@ pub fn record_usage(conn: &Connection, entry: &UsageEntry) -> Result<(), String>
         entry.cached_tokens,
         entry.cache_write_tokens,
     );
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("开启用量事务失败: {e}"))?;
     conn.execute(
         "INSERT INTO usage_history
             (ts, model, endpoint, status, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, cost, stream)
@@ -336,6 +341,7 @@ pub fn record_usage(conn: &Connection, entry: &UsageEntry) -> Result<(), String>
         [],
     )
     .map_err(|e| format!("更新生命周期计数失败: {e}"))?;
+    tx.commit().map_err(|e| format!("提交用量事务失败: {e}"))?;
     emit_usage_updated();
     Ok(())
 }

@@ -98,18 +98,17 @@ impl Config {
         Ok(())
     }
 
-    /// 从 JSON 文件加载配置；文件缺失或解析失败时回退默认值（记 warn 日志），
-    /// 加载后统一应用环境变量覆写。
-    pub fn load(path: &Path) -> Config {
-        let mut cfg = match std::fs::read_to_string(path) {
+    /// 从 JSON 文件加载配置（**不**应用环境变量覆写）；文件缺失或解析失败时回退默认值。
+    ///
+    /// 用于 SQLite 首次迁移，避免环境变量值被写入设置表。
+    pub fn load_file(path: &Path) -> Config {
+        match std::fs::read_to_string(path) {
             Ok(text) => serde_json::from_str::<Config>(&text).unwrap_or_else(|e| {
                 log::warn(&format!("配置解析失败，使用默认值: {e}"));
                 Config::default()
             }),
             Err(_) => Config::default(),
-        };
-        cfg.apply_env();
-        cfg
+        }
     }
 
     /// 将配置以缩进 JSON 写入 `path`，父目录不存在时自动创建。
@@ -126,7 +125,7 @@ impl Config {
     /// CC_USE_PROVIDER_MODELS（仅显式 "false" 时关闭）/ CC_EMPTY_SYSTEM_PLACEHOLDER
     /// （仅显式 "false" 时关闭）/ CMD_ZDR（仅显式 "1" 或 "true" 时开启）/
     /// CC_MAX_BODY_MB / CC_CLIENT_DRAIN_TIMEOUT_MS / CC_MAX_INFLIGHT。
-    fn apply_env(&mut self) {
+    pub fn apply_env(&mut self) {
         if let Ok(v) = std::env::var("PORT") {
             if let Ok(p) = v.parse::<u16>() {
                 self.port = p;
