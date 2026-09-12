@@ -65,6 +65,7 @@ pub fn msg_args(code: &str, args: &[&str]) -> String {
 mod tests {
     use super::*;
 
+    /// 四类出码（err/err_args/msg/msg_args）的前缀与参数编码形态。
     #[test]
     fn codes_roundtrip_shape() {
         assert_eq!(err("settings_store_uninitialized"), "err:settings_store_uninitialized");
@@ -73,6 +74,7 @@ mod tests {
         assert_eq!(msg_args("port_freed", &["1234"]), "msg:port_freed:[\"1234\"]");
     }
 
+    /// 参数含冒号/引号时不破坏码的分隔结构。
     #[test]
     fn args_with_colon_are_safe() {
         // 参数内含冒号/引号时不应破坏码的分隔（值整体在 JSON 数组中）
@@ -82,6 +84,7 @@ mod tests {
         );
     }
 
+    /// 语言切换影响 pick 取值，非法语言值回退中文。
     #[test]
     fn lang_switch_and_pick() {
         set_lang("en");

@@ -22,13 +22,13 @@ export interface Config {
   close_to_tray: boolean;
   usage_enabled: boolean;
   usage_retention_days: number;
-  /** CC 上游账户 key 列表（user_ 开头），请求按轮询切换使用。 */
+  /** Command Code 上游账户 key 列表（user_ 开头），请求按轮询切换使用。 */
   cc_accounts: string[];
-  /** 本地转发鉴权 key（sk- 开头，仅本机服务鉴权用，不发给 CC 上游）。 */
+  /** 本地转发鉴权 key（sk- 开头，仅本机服务鉴权用，不发给 Command Code 上游）。 */
   local_api_key: string;
   /** 无 system prompt 时发空格占位（阻止上游注入默认提示词）。 */
   empty_system_placeholder: boolean;
-  /** ZDR 模式：向 CC 上游发送 x-cmd-zdr: 1 请求头。 */
+  /** ZDR 模式：向 Command Code 上游发送 x-cmd-zdr: 1 请求头。 */
   zdr: boolean;
   /** 请求体大小上限（MB），超限请求返回 413。 */
   max_body_mb: number;
@@ -100,7 +100,7 @@ export interface ApiKeyState {
   masked: string;
 }
 
-/** CC 账户列表条目：掩码 key、userId（唯一标识）、显示名、来源与下标。 */
+/** Command Code 账户列表条目：掩码 key、userId（唯一标识）、显示名、来源与下标。 */
 export interface AccountEntry {
   index: number;
   masked: string;
@@ -230,7 +230,7 @@ export interface ModelAccessInfo {
   reason?: string | null;
 }
 
-/** 当前 CC 账户的套餐上下文。 */
+/** 当前 Command Code 账户的套餐上下文。 */
 export interface PlanContext {
   plan_id: string | null;
   plan_name: string;
@@ -308,7 +308,7 @@ export const api = {
   localKeySet: (key: string) => invoke<void>("local_key_set", { key }),
   localKeyGenerate: () => invoke<{ key: string; masked: string }>("local_key_generate"),
   localKeyDelete: () => invoke<void>("local_key_delete"),
-  // CC 账户：列表 / 新增（whoami 验证补全，可选自定义显示名）/ 重命名 / 按下标删除
+  // Command Code 账户：列表 / 新增（whoami 验证补全，可选自定义显示名）/ 重命名 / 按下标删除
   accountList: () => invoke<{ accounts: AccountEntry[] }>("account_list"),
   accountAdd: (key: string, userName?: string) =>
     invoke<void>("account_add", { key, userName }),

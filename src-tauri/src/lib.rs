@@ -55,7 +55,7 @@ fn proxy_status(app: AppHandle) -> Value {
     status_value(&app)
 }
 
-/// 读取应用配置。出于安全考虑返回前会清空本地转发 Key 与 CC 账户列表
+/// 读取应用配置。出于安全考虑返回前会清空本地转发 Key 与 Command Code 账户列表
 /// （均由专用命令管理）。
 #[tauri::command]
 fn config_get(app: AppHandle) -> proxy::config::Config {
@@ -72,7 +72,7 @@ fn config_get(app: AppHandle) -> proxy::config::Config {
 #[tauri::command]
 fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
-    // 本地转发 Key 与 CC 账户由 local_key_* / account_* 管理，config_save 不接收，
+    // 本地转发 Key 与 Command Code 账户由 local_key_* / account_* 管理，config_save 不接收，
     // 保存前保留原值
     let stored = ctx.proxy_state.config.read().unwrap().clone();
     config.local_api_key = stored.local_api_key;
@@ -179,7 +179,7 @@ fn local_key_delete(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 查询 CC 账户列表：返回掩码 key、userId、显示名与来源，条目带下标供删除。
+/// 查询 Command Code 账户列表：返回掩码 key、userId、显示名与来源，条目带下标供删除。
 #[tauri::command]
 fn account_list(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
@@ -203,7 +203,7 @@ fn account_list(app: AppHandle) -> Result<Value, String> {
     }))
 }
 
-/// 新增一个 CC 账户：先调用上游 whoami 验证 key 并补全 userId/userName，再入库。
+/// 新增一个 Command Code 账户：先调用上游 whoami 验证 key 并补全 userId/userName，再入库。
 /// 可选 `user_name` 作为自定义显示名（缺省用 whoami 返回的 userName）。
 #[tauri::command]
 async fn account_add(app: AppHandle, key: String, user_name: Option<String>) -> Result<(), String> {
@@ -247,7 +247,7 @@ fn account_rename(app: AppHandle, user_id: String, user_name: String) -> Result<
     Ok(())
 }
 
-/// 移除指定下标的 CC 账户（0 起），下标越界时返回错误；落库后同步内存配置。
+/// 移除指定下标的 Command Code 账户（0 起），下标越界时返回错误；落库后同步内存配置。
 #[tauri::command]
 fn account_remove(app: AppHandle, index: usize) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
@@ -363,7 +363,7 @@ fn models_catalog_update(
     Ok(json!({ "updated": updated }))
 }
 
-/// 获取当前 CC 账户的套餐信息与各模型准入结果（标注模型页的可用性）。
+/// 获取当前 Command Code 账户的套餐信息与各模型准入结果（标注模型页的可用性）。
 ///
 /// `force` 为 true 时跳过 5 分钟缓存，强制重新拉取上游套餐数据。
 #[tauri::command]
@@ -376,7 +376,7 @@ async fn plan_status(app: AppHandle, force: bool) -> Result<Value, String> {
     Ok(proxy::plans::plan_status_json(&plan))
 }
 
-/// 获取全部 CC 账户的额度快照（套餐、月/购买/赠送余额、5 小时与周窗口限额、组织限额）。
+/// 获取全部 Command Code 账户的额度快照（套餐、月/购买/赠送余额、5 小时与周窗口限额、组织限额）。
 ///
 /// 命中额度缓存（60s TTL）时直接复用，未命中才向上游拉取并回填；返回顺序与账户列表一致。
 #[tauri::command]
@@ -701,7 +701,7 @@ async fn start_proxy_inner(app: &AppHandle) -> Result<Value, String> {
     if ctx.proxy_state.is_running() {
         return Ok(status_value(app));
     }
-    // 需要已生成本地转发 Key 且至少一个 CC 账户才能启动代理（与运行时鉴权使用同一内存源）
+    // 需要已生成本地转发 Key 且至少一个 Command Code 账户才能启动代理（与运行时鉴权使用同一内存源）
     if credentials::cached_local_key().is_none() {
         return Err(i18n::err("local_key_missing"));
     }

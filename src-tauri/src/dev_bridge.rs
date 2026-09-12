@@ -179,7 +179,7 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
             Ok(Value::Null)
         }
 
-        // ── CC 账户 ──
+        // ── Command Code 账户 ──
         "account_list" => Ok(to_value(crate::account_list(app()?)?)?),
         "account_add" => {
             let user_name = args.get("userName").and_then(|v| v.as_str()).map(str::to_string);

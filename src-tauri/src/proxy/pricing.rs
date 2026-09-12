@@ -261,6 +261,7 @@ pub fn calculate_cost(
 mod tests {
     use super::*;
 
+    /// 计费表已加载且覆盖主推模型。
     #[test]
     fn table_loaded_and_covers_common_models() {
         let models = all_models();
@@ -279,6 +280,7 @@ mod tests {
         }
     }
 
+    /// 模型匹配忽略 provider 前缀与大小写差异。
     #[test]
     fn provider_prefix_and_case_insensitive() {
         // provider 前缀与大小写不影响匹配
@@ -290,6 +292,7 @@ mod tests {
         assert_eq!(c.id, "kimi-k2.6");
     }
 
+    /// 前缀匹配取最长者；带日期后缀的模型名也能命中。
     #[test]
     fn longest_prefix_wins() {
         // gpt-5.6-luna 不应被错误前缀抢走；带日期后缀也能命中
@@ -299,6 +302,7 @@ mod tests {
         assert!((p2.input - 1.0).abs() < 1e-9);
     }
 
+    /// 分档计费：按上下文长度落入对应档位。
     #[test]
     fn tier_selection_by_context() {
         // qwen-3.7-flash：≤32K 为 0.03，≤256K 为 0.1，>256K 为 0.2
@@ -310,6 +314,7 @@ mod tests {
         assert!((price_for_at("grok-4.6", 300_000, 0).input - 4.0).abs() < 1e-9);
     }
 
+    /// 闲/忙时费率：工作日按时段切换，周末全天闲时。
     #[test]
     fn off_peak_and_peak_pricing() {
         let models = all_models();
@@ -333,6 +338,7 @@ mod tests {
         assert!((price_for_at("deepseek-v4-pro", 1000, mon_off).input - 0.66).abs() < 1e-9);
     }
 
+    /// 免费模型任意用量成本为 0。
     #[test]
     fn free_models_cost_zero() {
         // 免费模型（deal.free 且费率为 0）计费应为 0
@@ -344,6 +350,7 @@ mod tests {
         }
     }
 
+    /// 能力标记（视觉/思考）与计费表一致。
     #[test]
     fn caps_exposed() {
         // 能力标记：kimi-k3 具备视觉；minimax-m2.5 不支持思考
@@ -354,6 +361,7 @@ mod tests {
         assert!(!m.caps.reasoning);
     }
 
+    /// 成本公式：输入/输出/缓存命中分别计价，缓存命中不重复计输入。
     #[test]
     fn cost_basic_and_cache_dedup() {
         // 取无闲忙时模型的固定档位验证成本公式
@@ -366,6 +374,7 @@ mod tests {
         assert!((c - 0.5).abs() < 1e-9);
     }
 
+    /// 未收录模型按兜底单价计费。
     #[test]
     fn unknown_model_falls_back() {
         let c = calculate_cost("unknown/model-x", 1_000_000, 1_000_000, 0, 0, 0);

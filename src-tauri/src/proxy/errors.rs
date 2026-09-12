@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-/// CC 上游 HTTP 状态 → 下游（OpenAI/Anthropic）状态与错误类型映射。
+/// Command Code 上游 HTTP 状态 → 下游（OpenAI/Anthropic）状态与错误类型映射。
 ///
 /// - `cc_status`：上游返回的 HTTP 状态码；
 /// - `cc_body`：上游响应体文本，尝试从中提取可读的错误消息（JSON 的 error/message 或 message 字段，

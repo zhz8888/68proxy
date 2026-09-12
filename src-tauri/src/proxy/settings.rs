@@ -47,7 +47,7 @@ pub fn save_config(conn: &Connection, cfg: &Config) -> Result<(), String> {
 
 /// 从 settings 表读取配置；表为空或某字段缺失时由 `#[serde(default)]` 兜底。
 ///
-/// 兼容旧版：若表内仍存在旧字段 `api_key` 的行，读取后作为首个 CC 账户迁入。
+/// 兼容旧版：若表内仍存在旧字段 `api_key` 的行，读取后作为首个 Command Code 账户迁入。
 pub fn load_config(conn: &Connection) -> Config {
     let mut map = Map::new();
     let stmt = conn.prepare("SELECT key, value FROM settings");
@@ -172,12 +172,14 @@ mod tests {
     use crate::proxy::config::Account;
     use rusqlite::Connection;
 
+    /// 建一个已初始化 settings 表的内存库（测试辅助）。
     fn temp_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         init_settings_on(&conn).unwrap();
         conn
     }
 
+    /// 配置整存整取往返：显式写入的字段还原，未写入的走默认值。
     #[test]
     fn config_roundtrip() {
         let conn = temp_conn();
@@ -218,6 +220,7 @@ mod tests {
         assert!(got.usage_enabled);
     }
 
+    /// 重复保存按 key UPSERT，不产生重复行。
     #[test]
     fn save_upserts_not_duplicates() {
         let conn = temp_conn();
@@ -237,6 +240,7 @@ mod tests {
         assert_eq!(load_config(&conn).port, 2000);
     }
 
+    /// 旧版 api_key 行读取时迁入账户，purge 后不再复活。
     #[test]
     fn legacy_api_key_migrated_and_purged() {
         let conn = temp_conn();
@@ -259,6 +263,7 @@ mod tests {
         assert!(cfg.cc_accounts.is_empty());
     }
 
+    /// config.json 首启导入一次；settings 非空后不再导入。
     #[test]
     fn migrate_only_when_empty() {
         let conn = temp_conn();
@@ -286,6 +291,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// 单字段类型损坏仅该字段回退默认，其余字段照常生效。
     #[test]
     fn load_config_tolerates_bad_field_types() {
         // 单个字段类型损坏不应导致整份配置回退默认

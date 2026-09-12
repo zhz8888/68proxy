@@ -9,7 +9,7 @@ use super::state::now_secs;
 ///
 /// Anthropic 对 thinking signature 有密码学校验，第三方代理无法生成真签名；
 /// Claude Code 的浅校验只要求 base64 以 'E'（单层）/ 'R'（双层）开头且 payload
-/// 首字节为 0x12——此实现恰好满足，让 CC 能正常显示 thinking。payload 由思考文本
+/// 首字节为 0x12——此实现恰好满足，让 Command Code 能正常显示 thinking。payload 由思考文本
 /// SHA-256 派生，使每个块的签名互不相同。
 pub(crate) fn fake_thinking_signature(thinking_text: &str) -> String {
     let source = if thinking_text.is_empty() {
@@ -55,7 +55,7 @@ fn normalize_usage(input: &mut u64, output: &mut u64, cached: &mut u64) {
     }
 }
 
-/// 读取 CC usage 对象中的缓存命中 token 数。
+/// 读取 Command Code usage 对象中的缓存命中 token 数。
 ///
 /// 上游真实格式为 `inputTokenDetails.cacheReadTokens`（与 inputTokens/outputTokens
 /// 并列于 usage 顶层），旧版代理曾用顶层 `cachedInputTokens`，此处保留回退兼容。
@@ -66,14 +66,14 @@ pub fn read_cache_read_tokens(u: &Value) -> u64 {
         .unwrap_or(0)
 }
 
-/// 读取 CC usage 对象中的缓存写入 token 数（`inputTokenDetails.cacheWriteTokens`）；缺失返回 0。
+/// 读取 Command Code usage 对象中的缓存写入 token 数（`inputTokenDetails.cacheWriteTokens`）；缺失返回 0。
 pub fn read_cache_write_tokens(u: &Value) -> u64 {
     u.pointer("/inputTokenDetails/cacheWriteTokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0)
 }
 
-/// CC NDJSON → OpenAI SSE 翻译器。
+/// Command Code NDJSON → OpenAI SSE 翻译器。
 pub struct OpenAiTranslator {
     /// 下游响应体的 completion id（跨帧保持不变）。
     completion_id: String,
@@ -86,7 +86,7 @@ pub struct OpenAiTranslator {
     tool_call_index: u32,
     /// finish-step 事件提前记录的 finish_reason，finish 事件缺省时回退使用。
     finish_reason: Option<String>,
-    /// 最近一次解析到的 CC 事件类型（供请求追踪展示）。
+    /// 最近一次解析到的 Command Code 事件类型（供请求追踪展示）。
     pub last_cc_event: String,
     /// 上游回报的输入 token 数。
     pub input_tokens: u64,
@@ -116,7 +116,7 @@ impl OpenAiTranslator {
         }
     }
 
-    /// 解析一行 CC NDJSON 事件，返回需要下发给下游的 SSE 帧列表（可能为空）。
+    /// 解析一行 Command Code NDJSON 事件，返回需要下发给下游的 SSE 帧列表（可能为空）。
     ///
     /// 空行、`[DONE]`、注释行与非法 JSON 直接忽略；事件解析失败不会中断流。
     pub fn parse_line(&mut self, line: &str) -> Vec<String> {
@@ -276,7 +276,7 @@ fn sse_event(name: &str, payload: Value) -> String {
     format!("event: {name}\ndata: {payload}\n\n")
 }
 
-/// CC NDJSON → OpenAI Responses SSE 事件翻译器。
+/// Command Code NDJSON → OpenAI Responses SSE 事件翻译器。
 /// 事件序列：response.created → output_item.added/content_part.added
 /// → output_text.delta…/function_call_arguments.delta → 各 done → response.completed。
 pub struct ResponsesTranslator {
@@ -309,7 +309,7 @@ pub struct ResponsesTranslator {
     output_items: Vec<Value>,
     /// 上游 finishReason 原始值（"length" 时最终置为 incomplete）。
     stop_reason: Option<String>,
-    /// 最近一次解析到的 CC 事件类型（供请求追踪展示）。
+    /// 最近一次解析到的 Command Code 事件类型（供请求追踪展示）。
     pub last_cc_event: String,
     /// 上游回报的输入 token 数。
     pub input_tokens: u64,
@@ -691,7 +691,7 @@ impl ResponsesTranslator {
     }
 }
 
-/// CC NDJSON → Anthropic SSE 翻译器。
+/// Command Code NDJSON → Anthropic SSE 翻译器。
 pub struct AnthropicTranslator {
     /// 下游响应体的 message id（跨事件保持不变）。
     message_id: String,
@@ -710,7 +710,7 @@ pub struct AnthropicTranslator {
     no_cache_tokens: Option<u64>,
     /// 上游 finishReason 映射后的 Anthropic stop_reason。
     stop_reason: Option<String>,
-    /// 最近一次解析到的 CC 事件类型（供请求追踪展示）。
+    /// 最近一次解析到的 Command Code 事件类型（供请求追踪展示）。
     pub last_cc_event: String,
     /// 上游回报的输入 token 数。
     pub input_tokens: u64,
@@ -826,7 +826,7 @@ impl AnthropicTranslator {
         self.start_block("thinking", serde_json::json!({ "type": "thinking", "thinking": "" }))
     }
 
-    /// 解析一行 CC NDJSON 事件，返回需下发的 Anthropic SSE 事件列表（可能为空）。
+    /// 解析一行 Command Code NDJSON 事件，返回需下发的 Anthropic SSE 事件列表（可能为空）。
     ///
     /// 文本增量会自动开启/延续 text 块；tool-call 先关闭 text 块再一次性发出
     /// tool_use 的 start/delta/stop 三帧；reasoning-delta 映射为 thinking 块
@@ -849,7 +849,7 @@ impl AnthropicTranslator {
 
         match event_type {
             "start" | "start-step" | "text-start" | "reasoning-start" => {}
-            // CC reasoning → Anthropic thinking 块（Claude Code 将其显示为思考内容）
+            // Command Code reasoning → Anthropic thinking 块（Claude Code 将其显示为思考内容）
             "reasoning-delta" => {
                 let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
                 if text.is_empty() {

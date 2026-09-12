@@ -150,12 +150,14 @@ pub fn init_and_load(conn: &Connection) -> Result<Vec<ModelPricing>, String> {
 mod tests {
     use super::*;
 
+    /// 建一个已初始化模型表的内存库（测试辅助）。
     fn temp_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         init_models_on(&conn).unwrap();
         conn
     }
 
+    /// 快捷构造一个带单档费率的测试模型。
     fn sample(id: &str, name: &str) -> ModelPricing {
         ModelPricing {
             id: id.into(),
@@ -184,6 +186,7 @@ mod tests {
         }
     }
 
+    /// 播种仅在空表时生效，重复播种不覆盖已有数据。
     #[test]
     fn seed_only_when_empty() {
         let conn = temp_conn();
@@ -194,6 +197,7 @@ mod tests {
         assert_eq!(load_all(&conn).len(), pricing::builtin_models().len());
     }
 
+    /// 同 id 的 upsert 覆盖旧行（名称与 source 均更新）。
     #[test]
     fn upsert_overwrites_existing_row() {
         let conn = temp_conn();
@@ -211,6 +215,7 @@ mod tests {
         assert_eq!(source, "remote");
     }
 
+    /// 空表读取时回退内置模型表。
     #[test]
     fn load_falls_back_to_builtin_when_empty() {
         let conn = temp_conn();
@@ -219,6 +224,7 @@ mod tests {
         assert!(!rows.is_empty());
     }
 
+    /// init_and_load 先播种再读库：新增自定义行后能被读出（证明读的是数据库）。
     #[test]
     fn init_and_load_seeds_then_reads_db() {
         let conn = temp_conn();
@@ -230,6 +236,7 @@ mod tests {
         assert!(rows.iter().any(|m| m.id == "custom-x"));
     }
 
+    /// 损坏的数据行被跳过而不影响其他行的加载。
     #[test]
     fn bad_row_is_skipped_not_fatal() {
         let conn = temp_conn();
@@ -244,6 +251,7 @@ mod tests {
         assert_eq!(rows[0].id, "good");
     }
 
+    /// 促销模型的标牌价（listRates）经落库再读出后原样保留。
     #[test]
     fn persisted_json_round_trips_list_rates() {
         // 促销模型的标牌价（listRates）必须原样往返，落库不能丢字段
@@ -260,6 +268,7 @@ mod tests {
         assert!((list.cache_write - 6.26).abs() < 1e-9);
     }
 
+    /// 走启动同一条路径（init_usage 建库后初始化）在真实数据库文件上工作。
     #[test]
     fn works_on_real_database_file() {
         // 走启动时同一条路径：init_usage 建库（含用量/设置/模型三表）后初始化模型表

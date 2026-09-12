@@ -360,6 +360,7 @@ pub fn poll_auth_login(state: &AppState) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// 从 apiBase 推导授权页地址：标准/分段域名按规则映射，未知域名回退生产。
     #[test]
     fn studio_base_derivation() {
         assert_eq!(studio_base_from_api("https://api.commandcode.ai"), "https://commandcode.ai");
@@ -371,6 +372,7 @@ mod tests {
         assert_eq!(studio_base_from_api("https://my-proxy.example.com"), "https://commandcode.ai");
     }
 
+    /// 授权 URL 的形态：路径、回调编码、state 与 mode 参数齐全。
     #[test]
     fn auth_url_shape() {
         let url = build_auth_url("https://commandcode.ai", 43210, "teststate123");
@@ -380,12 +382,14 @@ mod tests {
         assert!(url.contains("mode=redirect"));
     }
 
+    /// URL 编码对保留字符的转义正确性。
     #[test]
     fn url_encoding_escapes() {
         let s = urlencoding("http://127.0.0.1:8080/callback?x=1&y=2");
         assert_eq!(s, "http%3A%2F%2F127.0.0.1%3A8080%2Fcallback%3Fx%3D1%26y%3D2");
     }
 
+    /// 回调参数兼容 camelCase 与 snake_case 两种键名。
     #[test]
     fn callback_params_accept_both_casings() {
         let mut camel = HashMap::new();

@@ -21,7 +21,7 @@ fn as_str_or_empty(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
 }
 
-/// 判断 CC 消息列表里是否已存在 cache_control 标记（用于避免重复注入）。
+/// 判断 Command Code 消息列表里是否已存在 cache_control 标记（用于避免重复注入）。
 fn has_cache_marker(cc_messages: &[Value]) -> bool {
     cc_messages.iter().any(|m| {
         m.get("content")
@@ -31,16 +31,16 @@ fn has_cache_marker(cc_messages: &[Value]) -> bool {
     })
 }
 
-/// OpenAI Chat Completions 请求 → CC 请求体（CLI 信封格式）。
+/// OpenAI Chat Completions 请求 → Command Code 请求体（CLI 信封格式）。
 ///
 /// 主要转换：system/developer 消息提取为 params.system（为空且开关开启时发空格占位，
-/// 阻止上游注入默认提示词）；user/assistant/tool 消息转为 CC 的 content parts 结构
+/// 阻止上游注入默认提示词）；user/assistant/tool 消息转为 Command Code 的 content parts 结构
 /// （text/image/tool-call/tool-result）；assistant 的 reasoning_content 与 content 内
 /// reasoning part 回传为 `{type:"reasoning"}`；tools 扁平化为 `{type, name, description,
 /// input_schema}`；tool_choice 的 required 映射为 any；max_tokens 缺省 64000 并封顶
 /// 200000；stream 恒为 true（上游只支持流式）。
 ///
-/// - `empty_system_placeholder`：无 system 时是否发 `" "` 占位，防止 CC 上游注入
+/// - `empty_system_placeholder`：无 system 时是否发 `" "` 占位，防止 Command Code 上游注入
 ///   约 7.5K token 的默认提示词。
 pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> Value {
     let model = openai_req
@@ -129,7 +129,7 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
             }
             Some("assistant") => {
                 let mut parts: Vec<Value> = Vec::new();
-                // 思考内容必须回传：CC 在 thinking 模式下校验 reasoning 是否随历史带回，
+                // 思考内容必须回传：Command Code 在 thinking 模式下校验 reasoning 是否随历史带回，
                 // 丢弃会让上游直接拒绝。reasoning 须置于文本之前。
                 let reasoning_field = msg
                     .get("reasoning_content")
@@ -298,7 +298,7 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
         }
     }
     if let Some(tc) = openai_req.get("tool_choice") {
-        // OpenAI 语义 → CC 语义：required 对应 any；指定函数对应 tool + name
+        // OpenAI 语义 → Command Code 语义：required 对应 any；指定函数对应 tool + name
         let mapped = match tc {
             Value::String(s) => {
                 let t = match s.as_str() {
@@ -331,7 +331,7 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
 /// 冲刷累积中的 assistant 消息：清理空字段后（无内容则丢弃）入队。
 fn flush_pending(pending: &mut Option<Value>, messages: &mut Vec<Value>) {
     if let Some(mut p) = pending.take() {
-        // 空字段不保留，避免 CC 校验拒绝
+        // 空字段不保留，避免 Command Code 校验拒绝
         let tool_calls_empty = p
             .get("tool_calls")
             .and_then(|t| t.as_array())
@@ -560,7 +560,7 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
     openai_req
 }
 
-/// CC 完成结果 → OpenAI Responses 非流式响应体。
+/// Command Code 完成结果 → OpenAI Responses 非流式响应体。
 ///
 /// - `thinking_text`：推理内容，非空时作为首个 output 条目输出 `reasoning` 类型；
 /// - `tool_calls`：可选的工具调用列表（OpenAI Chat 格式的 tool_call 对象）；
@@ -693,7 +693,7 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                             }
                         }
                         // Anthropic 的 thinking 块承载思考内容，转成 reasoning_content
-                        // 交给 build_cc_request 回传，否则 CC 会因缺少 reasoning 而拒绝
+                        // 交给 build_cc_request 回传，否则 Command Code 会因缺少 reasoning 而拒绝
                         Some("thinking") => {
                             if let Some(t) = block.get("thinking").and_then(|t| t.as_str()) {
                                 thinking_content.push_str(t);
@@ -860,7 +860,7 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
     openai_req
 }
 
-/// CC finishReason → OpenAI finish_reason（tool-calls 归一为 tool_calls，空值视为 stop，未知透传）。
+/// Command Code finishReason → OpenAI finish_reason（tool-calls 归一为 tool_calls，空值视为 stop，未知透传）。
 pub fn map_finish_reason(reason: &str) -> String {
     match reason {
         "tool-calls" => "tool_calls".into(),

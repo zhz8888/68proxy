@@ -1,7 +1,7 @@
 //! proxy 模块的单元与集成测试。
 //!
 //! 单元测试覆盖：三种协议的请求转换、SSE/流事件翻译、错误映射、Key 提取、
-//! 设备指纹与项目 slug 生成；集成测试用 axum 搭建 mock CC 上游，端到端验证
+//! 设备指纹与项目 slug 生成；集成测试用 axum 搭建 mock Command Code 上游，端到端验证
 //! 代理服务的流式/非流式转发、零输出限流、上游错误映射与鉴权行为。
 
 use axum::extract::State;
@@ -26,7 +26,7 @@ const TEST_LOCAL_KEY: &str = "sk-test-local-key-123";
 
 // ── 单元测试：请求转换 ────────────────────────────────
 
-/// 验证基础 OpenAI 请求转换出的 CC 信封：model/system 提取、user 消息转 text parts、
+/// 验证基础 OpenAI 请求转换出的 Command Code 信封：model/system 提取、user 消息转 text parts、
 /// max_tokens 透传、permissionMode 固定 standard、config.date 为字符串。
 #[test]
 fn build_cc_request_basic_envelope() {
@@ -50,11 +50,11 @@ fn build_cc_request_basic_envelope() {
 }
 
 /// 验证 developer 与 system 两种角色的消息按序合并为顶层 system 字段，
-/// 且均不会作为聊天消息原样转发（CC API 会拒绝未知角色，issue #1）。
+/// 且均不会作为聊天消息原样转发（Command Code API 会拒绝未知角色）。
 #[test]
 fn build_cc_request_developer_role_merged_into_system() {
-    // issue #1: OpenAI 新客户端以 role: "developer" 发送 system prompt，
-    // 需与 system 一并提取为顶层 system，不能原样转发（CC API 会报 400）
+    // OpenAI 新客户端以 role: "developer" 发送 system prompt，
+    // 需与 system 一并提取为顶层 system，不能原样转发（Command Code API 会报 400）
     let req = json!({
         "model": "deepseek/deepseek-v4-flash",
         "messages": [
@@ -130,7 +130,7 @@ fn build_cc_request_empty_system_placeholder() {
 }
 
 /// 验证 assistant 消息的 reasoning 回传：reasoning_content 字段与 content 数组内的
-/// reasoning part 均转为 CC 的 `{type:"reasoning"}`，且顺序为 [reasoning, text, tool-call]。
+/// reasoning part 均转为 Command Code 的 `{type:"reasoning"}`，且顺序为 [reasoning, text, tool-call]。
 #[test]
 fn build_cc_request_assistant_reasoning() {
     let req = json!({
@@ -330,7 +330,7 @@ fn anthropic_to_openai_conversion() {
 /// 未知 tool_choice 归一为 auto。
 #[test]
 fn responses_to_openai_conversion() {
-    // issue #2: Codex CLI 等 Responses 客户端 → Chat 格式（供 build_cc_request 复用）
+    // Codex CLI 等 Responses 客户端请求转换为 Chat 格式（供 build_cc_request 复用）
     let req = json!({
         "model": "gpt-5-codex",
         "instructions": "你是助手",
@@ -717,9 +717,10 @@ fn fingerprint_survives_restart() {
 
 // ── 集成测试：mock 上游 ───────────────────────────────
 
-/// mock CC 上游路由：/alpha/generate 按模型名返回正常 NDJSON、零输出 NDJSON
+/// mock Command Code 上游路由：/alpha/generate 按模型名返回正常 NDJSON、零输出 NDJSON
 /// 或 429 错误；model 为 `capture` 时把请求体与 zdr 头记录进 `captured` 供断言。
 fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
+    /// /alpha/generate 的 mock 处理器：按模型名回放预设响应，可选拦截请求体供断言。
     async fn generate(
         State(captured): State<Option<Arc<Mutex<Value>>>>,
         headers: axum::http::HeaderMap,
@@ -811,7 +812,7 @@ async fn start_proxy_impl(
     adjust(&mut cfg);
     let state = AppState::new(cfg);
 
-    // 注入内存设置库：生成本地转发 Key（sk-）并配置一个 CC 账户，使鉴权路径可用
+    // 注入内存设置库：生成本地转发 Key（sk-）并配置一个 Command Code 账户，使鉴权路径可用
     {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         super::settings::init_settings_on(&conn).unwrap();
@@ -1228,7 +1229,7 @@ async fn anthropic_nonstream_content_without_usage() {
 #[tokio::test]
 async fn usage_recorded_through_proxy() {
     let (base, state) = start_proxy().await;
-    // 注入内存统计库（连同设置表：本地 Key + CC 账户，保证鉴权路径可用）
+    // 注入内存统计库（连同设置表：本地 Key + Command Code 账户，保证鉴权路径可用）
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     super::settings::init_settings_on(&conn).unwrap();
     super::usage::init_usage_on(&conn).unwrap();

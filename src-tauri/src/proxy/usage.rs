@@ -1,4 +1,4 @@
-//! token 用量统计的数据层：SQLite 持久化（对齐 9router 的 usageHistory / usageDaily / _meta）。
+//! token 用量统计的数据层：SQLite 持久化（usage_history 明细、usage_daily 按天聚合、_meta 元数据）。
 //!
 //! - `usage_history`：每次请求一条明细（模型、端点、状态、各 token 列与估算成本）。
 //! - `usage_daily`：按本地时区「天」预聚合的 JSON，支撑 7D/30D/60D 大时间窗快速查询。
@@ -673,6 +673,7 @@ struct Row {
     cache_write_tokens: u64,
 }
 
+/// 按时间区间读取用量明细（`[from_ts, to_ts]` 闭区间，按时间升序），供趋势图与汇总实时聚合。
 fn query_rows(conn: &Connection, from_ts: u64, to_ts: u64) -> Result<Vec<Row>, String> {
     let mut stmt = conn
         .prepare(
@@ -854,6 +855,7 @@ mod tests {
         conn
     }
 
+    /// 快捷构造一条用量明细（cache_write 固定 0、流式）。
     fn entry(ts: u64, model: &str, endpoint: &str, status: &str, prompt: u64, completion: u64, cached: u64) -> UsageEntry {
         UsageEntry {
             ts,
@@ -868,6 +870,7 @@ mod tests {
         }
     }
 
+    /// 记录两条用量后 Today 汇总的请求数、各 token 列与分组正确。
     #[test]
     fn record_and_stats_today() {
         let conn = temp_conn();
@@ -885,6 +888,7 @@ mod tests {
         assert!(stats.total_cost > 0.0);
     }
 
+    /// 跨天记录在 7D/30D 周期内均被统计。
     #[test]
     fn record_daily_aggregation() {
         let conn = temp_conn();
@@ -902,6 +906,7 @@ mod tests {
         assert_eq!(s30.total_requests, 2);
     }
 
+    /// 趋势图桶数量与周期对应（24H→24 点、7D→7 点）。
     #[test]
     fn chart_buckets() {
         let conn = temp_conn();
@@ -914,6 +919,7 @@ mod tests {
         assert_eq!(chart7.len(), 7);
     }
 
+    /// 清空统计返回清除条数，之后汇总归零。
     #[test]
     fn clear_all_works() {
         let conn = temp_conn();
@@ -924,6 +930,7 @@ mod tests {
         assert_eq!(stats.total_requests, 0);
     }
 
+    /// 汇总 JSON 包含前端所需全部字段且分组行数值正确。
     #[test]
     fn stats_json_shape() {
         // 验证 stats_to_json 输出包含前端所需全部字段
@@ -952,6 +959,7 @@ mod tests {
         assert_eq!(rows[0]["total_tokens"].as_u64(), Some(1500));
     }
 
+    /// 趋势图 JSON 的点结构（label 与各 token/cost 列）完整。
     #[test]
     fn chart_json_shape() {
         let conn = temp_conn();
@@ -969,6 +977,7 @@ mod tests {
         }
     }
 
+    /// 最近请求明细按时间倒序返回且 token 数正确。
     #[test]
     fn recent_requests() {
         let conn = temp_conn();
@@ -980,6 +989,7 @@ mod tests {
         assert_eq!(recent[0].prompt_tokens, 100);
     }
 
+    /// 天键为本地时间的 YYYY-MM-DD 格式。
     #[test]
     fn day_key_local() {
         // 本地时间转天键格式正确

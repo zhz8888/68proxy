@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::log;
 
-/// CC 上游账户。`user_id` 为唯一标识（whoami/OAuth 回传），同名账户重新登录换 key 时
+/// Command Code 上游账户。`user_id` 为唯一标识（whoami/OAuth 回传），同名账户重新登录换 key 时
 /// 视为同一账户并更新 key；`user_name` 为显示名，可自定义，默认取 API 回传值。
 ///
 /// 反序列化兼容旧格式：既接受 `{key, user_id, user_name, source, added_at}` 对象，
@@ -24,6 +24,7 @@ pub struct Account {
 }
 
 impl Default for Account {
+    /// 返回空账户（来源 manual，无添加时间）。
     fn default() -> Self {
         Self {
             key: String::new(),
@@ -45,10 +46,13 @@ pub fn legacy_user_id(key: &str) -> String {
 }
 
 impl<'de> Deserialize<'de> for Account {
+    /// 兼容两种形态：纯字符串（旧版单 key 配置）或完整对象；字符串形态按
+    /// `legacy_user_id` 派生占位 userId 并补全默认来源与时间。
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
+        /// 反序列化中间形态：旧版纯字符串 key 或新版完整对象。
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Raw {
@@ -65,6 +69,7 @@ impl<'de> Deserialize<'de> for Account {
                 added_at: u64,
             },
         }
+        /// `source` 字段的默认值（serde 不支持直接写字面量）。
         fn default_source() -> String {
             "manual".into()
         }
@@ -109,13 +114,13 @@ impl<'de> Deserialize<'de> for Account {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    // 注意：旧版配置字段 `api_key` 已拆分为「CC 账户列表」与「本地转发 key」两部分，
+    // 注意：旧版配置字段 `api_key` 已拆分为「Command Code 账户列表」与「本地转发 key」两部分，
     // 由 `migrate_legacy` 在反序列化后迁移，详见该函数。
     /// 本地代理监听端口。
     pub port: u16,
     /// 监听地址（IP，如 0.0.0.0 / 127.0.0.1）。
     pub host: String,
-    /// CC 上游 API 根地址（含协议前缀）。
+    /// Command Code 上游 API 根地址（含协议前缀）。
     pub api_base: String,
     /// 项目 slug，保留字段（实际转发时使用会话派生的伪造 slug）。
     pub project_slug: String,
@@ -139,13 +144,13 @@ pub struct Config {
     pub usage_enabled: bool,
     /// 用量明细保留天数，0 表示永久保留；超过部分在记录时自动清理。
     pub usage_retention_days: u32,
-    /// CC 上游账户列表（user_ 开头），请求按轮询切换使用；可空但启动代理需至少一个。
+    /// Command Code 上游账户列表（user_ 开头），请求按轮询切换使用；可空但启动代理需至少一个。
     pub cc_accounts: Vec<Account>,
-    /// 本地转发鉴权 key（sk_ 开头，仅本机服务鉴权用，不发给 CC 上游）。
+    /// 本地转发鉴权 key（sk_ 开头，仅本机服务鉴权用，不发给 Command Code 上游）。
     pub local_api_key: String,
-    /// 无 system prompt 时是否发空格占位（阻止 CC 上游注入默认提示词）。
+    /// 无 system prompt 时是否发空格占位（阻止 Command Code 上游注入默认提示词）。
     pub empty_system_placeholder: bool,
-    /// 是否启用 ZDR 模式（向 CC 上游发送 x-cmd-zdr: 1 请求头）。
+    /// 是否启用 ZDR 模式（向 Command Code 上游发送 x-cmd-zdr: 1 请求头）。
     pub zdr: bool,
     /// 请求体大小上限（MB），超限请求返回 413（连接保持排空可复用）。
     pub max_body_mb: u32,
@@ -293,7 +298,7 @@ impl Config {
 
     /// 将配置以缩进 JSON 写入 `path`，父目录不存在时自动创建。
     ///
-    /// 凭据（本地转发 key 与 CC 账户）只存 SQLite settings 表，镜像文件不落盘明文：
+    /// 凭据（本地转发 key 与 Command Code 账户）只存 SQLite settings 表，镜像文件不落盘明文：
     /// 写入前把这两项清空，避免 config.json 泄露 key（与 credentials 模块声明一致）。
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let mut mirrored = self.clone();
@@ -376,7 +381,7 @@ impl Config {
 
     /// 兼容旧版配置迁移：旧字段 `api_key`（单个 user_ key）已拆分为账户列表 + 本地 key。
     ///
-    /// 若账户列表为空且旧 key 非空，则把旧 key 作为首个 CC 账户迁入；本地 key 不迁移
+    /// 若账户列表为空且旧 key 非空，则把旧 key 作为首个 Command Code 账户迁入；本地 key 不迁移
     /// （由 UI 随机生成）。调用方（settings::load_config / load_file）在反序列化后调用。
     pub fn migrate_legacy(&mut self, legacy_api_key: Option<&str>) {
         if self.cc_accounts.is_empty() {
@@ -416,6 +421,7 @@ pub fn migrate_refresh_interval_unit(obj: &mut serde_json::Map<String, serde_jso
 mod tests {
     use super::*;
 
+    /// 账户双形态反序列化：旧版纯字符串 key 派生占位 userId，新版对象原样解析。
     #[test]
     fn account_string_and_object_deser() {
         // 旧版纯字符串 key 数组 → Account（user_id 派生占位）
@@ -436,6 +442,7 @@ mod tests {
         assert_eq!(cfg2.cc_accounts[0].added_at, 123);
     }
 
+    /// 旧版 `api_key` 迁移为首个账户；已有账户时跳过迁移。
     #[test]
     fn legacy_api_key_migrates_to_account() {
         let mut cfg: Config = serde_json::from_str(r#"{"api_key":"user_legacy"}"#).unwrap();
@@ -454,6 +461,7 @@ mod tests {
         assert_eq!(cfg2.cc_accounts[0].key, "user_a");
     }
 
+    /// 占位 userId 派生稳定且对不同 key 不碰撞。
     #[test]
     fn legacy_user_id_stable() {
         assert_eq!(legacy_user_id("user_abc"), legacy_user_id("user_abc"));
@@ -461,6 +469,7 @@ mod tests {
         assert!(legacy_user_id("user_abc").starts_with("legacy-"));
     }
 
+    /// 旧毫秒字段换算为秒并清理旧键；已是新字段时保原值；两者皆缺时不注入。
     #[test]
     fn refresh_interval_migrates_ms_to_secs() {
         // 旧配置写作毫秒字段：应换算为秒并删除旧键
@@ -481,6 +490,7 @@ mod tests {
         assert_eq!(obj3["port"], serde_json::json!(3050));
     }
 
+    /// 端到端：旧毫秒配置落盘后经 load_file 读出为秒值。
     #[test]
     fn load_file_applies_unit_migration() {
         // 端到端：旧 json 落盘后经 load_file 应得到秒值
@@ -493,6 +503,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// 镜像文件不落盘明文凭据（local_api_key/cc_accounts 写空），非敏感字段正常持久化。
     #[test]
     fn save_mirror_strips_credentials() {
         // 镜像文件不能落盘明文 key：写盘内容中 local_api_key/cc_accounts 必须为空

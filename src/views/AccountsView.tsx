@@ -179,7 +179,7 @@ export function AccountsView() {
     api.accountRoutingGet().then(setRouting).catch(() => {});
   }, []);
 
-  /** 校验并新增一个 CC 账户 Key（必须以 user_ 开头）。 */
+  /** 校验并新增一个 Command Code 账户 Key（必须以 user_ 开头）。 */
   async function addAccount() {
     if (!accountInput.trim()) {
       toast.error(t("accounts.keyRequired"));
@@ -201,7 +201,7 @@ export function AccountsView() {
     }
   }
 
-  /** 按下标删除一个 CC 账户并刷新列表。 */
+  /** 按下标删除一个 Command Code 账户并刷新列表。 */
   async function removeAccount(index: number) {
     try {
       await api.accountRemove(index);

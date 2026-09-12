@@ -1,10 +1,10 @@
-//! 凭据管理：CC 上游账户 key 列表 + 本地转发鉴权 key，统一存于 SQLite `settings` 表。
+//! 凭据管理：Command Code 上游账户 key 列表 + 本地转发鉴权 key，统一存于 SQLite `settings` 表。
 //! config.json 不再承载 key。
 //!
-//! - **CC 账户**（`user_` 开头）：可配置多个，请求按轮询切换使用，分散单账户限流/配额压力。
+//! - **Command Code 账户**（`user_` 开头）：可配置多个，请求按轮询切换使用，分散单账户限流/配额压力。
 //!   账户列表以 `AppState.config` 为内存真相源（转发热路径零 IO），写库由本模块负责。
 //! - **本地转发 key**（`sk_` 开头）：仅本机服务鉴权用，客户端统一用它接入本地代理，
-//!   可一键随机生成；该 key 不会发送给 CC 上游。
+//!   可一键随机生成；该 key 不会发送给 Command Code 上游。
 
 use crate::i18n;
 use crate::proxy::config::Account;
@@ -60,7 +60,7 @@ pub fn generate_local_key() -> String {
     format!("sk-{hex}")
 }
 
-/// 从设置库读取 CC 账户列表（去空白、过滤空 key）。
+/// 从设置库读取 Command Code 账户列表（去空白、过滤空 key）。
 pub fn load_accounts(conn: &Connection) -> Result<Vec<Account>, String> {
     Ok(super::proxy::settings::load_config(conn)
         .cc_accounts
@@ -73,7 +73,7 @@ pub fn load_accounts(conn: &Connection) -> Result<Vec<Account>, String> {
         .collect())
 }
 
-/// 新增一个 CC 账户：以 `user_id` 为唯一标识，同 userId 已存在时更新其 key 与显示名
+/// 新增一个 Command Code 账户：以 `user_id` 为唯一标识，同 userId 已存在时更新其 key 与显示名
 /// （视为同一账户重新登录/换 key），否则追加。落库后返回更新后的账户列表
 /// （调用方负责同步到 AppState.config）。
 pub fn add_account(conn: &Connection, acct: &Account) -> Result<Vec<Account>, String> {
@@ -103,7 +103,7 @@ pub fn add_account(conn: &Connection, acct: &Account) -> Result<Vec<Account>, St
     Ok(accounts)
 }
 
-/// 移除指定下标的 CC 账户（0 起）；下标越界时返回错误。
+/// 移除指定下标的 Command Code 账户（0 起）；下标越界时返回错误。
 /// 返回更新后的账户列表（调用方负责同步到 AppState.config）。
 pub fn remove_account_at(conn: &Connection, index: usize) -> Result<Vec<Account>, String> {
     let mut accounts = load_accounts(conn)?;
@@ -139,7 +139,7 @@ fn save_accounts(conn: &Connection, accounts: &[Account]) -> Result<(), String> 
     super::proxy::settings::save_config(conn, &cfg)
 }
 
-/// 从 AppState 的配置读取 CC 账户列表。
+/// 从 AppState 的配置读取 Command Code 账户列表。
 pub fn accounts_from_state(state: &crate::proxy::state::AppState) -> Vec<Account> {
     state.config.read().unwrap().cc_accounts.clone()
 }
@@ -376,12 +376,14 @@ mod tests {
     use crate::proxy::settings::init_settings_on;
     use crate::proxy::state::AppState;
 
+    /// 建一个已初始化 settings 表的内存库（测试辅助）。
     fn temp_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         init_settings_on(&conn).unwrap();
         conn
     }
 
+    /// 随机 key 的形态：sk- 前缀 + 32 位 hex，且两次生成不重复。
     #[test]
     fn generate_local_key_format() {
         let k = generate_local_key();
@@ -393,6 +395,7 @@ mod tests {
         assert_ne!(k, generate_local_key());
     }
 
+    /// 本地 Key 的存取与删除闭环，并同步刷新进程内缓存。
     #[test]
     fn local_key_roundtrip() {
         let conn = temp_conn();
@@ -404,6 +407,7 @@ mod tests {
         assert_eq!(load_local_key(&conn).unwrap(), None);
     }
 
+    /// 账户增删改闭环：同 userId 重加更新不新增、按下标删除、越界报错。
     #[test]
     fn accounts_roundtrip() {
         let conn = temp_conn();
@@ -455,6 +459,7 @@ mod tests {
         assert!(remove_account_at(&conn, 5).is_err()); // 越界报错
     }
 
+    /// 按 userId 重命名：去首尾空白、未知 userId 与空白名报错。
     #[test]
     fn rename_account_by_user_id() {
         let conn = temp_conn();
@@ -475,6 +480,7 @@ mod tests {
         assert!(rename_account(&conn, "id_1", "   ").is_err()); // 空白名拒绝
     }
 
+    /// 轮询策略：连续选取按 a → b 依次轮转。
     #[test]
     fn round_robin_rotates() {
         // 构造带两个账户的 state：a → b → a → b（按 key 断言）
@@ -501,6 +507,7 @@ mod tests {
         assert_eq!(got, vec!["user_a", "user_b", "user_a", "user_b"]);
     }
 
+    /// 轮询策略：账户列表为空时返回 None。
     #[test]
     fn round_robin_empty() {
         let state = AppState::new(Config::default());
@@ -519,6 +526,7 @@ mod tests {
         state
     }
 
+    /// 快捷构造测试账户（key/user_id/user_name 均由 id 派生）。
     fn acct(id: &str) -> Account {
         Account { key: format!("user_{id}"), user_id: id.into(), user_name: id.into(), ..Account::default() }
     }
@@ -552,6 +560,7 @@ mod tests {
         state.quota_cache.lock().unwrap().insert(user_id.to_string(), (q, crate::proxy::state::now_millis()));
     }
 
+    /// 优先策略：指定优先账户后，不同会话首次都选它，且同会话持续绑定。
     #[test]
     fn priority_binds_session_to_preferred_account() {
         // 指定 b 为优先账户：不同会话首次都选 b，且同一会话持续绑定 b
@@ -567,6 +576,7 @@ mod tests {
         assert_eq!(route_account(&state, Some("sess-aaaa1111")).unwrap().user_id, "b");
     }
 
+    /// 优先策略：会话已绑定账户后保持粘滞，不因其他账户余量更多而漂移。
     #[test]
     fn priority_keeps_session_sticky_even_if_richer_account_exists() {
         // 会话已绑定 a，即使 b 余量更多也不切换（保护上游缓存）
@@ -583,6 +593,7 @@ mod tests {
         assert_eq!(route_account(&state, Some("sess-cccc3333")).unwrap().user_id, "a");
     }
 
+    /// 优先策略：绑定账户额度耗尽时自动切到余量最多者，并更新绑定。
     #[test]
     fn priority_switches_when_bound_account_exhausted() {
         // 绑定的 a 额度耗尽（5h 用满）→ 自动切到余量最多的 b
@@ -599,6 +610,7 @@ mod tests {
         assert_eq!(bound.as_deref(), Some("b"));
     }
 
+    /// 优先策略：指定账户耗尽时退回到余量最多的其他账户。
     #[test]
     fn priority_falls_back_to_max_remaining_when_preferred_exhausted() {
         // 指定的 a 已耗尽 → 退回到余量最多的 c
@@ -609,6 +621,7 @@ mod tests {
         assert_eq!(route_account(&state, Some("sess-eeee5555")).unwrap().user_id, "c");
     }
 
+    /// 轮询策略：忽略粘滞绑定与额度，仅按顺序轮转，不产生新绑定。
     #[test]
     fn rr_strategy_ignores_bindings_and_rotates() {
         // round_robin：保持轮询语义，不看额度也不粘滞
@@ -621,12 +634,14 @@ mod tests {
         assert!(state.account_bindings.lock().unwrap().is_empty());
     }
 
+    /// 优先策略：无可用账户时返回 None。
     #[test]
     fn priority_empty_accounts_returns_none() {
         let state = state_with(vec![], "priority", "x");
         assert_eq!(route_account(&state, Some("sess-gggg7777")), None);
     }
 
+    /// 旧版纯字符串 key 数组可反序列化为 Account（userId 为派生占位）。
     #[test]
     fn legacy_string_account_deser() {
         // 旧版纯字符串 key 数组应反序列化为 Account（user_id 为派生占位）

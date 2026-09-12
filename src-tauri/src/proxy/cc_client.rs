@@ -220,9 +220,9 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str, user_id: &str) 
             .await;
             match res {
                 Ok(Ok(r)) if r.status().is_success() => log::info("Fingerprint/lifecycle event sent"),
-                Ok(Ok(r)) => log::warn(&format!("CC pre-request failed: {}", r.status())),
-                Ok(Err(e)) => log::warn(&format!("CC pre-request error: {e}")),
-                Err(_) => log::warn("CC pre-request timeout"),
+                Ok(Ok(r)) => log::warn(&format!("Command Code pre-request failed: {}", r.status())),
+                Ok(Err(e)) => log::warn(&format!("Command Code pre-request error: {e}")),
+                Err(_) => log::warn("Command Code pre-request timeout"),
             }
         }
     };
@@ -246,7 +246,7 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str, user_id: &str) 
     log::info("Fingerprint/lifecycle next refresh scheduled");
 }
 
-/// 构造 CC 上游公共请求头：JSON 内容类型、CLI 环境标识、Bearer 鉴权与 CLI 版本号。
+/// 构造 Command Code 上游公共请求头：JSON 内容类型、CLI 环境标识、Bearer 鉴权与 CLI 版本号。
 fn base_headers(state: &AppState, api_key: &str) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -266,7 +266,7 @@ fn base_headers(state: &AppState, api_key: &str) -> reqwest::header::HeaderMap {
     headers
 }
 
-/// 转发到 CC API /alpha/generate。
+/// 转发到 Command Code API /alpha/generate。
 ///
 /// - `body`：已由 convert 模块构造好的 CLI 信封请求体；
 /// - `api_key`：上游账户 key（构造 Bearer 与伪造头）；
@@ -311,7 +311,7 @@ pub async fn forward_to_cc(
         .await
 }
 
-/// 从 npm registry 刷新 CC 版本（启动时 + 每 24h）。
+/// 从 npm registry 刷新 Command Code 版本（启动时 + 每 24h）。
 pub async fn refresh_cc_version(state: &AppState) {
     let res = tokio::time::timeout(Duration::from_secs(10), async {
         state
@@ -326,16 +326,16 @@ pub async fn refresh_cc_version(state: &AppState) {
             if let Ok(pkg) = r.json::<Value>().await {
                 if let Some(v) = pkg.get("version").and_then(|v| v.as_str()) {
                     *state.cc_version.write().unwrap() = v.to_string();
-                    log::info(&format!("CC version refreshed from npm: {v}"));
+                    log::info(&format!("Command Code version refreshed from npm: {v}"));
                     return;
                 }
             }
         }
-        Ok(Ok(r)) => log::warn(&format!("CC version fetch failed: {}", r.status())),
-        Ok(Err(e)) => log::warn(&format!("CC version fetch error: {e}")),
-        Err(_) => log::warn("CC version fetch timeout"),
+        Ok(Ok(r)) => log::warn(&format!("Command Code version fetch failed: {}", r.status())),
+        Ok(Err(e)) => log::warn(&format!("Command Code version fetch error: {e}")),
+        Err(_) => log::warn("Command Code version fetch timeout"),
     }
-    log::warn("CC version fetch failed, using current");
+    log::warn("Command Code version fetch failed, using current");
 }
 
 /// 模型列表：Provider API 动态拉取（按配置间隔缓存），失败回退硬编码列表。

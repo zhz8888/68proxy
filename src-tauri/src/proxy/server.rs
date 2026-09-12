@@ -1,7 +1,7 @@
 //! 本地 HTTP 服务：路由分发、鉴权、流式/非流式转发与协议错误处理。
 //!
 //! 三种下游协议入口（/v1/chat/completions、/v1/messages、/v1/responses）统一走
-//! “转换为 CC 信封 → 转发上游 → 按协议翻译回 SSE/JSON”的流程；流式路径通过
+//! “转换为 Command Code 信封 → 转发上游 → 按协议翻译回 SSE/JSON”的流程；流式路径通过
 //! mpsc 通道把后台读流任务产出的帧交给响应流，实现首帧前可回退为普通 JSON 错误。
 
 use axum::body::Body;
@@ -118,6 +118,7 @@ struct InflightGuard {
 }
 
 impl Drop for InflightGuard {
+    /// 响应 body 结束（正常完成或连接断开）时递减在途计数。
     fn drop(&mut self) {
         self.st.inflight.fetch_sub(1, Ordering::SeqCst);
     }
@@ -213,7 +214,7 @@ pub async fn serve(
     }
 
     if with_background {
-        // 后台任务：CC 版本刷新（启动 + 每 24h）、会话清理（每小时）
+        // 后台任务：Command Code 版本刷新（启动 + 每 24h）、会话清理（每小时）
         {
             let st = state.clone();
             tokio::spawn(async move {
@@ -573,7 +574,7 @@ fn route_session_key(headers: &HeaderMap, prompt_cache_key: Option<&str>) -> Opt
     prompt_cache_key.filter(|k| k.len() >= 8).map(|k| k.to_string())
 }
 
-/// 鉴权并选出本次转发的 CC 账户 key。
+/// 鉴权并选出本次转发的 Command Code 账户 key。
 ///
 /// 流程：
 /// 1. 从请求头提取本地转发 Key（sk- 开头），必须与本地已生成的 key 一致，否则 401；
@@ -606,7 +607,7 @@ async fn api_key_or_401(
         return Err((401, "Invalid API key"));
     }
 
-    // 鉴权通过：按账户策略选取本次转发的 CC 账户
+    // 鉴权通过：按账户策略选取本次转发的 Command Code 账户
     match crate::credentials::route_account(st, session_key) {
         Some(a) => Ok((a.key, a.user_id)),
         None => Err((
@@ -618,7 +619,7 @@ async fn api_key_or_401(
 
 // ── OpenAI /v1/chat/completions ─────────────────────────
 
-/// OpenAI Chat Completions 入口：转换请求 → 转发 CC → 按 stream 走 SSE 或 JSON 路径。
+/// OpenAI Chat Completions 入口：转换请求 → 转发 Command Code → 按 stream 走 SSE 或 JSON 路径。
 /// 上游非 2xx 经 map_cc_error 映射为下游状态码。
 async fn chat_completions(
     State(st): State<Arc<AppState>>,
@@ -717,7 +718,7 @@ async fn chat_completions(
 
 // ── Anthropic /v1/messages ─────────────────────────────
 
-/// Anthropic Messages 入口：先转成 OpenAI Chat 格式再复用 CC 转换与转发，
+/// Anthropic Messages 入口：先转成 OpenAI Chat 格式再复用 Command Code 转换与转发，
 /// 错误响应按 Anthropic 格式重新包装。
 async fn messages(
     State(st): State<Arc<AppState>>,
@@ -821,7 +822,7 @@ async fn messages(
 
 // ── OpenAI Responses /v1/responses ─────────────────────
 
-/// OpenAI Responses 入口（Codex CLI 等）：先转成 OpenAI Chat 格式再复用 CC 转换与转发。
+/// OpenAI Responses 入口（Codex CLI 等）：先转成 OpenAI Chat 格式再复用 Command Code 转换与转发。
 async fn responses(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1380,7 +1381,7 @@ fn take_incomplete_tail(buffer: &mut Vec<u8>) -> Option<String> {
 
 /// 记录一条成功的 token 用量到统计库（token 真实值出现点调用）。
 ///
-/// 对齐 9router 的保存约定：输入/输出均为 0 的请求（如上游空响应）不记，
+/// 保存约定：输入/输出均为 0 的请求（如上游空响应）不记，
 /// 失败/超时/断连请求也不计入用量统计；成本由单价表实时估算。
 fn record_usage_entry(
     st: &AppState,
@@ -1600,7 +1601,7 @@ fn nonstream_error(protocol: Protocol, status: u16, msg: &str, retry_after: Opti
     json_response(status, body, retry_after)
 }
 
-/// 从 CC usage 对象提取 (输入, 输出, 缓存命中) token 数，缺失一律按 0。
+/// 从 Command Code usage 对象提取 (输入, 输出, 缓存命中) token 数，缺失一律按 0。
 fn usage_tokens(usage: &Option<Value>) -> (u64, u64, u64) {
     let u = match usage {
         Some(u) => u,
@@ -1613,7 +1614,7 @@ fn usage_tokens(usage: &Option<Value>) -> (u64, u64, u64) {
     )
 }
 
-/// 非流式聚合：解析单行 CC NDJSON 事件并就地累积到各聚合器（参数多因此豁免 clippy）。
+/// 非流式聚合：解析单行 Command Code NDJSON 事件并就地累积到各聚合器（参数多因此豁免 clippy）。
 ///
 /// text-delta 拼文本；reasoning-delta 仅 OpenAI 协议保留；tool-call 归一为
 /// OpenAI tool_call 结构；finish 记录 finish_reason 与 totalUsage。
@@ -1691,7 +1692,7 @@ fn parse_ndjson_line(
 
 // ── 其他路由 ──────────────────────────────────────────
 
-/// GET /v1/models：返回模型列表（OpenAI list 格式），用第一个 CC 账户拉取；
+/// GET /v1/models：返回模型列表（OpenAI list 格式），用第一个 Command Code 账户拉取；
 /// 无账户或拉取失败时回退硬编码列表。
 async fn models(
     State(st): State<Arc<AppState>>,

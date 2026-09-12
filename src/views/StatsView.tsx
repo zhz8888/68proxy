@@ -137,7 +137,7 @@ export function StatsView() {
   const [groupBy, setGroupBy] = useState<"model" | "endpoint">("model");
   const [confirmClear, setConfirmClear] = useState(false);
   const [loadError, setLoadError] = useState("");
-  // 账户额度快照（全部 CC 账户）
+  // 账户额度快照（全部 Command Code 账户）
   const [quotas, setQuotas] = useState<AccountQuota[]>([]);
   const [quotaLoading, setQuotaLoading] = useState(false);
   // 每次请求的序号：仅当结果仍属于最新一次请求时才落库，避免快速切换周期时旧结果覆盖新结果
@@ -265,7 +265,7 @@ export function StatsView() {
 
       <ScrollArea className="flex-1 rounded-lg border border-border bg-card/60">
         <div className="space-y-4 p-4">
-          {/* 账户剩余额度：显示全部 CC 账户的套餐余额与窗口限额 */}
+          {/* 账户剩余额度：显示全部 Command Code 账户的套餐余额与窗口限额 */}
           {quotas.length > 0 && (
             <Card>
               <CardHeader className="pb-2">

@@ -74,6 +74,7 @@ pub struct AccessInfo {
 }
 
 impl AccessInfo {
+    /// 构造「模型可用」结果（无需套餐、无原因）。
     fn allowed() -> Self {
         Self { allowed: true, minimum_plan: None, reason: None }
     }
@@ -470,6 +471,7 @@ pub fn plan_status_json(ctx: &PlanContext) -> Value {
 mod tests {
     use super::*;
 
+    /// 快捷构造套餐上下文（订阅名 + 购买/赠送额度）。
     fn ctx(plan: Option<&str>, purchased: u64, free: u64) -> PlanContext {
         PlanContext {
             plan_id: plan.map(|s| s.to_string()),
@@ -481,6 +483,7 @@ mod tests {
         }
     }
 
+    /// 模型名归一化：去 provider 前缀、日期后缀与网关限定。
     #[test]
     fn normalize_strips_prefix_and_date() {
         assert_eq!(normalize("moonshotai/Kimi-K3"), "kimi-k3");
@@ -490,6 +493,7 @@ mod tests {
         assert_eq!(normalize("Qwen/Qwen3.7-Max"), "qwen3.7-max");
     }
 
+    /// 分类查表覆盖不同命名风格；未收录模型不限制。
     #[test]
     fn category_lookup_covers_both_styles() {
         assert_eq!(model_category("claude-opus-4-8"), Some(CAT_PREMIUM));
@@ -503,6 +507,7 @@ mod tests {
         assert_eq!(model_category("some-unknown-model"), None);
     }
 
+    /// Go 套餐：仅开源池可用，premium 提示 Provider，屏敝模型提示 GOAT。
     #[test]
     fn go_plan_only_opensource_and_blocklist() {
         let c = ctx(Some("individual-go"), 0, 0);
@@ -518,6 +523,7 @@ mod tests {
         assert_eq!(sol.minimum_plan.as_deref(), Some("GOAT"));
     }
 
+    /// Pro 套餐：放开除顶级（opus/gpt-6）外的模型；Max 无屏蔽。
     #[test]
     fn pro_plan_blocks_top_tier() {
         let c = ctx(Some("individual-pro"), 0, 0);
@@ -530,6 +536,7 @@ mod tests {
         assert!(evaluate_access("claude-opus-4-8", &max).allowed);
     }
 
+    /// 有额度（购买/赠送）即全放开；无套餐/未知套餐/拉取失败一律放行。
     #[test]
     fn credits_unlock_everything_and_unknown_plan_is_permissive() {
         let paid = ctx(Some("individual-go"), 5, 0);
@@ -544,6 +551,7 @@ mod tests {
         assert!(evaluate_access("claude-opus-4-8", &failed).allowed);
     }
 
+    /// 套餐状态 JSON 的结构：套餐信息 + 各模型准入结论。
     #[test]
     fn plan_status_json_shape() {
         let v = plan_status_json(&ctx(Some("individual-go"), 0, 0));

@@ -65,6 +65,7 @@ pub struct LimitWindow {
 }
 
 impl LimitWindow {
+    /// 从上游窗口 JSON 解析（cap 必填，used 缺省 0，resetAt 缺省 None）；字段缺失返回 None。
     fn from_json(v: &Value) -> Option<Self> {
         let cap = v.get("cap").and_then(|x| x.as_f64())?;
         let used = v.get("used").and_then(|x| x.as_f64()).unwrap_or(0.0);
@@ -515,6 +516,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// 套餐月额度按最长前缀匹配，下划线写法等价。
     #[test]
     fn plan_credits_longest_prefix() {
         assert_eq!(plan_monthly_credits("individual-pro-v1"), Some(80.0));
@@ -526,6 +528,7 @@ mod tests {
         assert_eq!(plan_monthly_credits("unknown-plan"), None);
     }
 
+    /// 组织限额解析：0-1 比例与百分比两种刻度都归一为百分比。
     #[test]
     fn org_limits_parse_both_pct_scales() {
         let w = json!({ "orgLimits": [
@@ -542,6 +545,7 @@ mod tests {
         assert!(!rows[1].reached);
     }
 
+    /// 窗口解析：字段齐全时成功，缺 cap 视为无效。
     #[test]
     fn limit_window_from_json() {
         let w = LimitWindow::from_json(&json!({ "used": 12, "cap": 50, "resetAt": 1700000000000u64 })).unwrap();
@@ -579,6 +583,7 @@ mod tests {
         }
     }
 
+    /// 耗尽判定：5 小时窗口最先触发。
     #[test]
     fn exhausted_by_five_hour_first() {
         // 5 小时用满即耗尽，即便周/月仍有大量余额
@@ -586,6 +591,7 @@ mod tests {
         assert!(is_exhausted(&q));
     }
 
+    /// 耗尽判定：5 小时未满但周窗口用满。
     #[test]
     fn exhausted_by_weekly_when_five_hour_ok() {
         // 5 小时未满但周用满 → 耗尽
@@ -593,6 +599,7 @@ mod tests {
         assert!(is_exhausted(&q));
     }
 
+    /// 耗尽判定：窗口未满但月池扣完。
     #[test]
     fn exhausted_by_month_when_windows_ok() {
         // 两个窗口都未满，月池扣完 → 耗尽
@@ -600,12 +607,14 @@ mod tests {
         assert!(is_exhausted(&q));
     }
 
+    /// 各项额度都有余量时不判定耗尽。
     #[test]
     fn not_exhausted_when_all_have_room() {
         let q = quota_with(Some((10.0, 50.0)), Some((100.0, 500.0)), 30.0, 20.0);
         assert!(!is_exhausted(&q));
     }
 
+    /// 无额度信息（无计费/拉取失败）不误判为耗尽。
     #[test]
     fn unknown_quota_is_not_exhausted() {
         // 无任何额度信息（拉取失败/无计费）不应误判为耗尽
@@ -617,6 +626,7 @@ mod tests {
         assert!(!is_exhausted(&failed));
     }
 
+    /// 余量评分取最窄可用窗口：5 小时 > 周 > 月池。
     #[test]
     fn remaining_score_uses_narrowest_window() {
         // 以最窄的可用窗口为准：5 小时剩余 80% 优先于月池剩余 90%
@@ -629,6 +639,7 @@ mod tests {
         assert!((remaining_score(&q3) - 0.25).abs() < 1e-9);
     }
 
+    /// 上游错误中的耗尽标记识别：402、credits 相关文案命中；普通限流/服务器错误不误判。
     #[test]
     fn detects_exhaustion_markers_in_upstream_error() {
         assert!(looks_exhausted_error(402, ""));

@@ -92,7 +92,7 @@ pub struct RequestInfo {
     pub output_tokens: u64,
     /// 命中缓存的输入 token 数。
     pub cached_tokens: u64,
-    /// 最后收到的上游 CC 事件类型（用于诊断中断位置）。
+    /// 最后收到的上游 Command Code 事件类型（用于诊断中断位置）。
     pub last_event: String,
 }
 
@@ -116,7 +116,7 @@ pub struct AppState {
     pub cc_version: RwLock<String>,
     /// 连续超时计数，达到阈值后在超时错误中提示缩减上下文。
     pub consecutive_timeouts: AtomicU32,
-    /// CC 账户轮询游标：每个 AppState 实例独立，避免实例间（如测试）互相干扰。
+    /// Command Code 账户轮询游标：每个 AppState 实例独立，避免实例间（如测试）互相干扰。
     pub round_robin: AtomicUsize,
     /// 进程内在途请求计数（业务路径，/health 不计），配合 max_inflight 做并发上限。
     pub inflight: AtomicU32,
