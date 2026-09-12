@@ -28,6 +28,8 @@
 | 📦 **模型列表** | ![Models](Preview%20Photo/3.png) |
 | ⚙️ **配置** | ![Settings](Preview%20Photo/4.png) |
 
+> 其余页面（📈 用量统计、🐞 调试日志、🔌 工具接入、ℹ️ 关于）见下方功能说明。
+
 <p align="center">
   <img src="./assets/readme/section-features.svg" width="100%" alt="功能 Features">
 </p>
@@ -36,10 +38,11 @@
 |------|------|
 | 📊 **控制台** | 运行状态、监听端口、上游版本一目了然；实时中继轨道可视化「客户端 → 代理 → 上游」整条链路，一键启动 / 停止 / 重启与健康检查 |
 | 🛰️ **中继记录** | 自代理启动以来每次请求实时呈现：时间、模型、路径、状态与耗时；点击可查看完整详情（请求 ID、流式模式、Token 用量与最后事件） |
+| 📈 **用量统计** | SQLite 持久化的 token 用量统计：汇总卡片（请求数 / 输入 / 缓存 / 输出 / 估算成本）、按小时/天聚合的趋势面积图、最近 10 分钟迷你柱状图、按模型 / 端点分组明细与最近请求列表；支持今日 / 24h / 7D / 30D / 60D / 全部时间范围，可一键清空 |
 | 📦 **模型列表** | 从 Provider API 动态拉取模型（失败自动回退内置 30 个模型），展示厂商标识，支持搜索与一键复制模型 ID |
-| 🔌 **工具接入** | 输入目标工具名与模型，自动生成接入提示词，让 AI 替你完成 Cursor / OpenCode / Cherry Studio 等工具的配置；协议不支持时自动回复「不支持」 |
+| 🔌 **工具接入** | 输入目标工具名与模型，自动生成接入提示词，让 AI 替你完成 Cursor / OpenCode / Cherry Studio 等工具的配置；协议不支持时自动回复「不支持」，附移除接入的提示词 |
 | 🐞 **调试日志** | 内存环形日志 + 实时推送，支持级别过滤、关键词搜索、自动滚动与一键清空，可导出最近 1000 条 |
-| ⚙️ **配置** | 端口 / 监听地址（含端口占用检测与一键释放）、模型来源与刷新间隔、启动行为（自动运行 / 开机自启 / 托盘）、日志级别、API Key 明文存储，改动自动保存 |
+| ⚙️ **配置** | 端口 / 监听地址（含端口占用检测与一键释放）、模型来源与刷新间隔、启动行为（自动运行 / 开机自启 / 托盘）、日志级别、token 用量统计开关与保留天数、API Key 明文存储，改动自动保存 |
 | 🎛️ **系统托盘** | 最小化到托盘运行，托盘菜单可显示窗口、启动 / 停止 / 重启代理与退出 |
 
 <p align="center">
@@ -50,6 +53,7 @@
 2. **协议转换** — 将请求包装成 Command Code CLI 信封格式：提取 system 提示、映射多轮消息、工具调用、多模态图片与 tool_choice 等参数；Responses 请求的 instructions、input 条目、function_call / function_call_output 回灌一并转换
 3. **上游转发** — 携带反检测特征（每 Key 独立会话与设备指纹、traceparent、假项目 slug、动态 CC 版本）转发至 `/alpha/generate`
 4. **流式翻译** — 把上游 NDJSON 流实时翻译为 OpenAI / Responses / Anthropic 的 SSE 事件或非流式 JSON，并处理错误码映射、超时、断连与零输出等边界情况
+5. **用量统计** — 请求完成后在流式结束 / 非流式成功两条路径记录 token 用量到 SQLite（零输出或失败请求不计入），按内置单价表估算成本，并按天预聚合支撑大时间窗快速查询
 
 <p align="center">
   <img src="./assets/readme/section-quickstart.svg" width="100%" alt="快速开始 Quick Start">
@@ -91,8 +95,8 @@ API Key                任意占位符即可（如 sk-placeholder），
 
 | 前端 | 后端 | 工具 |
 |------|------|------|
-| Tauri 2 | Rust（axum + tokio + reqwest） | tauri-cli |
-| React 19 + TypeScript | 本地配置文件（config.json） | Windows / macOS |
+| Tauri 2 | Rust（axum + tokio + reqwest + rusqlite） | tauri-cli |
+| React 19 + TypeScript | 本地配置文件（config.json）+ 用量库（usage.sqlite） | Windows / macOS |
 | Vite + Tailwind CSS 4 | serde / uuid / rand / sha2 | shadcn/ui |
 | Radix + lucide-react + sonner | tower-http + CORS | |
 
@@ -103,9 +107,9 @@ API Key                任意占位符即可（如 sk-placeholder），
 ```
 68proxy/
 ├── src/                      # React 前端
-│   ├── components/           # UI 组件（StatusLamp / RelayRail / UrlRow / ModelLogo …）
-│   ├── views/                # 页面（控制台 / 调试日志 / 中继记录 / 模型列表 / 工具接入 / 配置 / 关于）
-│   └── lib/                  # Tauri API 桥接与工具函数
+│   ├── components/           # UI 组件（StatusLamp / RelayRail / UrlRow / ModelLogo / UsageTrendChart / UsageMiniBars …）
+│   ├── views/                # 页面（控制台 / 调试日志 / 中继记录 / 用量统计 / 模型列表 / 工具接入 / 配置 / 关于）
+│   └── lib/                  # Tauri API 桥接（api.ts）、状态映射（status.ts）、常量（constants.ts）、格式化（format.ts）
 ├── src-tauri/
 │   ├── src/
 │   │   ├── lib.rs            # Tauri 命令、系统托盘、生命周期
@@ -115,8 +119,13 @@ API Key                任意占位符即可（如 sk-placeholder），
 │   │       ├── convert.rs    # OpenAI / Responses / Anthropic ↔ CC 协议转换
 │   │       ├── cc_client.rs  # CC 上游客户端、会话 / 指纹、模型拉取
 │   │       ├── sse.rs        # NDJSON → SSE 翻译器
+│   │       ├── usage.rs      # token 用量统计（SQLite 三表 + 按天预聚合）
+│   │       ├── pricing.rs    # 模型单价表与成本估算
 │   │       ├── fingerprint.rs# 反检测设备指纹
 │   │       ├── config.rs     # 配置加载 / 校验 / 环境变量覆写
+│   │       ├── errors.rs     # 上游错误码 → 下游协议错误映射
+│   │       ├── log.rs        # 内存环形日志
+│   │       ├── state.rs      # 共享状态（会话 / 缓存 / 请求队列）
 │   │       └── ...
 │   ├── icons/                # 应用图标
 │   └── tauri.conf.json       # Tauri 配置

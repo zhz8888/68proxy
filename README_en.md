@@ -28,6 +28,8 @@
 | 📦 **Models** | ![Models](Preview%20Photo/3.png) |
 | ⚙️ **Settings** | ![Settings](Preview%20Photo/4.png) |
 
+> Other pages (📈 Usage Stats, 🐞 Debug Logs, 🔌 Tool Integration, ℹ️ About) are described in the feature table below.
+
 <p align="center">
   <img src="./assets/readme/section-features.svg" width="100%" alt="Features">
 </p>
@@ -36,20 +38,22 @@
 |--------|-------------|
 | 📊 **Console** | Running state, listening port and upstream version at a glance; a live relay track visualizes the whole 「client → proxy → upstream」path with one-click start / stop / restart and health check |
 | 🛰️ **Relay Records** | Every request since proxy start rendered in real time: time, model, path, status and elapsed time; click for full details (request ID, streaming mode, token usage and last event) |
+| 📈 **Usage Stats** | SQLite-persisted token usage stats: summary cards (requests / input / cached / output / estimated cost), an hourly-daily aggregated trend area chart, a last-10-minutes mini bar chart, per-model / per-endpoint breakdown and recent request list; supports Today / 24h / 7D / 30D / 60D / All ranges and one-click clear |
 | 📦 **Models** | Models dynamically fetched from the Provider API (falls back to 30 built-in models on failure), with provider badges, search and one-click copy of model IDs |
-| 🔌 **Tool Integration** | Enter a target tool name and model to auto-generate an integration prompt — let AI wire up Cursor / OpenCode / Cherry Studio for you; it replies 「not supported」 when the protocol is incompatible |
+| 🔌 **Tool Integration** | Enter a target tool name and model to auto-generate an integration prompt — let AI wire up Cursor / OpenCode / Cherry Studio for you; it replies 「not supported」 when the protocol is incompatible, and also offers a removal prompt |
 | 🐞 **Debug Logs** | In-memory ring buffer with live push, level filter, keyword search, auto-scroll and one-click clear, plus export of the latest 1,000 entries |
-| ⚙️ **Settings** | Port / listen address (with port-in-use detection and one-click release), model source and refresh interval, startup behavior (auto-run, autostart, tray), log level, plaintext API key storage — changes saved automatically |
+| ⚙️ **Settings** | Port / listen address (with port-in-use detection and one-click release), model source and refresh interval, startup behavior (auto-run, autostart, tray), log level, token usage tracking toggle and retention days, plaintext API key storage — changes saved automatically |
 | 🎛️ **System Tray** | Minimize to tray; tray menu shows the window and start / stop / restart the proxy or quit |
 
 <p align="center">
   <img src="./assets/readme/section-flow.svg" width="100%" alt="Request Flow">
 </p>
 
-1. **Compatible entry** — Exposes OpenAI `/v1/chat/completions` and Anthropic `/v1/messages` compatible endpoints, plus `/v1/models` and `/health`
-2. **Protocol conversion** — Wraps requests into the Command Code CLI envelope format: extracts system prompts, maps multi-turn messages, tool calls, multimodal images and tool_choice
+1. **Compatible entry** — Exposes OpenAI `/v1/chat/completions`, OpenAI Responses `/v1/responses` and Anthropic `/v1/messages` compatible endpoints, plus `/v1/models` and `/health`
+2. **Protocol conversion** — Wraps requests into the Command Code CLI envelope format: extracts system prompts, maps multi-turn messages, tool calls, multimodal images and tool_choice; Responses `instructions`, `input` items and `function_call` / `function_call_output` round-tripping are converted as well
 3. **Upstream forwarding** — Forwards to `/alpha/generate` with anti-detection signals (per-key sessions & device fingerprints, traceparent, fake project slug, dynamic CC version)
-4. **Streaming translation** — Translates the upstream NDJSON stream into OpenAI / Anthropic SSE or non-stream JSON, handling error-code mapping, timeouts, disconnects and zero-output edge cases
+4. **Streaming translation** — Translates the upstream NDJSON stream into OpenAI / Responses / Anthropic SSE or non-stream JSON, handling error-code mapping, timeouts, disconnects and zero-output edge cases
+5. **Usage tracking** — On completion, token usage is recorded to SQLite on both the streaming-finished and non-streaming success paths (zero-output or failed requests are skipped), cost is estimated from the built-in price table, and per-day pre-aggregation powers fast queries over large time windows
 
 <p align="center">
   <img src="./assets/readme/section-quickstart.svg" width="100%" alt="Quick Start">
@@ -90,8 +94,8 @@ API Key                      any placeholder (e.g. sk-placeholder) — the proxy
 
 | Frontend | Backend | Tools |
 |----------|---------|-------|
-| Tauri 2 | Rust (axum + tokio + reqwest) | tauri-cli |
-| React 19 + TypeScript | Local config file (config.json) | Windows / macOS |
+| Tauri 2 | Rust (axum + tokio + reqwest + rusqlite) | tauri-cli |
+| React 19 + TypeScript | Local config file (config.json) + usage DB (usage.sqlite) | Windows / macOS |
 | Vite + Tailwind CSS 4 | serde / uuid / rand / sha2 | shadcn/ui |
 | Radix + lucide-react + sonner | tower-http + CORS | |
 
@@ -102,20 +106,25 @@ API Key                      any placeholder (e.g. sk-placeholder) — the proxy
 ```
 68proxy/
 ├── src/                      # React frontend
-│   ├── components/           # UI components (StatusLamp / RelayRail / UrlRow / ModelLogo …)
-│   ├── views/                # Pages (Console / Logs / Relay / Models / Tools / Config / About)
-│   └── lib/                  # Tauri API bridge & helpers
+│   ├── components/           # UI components (StatusLamp / RelayRail / UrlRow / ModelLogo / UsageTrendChart / UsageMiniBars …)
+│   ├── views/                # Pages (Console / Logs / Relay / Stats / Models / Tools / Config / About)
+│   └── lib/                  # Tauri API bridge (api.ts), status mapping (status.ts), constants (constants.ts), formatting (format.ts)
 ├── src-tauri/
 │   ├── src/
 │   │   ├── lib.rs            # Tauri commands, system tray, lifecycle
 │   │   ├── credentials.rs    # Plaintext API key access (local config file)
 │   │   └── proxy/            # Rust reverse proxy core
 │   │       ├── server.rs     # axum routes, streaming / non-streaming forwarding
-│   │       ├── convert.rs    # OpenAI ↔ CC, Anthropic ↔ OpenAI conversion
+│   │       ├── convert.rs    # OpenAI / Responses / Anthropic ↔ CC conversion
 │   │       ├── cc_client.rs  # CC upstream client, sessions / fingerprint, model fetch
 │   │       ├── sse.rs        # NDJSON → SSE translators
+│   │       ├── usage.rs      # Token usage stats (SQLite 3 tables + per-day pre-aggregation)
+│   │       ├── pricing.rs    # Model price table & cost estimation
 │   │       ├── fingerprint.rs# Anti-detection device fingerprint
 │   │       ├── config.rs     # Config load / validate / env overrides
+│   │       ├── errors.rs     # Upstream error → downstream protocol mapping
+│   │       ├── log.rs        # In-memory ring buffer logs
+│   │       ├── state.rs      # Shared state (sessions / caches / request queue)
 │   │       └── ...
 │   ├── icons/                # App icons
 │   └── tauri.conf.json       # Tauri config
