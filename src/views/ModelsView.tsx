@@ -6,11 +6,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { api, type ModelInfo, type ModelPricing } from "@/lib/api";
+import { api, type ModelAccessInfo, type ModelInfo, type ModelPricing, type PlanContext } from "@/lib/api";
 import { copyText, formatContextTokens, formatPrice } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 /** 能力/价格筛选维度。 */
-type Filter = "all" | "vision" | "reasoning" | "free";
+type Filter = "all" | "vision" | "reasoning" | "free" | "unavailable";
 
 /** 模型卡片当前应展示的最低档费率（用于列表内的价格概览）。 */
 function baseRates(p: ModelPricing | undefined) {
@@ -36,28 +37,59 @@ function matchPricing(catalog: Map<string, ModelPricing>, id: string): ModelPric
   return best;
 }
 
+/**
+ * 按套餐准入结果匹配模型：优先精确键，再退回归一化后的键。
+ * @param access 后端下发的「模型 ID → 准入结果」映射
+ * @param id 列表中的模型 ID
+ */
+function matchAccess(access: Record<string, ModelAccessInfo>, id: string): ModelAccessInfo | undefined {
+  const target = id.toLowerCase();
+  if (access[target]) return access[target];
+  const short = target.split("/").pop() ?? target;
+  if (access[short]) return access[short];
+  // 计费表键通常已归一化，这里按前缀取最长命中
+  let best: ModelAccessInfo | undefined;
+  let bestKey = "";
+  for (const [key, info] of Object.entries(access)) {
+    if (short.startsWith(key) && key.length > bestKey.length) {
+      best = info;
+      bestKey = key;
+    }
+  }
+  return best;
+}
+
 /** 模型视图：展示可用模型列表及其能力与价格，支持搜索、能力筛选、复制与手动刷新。 */
 export function ModelsView() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [catalog, setCatalog] = useState<Map<string, ModelPricing>>(new Map());
   const [fallback, setFallback] = useState(false);
+  const [plan, setPlan] = useState<PlanContext | null>(null);
+  const [access, setAccess] = useState<Record<string, ModelAccessInfo>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [copiedId, setCopiedId] = useState("");
 
-  /** 拉取模型列表与内置计费表。
+  /** 拉取模型列表、内置计费表与套餐准入结果。
    * @param force 为 true 时跳过缓存，强制向上游刷新
    */
   async function load(force: boolean) {
     setLoading(true);
     setError("");
     try {
-      const [res, cat] = await Promise.all([api.modelsGet(force), api.modelsCatalog()]);
+      const [res, cat, ps] = await Promise.all([
+        api.modelsGet(force),
+        api.modelsCatalog(),
+        api.planStatus(force).catch(() => null),
+      ]);
       setModels(res.data);
       setFallback(res.fallback);
       setCatalog(new Map(cat.map((c) => [c.id.toLowerCase(), c])));
+      // 套餐信息不可用时静默降级：不标注可用性，不影响模型列表展示
+      setPlan(ps?.plan ?? null);
+      setAccess(ps?.access ?? {});
     } catch (e) {
       setError(String(e));
     } finally {
@@ -70,10 +102,15 @@ export function ModelsView() {
     load(false);
   }, []);
 
-  // 每行模型都带上匹配到的计费信息，供筛选与展示复用
+  // 每行模型都带上匹配到的计费信息与套餐准入结果，供筛选与展示复用
   const rows = useMemo(
-    () => models.map((m) => ({ model: m, pricing: matchPricing(catalog, m.id) })),
-    [models, catalog],
+    () =>
+      models.map((m) => ({
+        model: m,
+        pricing: matchPricing(catalog, m.id),
+        access: matchAccess(access, m.id),
+      })),
+    [models, catalog, access],
   );
 
   const counts = useMemo(
@@ -81,13 +118,14 @@ export function ModelsView() {
       vision: rows.filter((r) => r.pricing?.caps.vision).length,
       reasoning: rows.filter((r) => r.pricing?.caps.reasoning).length,
       free: rows.filter((r) => r.pricing?.deal?.free).length,
+      unavailable: rows.filter((r) => r.access?.allowed === false).length,
     }),
     [rows],
   );
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return rows.filter(({ model, pricing }) => {
+    return rows.filter(({ model, pricing, access: acc }) => {
       if (q && !model.id.toLowerCase().includes(q) && !model.name.toLowerCase().includes(q)) {
         return false;
       }
@@ -98,6 +136,8 @@ export function ModelsView() {
           return !!pricing?.caps.reasoning;
         case "free":
           return !!pricing?.deal?.free;
+        case "unavailable":
+          return acc?.allowed === false;
         default:
           return true;
       }
@@ -117,6 +157,7 @@ export function ModelsView() {
     { value: "vision", label: "视觉", count: counts.vision },
     { value: "reasoning", label: "思考", count: counts.reasoning },
     { value: "free", label: "免费", count: counts.free },
+    { value: "unavailable", label: "不可用", count: counts.unavailable },
   ];
 
   return (
@@ -179,6 +220,16 @@ export function ModelsView() {
         </div>
       )}
 
+      {plan && !plan.fetch_failed && (
+        <div className="rounded-md border border-border bg-secondary/40 px-3 py-2 text-xs text-muted-foreground">
+          当前套餐：<span className="text-foreground">{plan.plan_name}</span>
+          {(plan.purchased_credits > 0 || plan.free_credits > 0) && (
+            <> · 按量额度 ${plan.purchased_credits + plan.free_credits}（可解锁全部模型）</>
+          )}
+          {counts.unavailable > 0 && <> · 有 {counts.unavailable} 个模型当前套餐不可用</>}
+        </div>
+      )}
+
       {loading ? (
         <div className="grid grid-cols-3 gap-3">
           {Array.from({ length: 9 }).map((_, i) => (
@@ -193,16 +244,21 @@ export function ModelsView() {
         </div>
       ) : (
         <div className="grid grid-cols-3 gap-3 overflow-y-auto pb-4 pr-1">
-          {filtered.map(({ model: m, pricing }) => {
+          {filtered.map(({ model: m, pricing, access: acc }) => {
             const provider = pricing?.provider ?? providerForModel(m.id);
             const rates = baseRates(pricing);
             const free = !!pricing?.deal?.free;
             const discount = pricing?.deal && !free ? pricing.deal.discountPercent : 0;
             const multiTier = (pricing?.tiers.length ?? 0) > 1;
+            const unavailable = acc?.allowed === false;
             return (
               <Card
                 key={m.id}
-                className="group flex flex-col gap-2 p-3 transition-colors hover:border-primary/40"
+                className={cn(
+                  "group flex flex-col gap-2 p-3 transition-colors",
+                  unavailable ? "opacity-60 hover:border-border" : "hover:border-primary/40",
+                )}
+                title={unavailable ? (acc?.reason ?? undefined) : undefined}
               >
                 <div className="flex items-center gap-3">
                   <ModelLogo model={m.id} size={22} />
@@ -232,6 +288,15 @@ export function ModelsView() {
 
                 {/* 能力与促销标记 */}
                 <div className="flex flex-wrap items-center gap-1">
+                  {unavailable && (
+                    <Badge
+                      variant="outline"
+                      className="shrink-0 border-destructive/40 px-1.5 py-0 text-[10px] text-destructive"
+                    >
+                      套餐不可用
+                      {acc?.minimum_plan ? `·需 ${acc.minimum_plan}` : ""}
+                    </Badge>
+                  )}
                   {free && (
                     <Badge className="shrink-0 bg-signal-success/15 px-1.5 py-0 text-[10px] text-signal-success">
                       免费

@@ -304,6 +304,19 @@ fn models_catalog() -> Value {
     proxy::pricing::catalog_json()
 }
 
+/// 获取当前 CC 账户的套餐信息与各模型准入结果（标注模型页的可用性）。
+///
+/// `force` 为 true 时跳过 5 分钟缓存，强制重新拉取上游套餐数据。
+#[tauri::command]
+async fn plan_status(app: AppHandle, force: bool) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let account_key = credentials::accounts_from_state(&ctx.proxy_state)
+        .first()
+        .map(|a| a.key.clone());
+    let plan = proxy::plans::plan_context(&ctx.proxy_state, account_key.as_deref(), force).await;
+    Ok(proxy::plans::plan_status_json(&plan))
+}
+
 /// 增量拉取内存日志：`limit` 最多返回条数（默认 200），`after_seq` 只返回序号大于它的条目。
 #[tauri::command]
 fn logs_get(limit: Option<usize>, after_seq: Option<u64>) -> Value {
@@ -700,6 +713,7 @@ pub fn run() {
             auth_login_cancel,
             models_get,
             models_catalog,
+            plan_status,
             logs_get,
             logs_clear,
             logs_export,

@@ -203,6 +203,29 @@ export interface ModelPricing {
   tiers: ModelTier[];
 }
 
+/** 单个模型在当前套餐下的准入结果。 */
+export interface ModelAccessInfo {
+  allowed: boolean;
+  minimum_plan?: string | null;
+  reason?: string | null;
+}
+
+/** 当前 CC 账户的套餐上下文。 */
+export interface PlanContext {
+  plan_id: string | null;
+  plan_name: string;
+  purchased_credits: number;
+  free_credits: number;
+  fetch_failed: boolean;
+  note: string;
+}
+
+/** 套餐状态：套餐信息 + 各模型准入结果（键为模型 ID）。 */
+export interface PlanStatus {
+  plan: PlanContext;
+  access: Record<string, ModelAccessInfo>;
+}
+
 /** 后端 Tauri 命令的类型化封装，前端所有 IPC 调用统一经由此对象。 */
 export const api = {
   // 代理生命周期：启动 / 停止 / 重启 / 查询状态，均返回最新 ProxyStatus
@@ -234,6 +257,8 @@ export const api = {
     invoke<{ data: ModelInfo[]; fallback: boolean }>("models_get", { force }),
   // 内置模型计费表（能力、分档价格、折扣、免费与闲忙时）
   modelsCatalog: () => invoke<ModelPricing[]>("models_catalog"),
+  // 当前账户套餐信息与各模型准入结果（force 时强制刷新上游缓存）
+  planStatus: (force = false) => invoke<PlanStatus>("plan_status", { force }),
   // 日志：按序号增量拉取 / 清空 / 导出到文件（返回条数）
   logsGet: (limit = 200, afterSeq = 0) => invoke<LogEntry[]>("logs_get", { limit, afterSeq }),
   logsClear: () => invoke<void>("logs_clear"),
