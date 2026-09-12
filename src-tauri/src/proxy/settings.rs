@@ -311,4 +311,13 @@ mod tests {
         assert_eq!(got.port, 4567);
         assert!(!got.zdr);
     }
+
+    /// settings 表被删除（异常环境）时读取不 panic，回退默认配置。
+    #[test]
+    fn load_config_when_table_missing() {
+        let conn = temp_conn();
+        conn.execute("DROP TABLE settings", []).unwrap();
+        let got = load_config(&conn);
+        assert_eq!(got.port, Config::default().port);
+    }
 }

@@ -318,3 +318,141 @@ pub fn build_client(config: &Config) -> Result<reqwest::Client, String> {
         crate::i18n::err_args("client_build_failed", &[&e.to_string()])
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// build_client 各代理模式均可构建；非法自定义代理地址返回错误。
+    #[test]
+    fn build_client_modes() {
+        let mut c = Config::default();
+        c.proxy_mode = "none".into();
+        assert!(build_client(&c).is_ok());
+        c.proxy_mode = "system".into();
+        assert!(build_client(&c).is_ok());
+        c.proxy_mode = "custom".into();
+        c.proxy_type = "socks5".into();
+        c.proxy_host = "127.0.0.1".into();
+        c.proxy_port = 1080;
+        assert!(build_client(&c).is_ok());
+        // http 类型 + 认证
+        c.proxy_type = "http".into();
+        c.proxy_port = 3128;
+        c.proxy_username = "u".into();
+        c.proxy_password = "p".into();
+        assert!(build_client(&c).is_ok());
+        // 非法主机名 → Err
+        c.proxy_host = "bad host with spaces".into();
+        assert!(build_client(&c).is_err());
+        // 未知模式防御性回退不走代理
+        c.proxy_mode = "bogus".into();
+        assert!(build_client(&c).is_ok());
+    }
+
+    /// AppState::new 遇到非法自定义代理时不 panic，回退为无代理客户端。
+    #[test]
+    fn new_falls_back_when_proxy_invalid() {
+        let mut c = Config::default();
+        c.proxy_mode = "custom".into();
+        c.proxy_host = "bad host".into();
+        c.proxy_port = 1;
+        let st = AppState::new(c);
+        assert!(!st.is_running());
+    }
+
+    /// rebuild_client 按新配置重建；失败时保留旧 client 并返回错误。
+    #[test]
+    fn rebuild_client_applies_new_config() {
+        let st = AppState::new(Config::default());
+        let mut ok = Config::default();
+        ok.proxy_mode = "custom".into();
+        ok.proxy_type = "http".into();
+        ok.proxy_host = "127.0.0.1".into();
+        ok.proxy_port = 3128;
+        assert!(st.rebuild_client(&ok).is_ok());
+        let mut bad = Config::default();
+        bad.proxy_mode = "custom".into();
+        bad.proxy_host = "bad host".into();
+        bad.proxy_port = 1;
+        assert!(st.rebuild_client(&bad).is_err());
+    }
+
+    /// 运行生命周期：启动/停止翻转 running，停止时发出优雅停机信号。
+    #[test]
+    fn running_lifecycle_and_shutdown_signal() {
+        let st = AppState::new(Config::default());
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        *st.shutdown.lock().unwrap() = Some(tx);
+        st.mark_started();
+        assert!(st.is_running());
+        assert!(st.started_at.lock().unwrap().is_some());
+        st.mark_stopped();
+        assert!(!st.is_running());
+        assert!(st.started_at.lock().unwrap().is_none());
+        assert!(rx.try_recv().is_ok());
+    }
+
+    /// 请求队列：超过 500 条丢弃最旧，clear 后清空。
+    #[test]
+    fn request_queue_cap_and_clear() {
+        let st = AppState::new(Config::default());
+        for i in 0..505 {
+            st.record_request(RequestInfo {
+                id: format!("r{i}"),
+                path: "/v1/chat/completions".into(),
+                model: "m".into(),
+                stream: false,
+                status: "ok".into(),
+                started_at: 0,
+                elapsed_ms: 1,
+                input_tokens: 0,
+                output_tokens: 0,
+                cached_tokens: 0,
+                last_event: String::new(),
+            });
+        }
+        assert_eq!(st.recent_requests(1000).len(), 500);
+        assert_eq!(st.recent_requests(1)[0].id, "r504");
+        st.clear_requests();
+        assert!(st.recent_requests(10).is_empty());
+    }
+
+    /// 用量库未初始化时 record/prune 静默降级不报错。
+    #[test]
+    fn usage_without_db_degrades_silently() {
+        let st = AppState::new(Config::default());
+        st.record_usage(&super::super::usage::UsageEntry {
+            ts: 0,
+            model: "m".into(),
+            endpoint: "/v1/chat/completions".into(),
+            status: "ok".into(),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            stream: true,
+        });
+        assert_eq!(st.prune_usage(30).unwrap(), 0);
+    }
+
+    /// 指纹持久化路径注入后可读回。
+    #[test]
+    fn set_fingerprint_path_roundtrip() {
+        let st = AppState::new(Config::default());
+        st.set_fingerprint_path(std::path::PathBuf::from("/tmp/fp-test.json"));
+        assert_eq!(
+            st.fingerprint_path.lock().unwrap().as_deref(),
+            Some(std::path::Path::new("/tmp/fp-test.json"))
+        );
+    }
+
+    /// 会话与预请求的常量配置。
+    #[test]
+    fn session_constants() {
+        assert_eq!(AppState::session_duration_ms(), 12 * 60 * 60 * 1000);
+        assert_eq!(AppState::session_jitter_ms(), 60 * 60 * 1000);
+        assert_eq!(AppState::init_refresh_ms(), 8 * 60 * 60 * 1000);
+        assert_eq!(AppState::init_jitter_ms(), 2 * 60 * 60 * 1000);
+    }
+}

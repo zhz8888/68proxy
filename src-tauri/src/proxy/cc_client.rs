@@ -313,12 +313,13 @@ pub async fn forward_to_cc(
 
 /// 从 npm registry 刷新 Command Code 版本（启动时 + 每 24h）。
 pub async fn refresh_cc_version(state: &AppState) {
+    refresh_cc_version_from(state, "https://registry.npmjs.org/command-code/latest").await;
+}
+
+/// 从给定 registry URL 拉取最新版本号并写回状态（URL 可注入供测试）。
+pub(crate) async fn refresh_cc_version_from(state: &AppState, url: &str) {
     let res = tokio::time::timeout(Duration::from_secs(10), async {
-        state
-            .client()
-            .get("https://registry.npmjs.org/command-code/latest")
-            .send()
-            .await
+        state.client().get(url).send().await
     })
     .await;
     match res {
@@ -399,4 +400,54 @@ pub async fn fetch_models(state: &AppState, api_key: Option<&str>) -> (Vec<Model
 
     log::warn("Provider models fetch failed, using hardcoded list");
     (hardcoded_models(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 伪造项目 slug：取 sessionId 前 4 位 hex 选词拼名；无法成词时回退 cc-proxy。
+    #[test]
+    fn fake_project_slug_format() {
+        let slug = fake_project_slug("abcd1234-xxxx");
+        assert!(slug.starts_with("users-dev-projects-"), "清洗后的路径 slug: {slug}");
+        assert!(slug.contains("abcd"));
+        // 短 id 回退 0000 也不 panic
+        let slug2 = fake_project_slug("zz");
+        assert!(!slug2.is_empty());
+        // 非 hex 的前 4 位回退 0000 选词，slug 仍非空（清洗回退分支为防御性代码）
+        let slug3 = fake_project_slug("****-****");
+        assert!(slug3.starts_with("users-dev-projects-"));
+    }
+
+    /// 会话 ID 解析优先级：下游头 ≥8 采信 → prompt_cache_key 可见 ASCII 采信 → 本地会话。
+    #[test]
+    fn get_session_id_priority() {
+        let state = AppState::new(crate::proxy::config::Config::default());
+        let mut headers = HeaderMap::new();
+        // 1) 下游头命中
+        headers.insert("x-session-id", "sess-from-header-01".parse().unwrap());
+        let id = get_session_id(&state, &headers, "u1", Some("12345678"));
+        assert_eq!(id, "sess-from-header-01");
+        // 2) 短头被忽略，prompt_cache_key 采信
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", "short".parse().unwrap());
+        let id = get_session_id(&state, &headers, "u1", Some("cache-key-123456"));
+        assert_eq!(id, "cache-key-123456");
+        // 3) 含中文的 prompt_cache_key 不安全 → 回退本地会话
+        let id = get_session_id(&state, &headers, "u1", Some("含中文的会话键-不可用作头"));
+        assert!(!id.contains("中"));
+        // 4) 全部缺失 → 本地生成并复用
+        let empty = HeaderMap::new();
+        let a = get_session_id(&state, &empty, "u1", None);
+        let b = get_session_id(&state, &empty, "u1", None);
+        assert_eq!(a, b, "同账户会话应粘滞");
+        // 过期后更换新会话
+        {
+            let mut sessions = state.sessions.lock().unwrap();
+            sessions.get_mut("u1").unwrap().expires_at = 0;
+        }
+        let c = get_session_id(&state, &empty, "u1", None);
+        assert_ne!(a, c);
+    }
 }

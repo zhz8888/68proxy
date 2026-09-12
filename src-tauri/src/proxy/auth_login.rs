@@ -409,3 +409,201 @@ mod tests {
         assert_eq!(pick(&snake, &["userName", "user_name"]), "");
     }
 }
+
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+    use super::super::config::Config;
+
+    /// 各 flow 测试共享的本机端口串行锁（loopback 服务建停存在平台时序竞态）。
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 带 3 次重试的 GET（并行高负载下 loopback 偶发 IncompleteMessage）。
+    async fn cb_get(url: String) -> reqwest::Response {
+        for _ in 0..3 {
+            match reqwest::get(&url).await {
+                Ok(r) => return r,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(120)).await,
+            }
+        }
+        panic!("回调请求重试 3 次仍失败: {url}");
+    }
+
+    /// 启动一次登录并返回 (状态, 端口, 正确的 state token)。
+    async fn started() -> (Arc<AppState>, u16, String) {
+        let st = AppState::new(Config::default());
+        let _url = start_auth_login(&st).await.unwrap();
+        let (port, token) = {
+            let s = st.auth_login.lock().unwrap();
+            let s = s.as_ref().unwrap();
+            (s.port, s.state.clone())
+        };
+        (st, port, token)
+    }
+
+    /// 成功链路：camelCase 参数回调 → poll 得 success 与账户信息 → 收尾页为成功页。
+    #[tokio::test]
+    async fn login_success_camelcase() {
+        let _serial = SERIAL.lock().await;
+        let (st, port, token) = started().await;
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let res = client
+            .get(&format!(
+                "http://127.0.0.1:{port}/callback?state={token}&apiKey=user_abc&userId=id_1&userName=NM"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 303);
+        let poll = poll_auth_login(&st);
+        assert_eq!(poll["status"], "success");
+        assert_eq!(poll["account"]["key"], "user_abc");
+        assert_eq!(poll["account"]["userId"], "id_1");
+        let page = cb_get(format!("http://127.0.0.1:{port}/callback/complete"))
+            .await
+            .text()
+            .await
+            .unwrap();
+        assert!(page.contains("授权成功"));
+        cancel_auth_login(&st);
+    }
+
+    /// snake_case 参数同样被接受。
+    #[tokio::test]
+    async fn login_success_snake_case() {
+        let _serial = SERIAL.lock().await;
+        let (st, port, token) = started().await;
+        cb_get(format!(
+            "http://127.0.0.1:{port}/callback?state={token}&api_key=user_s&user_id=id_s&user_name=S"
+        ))
+        .await;
+        assert_eq!(poll_auth_login(&st)["status"], "success");
+        cancel_auth_login(&st);
+    }
+
+    /// 用户拒绝：error=access_denied → Denied + 拒绝页。
+    #[tokio::test]
+    async fn login_denied_flow() {
+        let _serial = SERIAL.lock().await;
+        let (st, port, token) = started().await;
+        cb_get(format!("http://127.0.0.1:{port}/callback?state={token}&error=access_denied"))
+            .await;
+        assert_eq!(poll_auth_login(&st)["status"], "denied");
+        let page = cb_get(format!("http://127.0.0.1:{port}/callback/complete"))
+            .await
+            .text()
+            .await
+            .unwrap();
+        assert!(page.contains("授权被拒绝"));
+        cancel_auth_login(&st);
+    }
+
+    /// 其他 error：置为 failed 并透传描述；错误页做 HTML 转义。
+    #[tokio::test]
+    async fn login_error_flow_escapes_html() {
+        let _serial = SERIAL.lock().await;
+        let (st, port, token) = started().await;
+        cb_get(format!(
+            "http://127.0.0.1:{port}/callback?state={token}&error=server_broke&error_description=%3Cb%3Ebad%3C/b%3E"
+        ))
+        .await;
+        let poll = poll_auth_login(&st);
+        assert_eq!(poll["status"], "failed");
+        assert_eq!(poll["error"], "<b>bad</b>");
+        let page = cb_get(format!("http://127.0.0.1:{port}/callback/complete"))
+            .await
+            .text()
+            .await
+            .unwrap();
+        assert!(page.contains("&lt;b&gt;"), "错误页应转义 HTML");
+        cancel_auth_login(&st);
+    }
+
+    /// state 不匹配（CSRF 防护）：登录置失败，不覆盖凭据。
+    #[tokio::test]
+    async fn callback_rejects_wrong_state() {
+        let _serial = SERIAL.lock().await;
+        let (st, port, _token) = started().await;
+        cb_get(format!(
+            "http://127.0.0.1:{port}/callback?state=WRONG&apiKey=user_x&userId=id_x"
+        ))
+        .await;
+        let poll = poll_auth_login(&st);
+        assert_eq!(poll["status"], "failed");
+        assert_eq!(poll["error"], "auth_state_invalid");
+        cancel_auth_login(&st);
+    }
+
+    /// 成功回调缺参数：置为 auth_callback_params_missing。
+    #[tokio::test]
+    async fn callback_missing_params_fails() {
+        let _serial = SERIAL.lock().await;
+        let (st, port, token) = started().await;
+        cb_get(format!("http://127.0.0.1:{port}/callback?state={token}&apiKey=user_only"))
+            .await;
+        let poll = poll_auth_login(&st);
+        assert_eq!(poll["status"], "failed");
+        assert_eq!(poll["error"], "auth_callback_params_missing");
+        cancel_auth_login(&st);
+    }
+
+    /// 取消后访问收尾页：渲染「无进行中的授权」页，poll 回 idle。
+    #[tokio::test]
+    async fn cancel_clears_session_and_page() {
+        let _serial = SERIAL.lock().await;
+        let (st, port, _token) = started().await;
+        cancel_auth_login(&st);
+        // 会话被清空：poll 回 idle（loopback 服务器的优雅停机在测试环境的
+        // current_thread runtime 下不停止 accept，故不断言端口不可达）
+        assert_eq!(poll_auth_login(&st)["status"], "idle");
+    }
+
+    /// 二次登录关停旧 loopback 服务器：旧端口不可达，会话被替换。
+    #[tokio::test]
+    async fn restart_replaces_old_server() {
+        let _serial = SERIAL.lock().await;
+        let (st, old_port, old_token) = started().await;
+        let (_url2, new_port) = {
+            start_auth_login(&st).await.unwrap();
+            let s = st.auth_login.lock().unwrap();
+            let s = s.as_ref().unwrap();
+            (s.port, s.port)
+        };
+        assert_ne!(old_port, new_port);
+        // 旧会话被替换：state token 已更新
+        let new_token = st.auth_login.lock().unwrap().as_ref().unwrap().state.clone();
+        assert_ne!(old_token, new_token);
+        assert_eq!(poll_auth_login(&st)["status"], "pending");
+        cancel_auth_login(&st);
+    }
+
+    /// 轮询状态机：无会话 idle、进行中 pending、超时置 failed。
+    #[tokio::test]
+    async fn poll_states_and_timeout() {
+        let _serial = SERIAL.lock().await;
+        let st = AppState::new(Config::default());
+        assert_eq!(poll_auth_login(&st)["status"], "idle");
+        start_auth_login(&st).await.unwrap();
+        assert_eq!(poll_auth_login(&st)["status"], "pending");
+        // 人为把会话推到过期
+        {
+            let mut s = st.auth_login.lock().unwrap();
+            s.as_mut().unwrap().started_at = now_millis() - LOGIN_TTL_MS - 1000;
+        }
+        let poll = poll_auth_login(&st);
+        assert_eq!(poll["status"], "failed");
+        assert_eq!(poll["error"], "auth_timeout");
+        cancel_auth_login(&st);
+    }
+
+    /// 两次签发的 state token 互不相同（防重放）。
+    #[tokio::test]
+    async fn state_token_unique_per_login() {
+        let _serial = SERIAL.lock().await;
+        let (st, _, t1) = started().await;
+        start_auth_login(&st).await.unwrap();
+        let t2 = st.auth_login.lock().unwrap().as_ref().unwrap().state.clone();
+        assert_ne!(t1, t2);
+        cancel_auth_login(&st);
+    }
+}

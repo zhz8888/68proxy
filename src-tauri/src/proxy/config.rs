@@ -531,4 +531,163 @@ mod tests {
         assert!(loaded.cc_accounts.is_empty());
         let _ = std::fs::remove_file(&path);
     }
+
+    /// validate 的全部非法分支：字段值逐一越界时应返回对应错误码。
+    #[test]
+    fn validate_rejects_each_invalid_field() {
+        let mut c = Config::default();
+        c.validate().unwrap(); // 默认配置合法
+        let cases: &[(&str, fn(&mut Config))] = &[
+            ("config_invalid_port", |c: &mut Config| c.port = 0),
+            ("config_invalid_host", |c: &mut Config| c.host = "  ".into()),
+            (
+                "config_invalid_api_base",
+                |c: &mut Config| c.api_base = "ftp://x".into(),
+            ),
+            (
+                "config_invalid_log_level",
+                |c: &mut Config| c.log_level = "verbose".into(),
+            ),
+            (
+                "config_invalid_strategy",
+                |c: &mut Config| c.account_strategy = "random".into(),
+            ),
+            ("config_invalid_theme", |c: &mut Config| c.theme = "pink".into()),
+            (
+                "config_invalid_language",
+                |c: &mut Config| c.language = "jp".into(),
+            ),
+            (
+                "config_invalid_proxy_mode",
+                |c: &mut Config| c.proxy_mode = "auto".into(),
+            ),
+            (
+                "config_invalid_proxy_type",
+                |c: &mut Config| c.proxy_type = "socks4".into(),
+            ),
+            (
+                "config_invalid_proxy_host",
+                |c: &mut Config| {
+                    c.proxy_mode = "custom".into();
+                    c.proxy_host = " ".into();
+                    c.proxy_port = 1080;
+                },
+            ),
+            (
+                "config_invalid_proxy_port",
+                |c: &mut Config| {
+                    c.proxy_mode = "custom".into();
+                    c.proxy_host = "127.0.0.1".into();
+                    c.proxy_port = 0;
+                },
+            ),
+        ];
+        for (code, mutate) in cases {
+            let mut c2 = Config::default();
+            mutate(&mut c2);
+            let err = c2.validate().unwrap_err();
+            assert!(err.contains(code), "期望 {code}，实际 {err}");
+        }
+    }
+
+    /// 环境变量覆写：合法值生效，非法值被忽略（回退配置原值）。
+    #[test]
+    fn apply_env_overrides_fields() {
+        std::env::set_var("PORT", "4050");
+        std::env::set_var("HOST", "127.0.0.1");
+        std::env::set_var("CC_API_BASE", "https://env.example.com");
+        std::env::set_var("PROJECT_SLUG", "env-slug");
+        std::env::set_var("LOG_FILE", "/tmp/env.log");
+        std::env::set_var("CC_USE_PROVIDER_MODELS", "false");
+        std::env::set_var("CC_EMPTY_SYSTEM_PLACEHOLDER", "false");
+        std::env::set_var("CMD_ZDR", "1");
+        std::env::set_var("CC_MAX_BODY_MB", "32");
+        std::env::set_var("CC_CLIENT_DRAIN_TIMEOUT_MS", "500");
+        std::env::set_var("CC_MAX_INFLIGHT", "8");
+        std::env::set_var("CC_ACCOUNT_STRATEGY", "priority");
+        std::env::set_var("CC_PREFERRED_ACCOUNT_ID", "id_env");
+        let mut c = Config::default();
+        c.apply_env();
+        assert_eq!(c.port, 4050);
+        assert_eq!(c.host, "127.0.0.1");
+        assert_eq!(c.api_base, "https://env.example.com");
+        assert_eq!(c.project_slug, "env-slug");
+        assert_eq!(c.log_file, "/tmp/env.log");
+        assert!(!c.use_provider_models);
+        assert!(!c.empty_system_placeholder);
+        assert!(c.zdr);
+        assert_eq!(c.max_body_mb, 32);
+        assert_eq!(c.client_drain_timeout_ms, 500);
+        assert_eq!(c.max_inflight, 8);
+        assert_eq!(c.account_strategy, "priority");
+        assert_eq!(c.preferred_account_id, "id_env");
+
+        // 非法值不生效
+        std::env::set_var("PORT", "not-a-port");
+        std::env::set_var("CC_MAX_BODY_MB", "0");
+        std::env::set_var("CC_ACCOUNT_STRATEGY", "bogus");
+        std::env::set_var("CMD_ZDR", "off");
+        let mut c2 = Config::default();
+        c2.apply_env();
+        assert_ne!(c2.port, 0);
+        assert_eq!(c2.max_body_mb, 10); // 0 被拒，保持默认
+        assert_eq!(c2.account_strategy, "round_robin");
+        assert!(!c2.zdr);
+        // 清理环境变量，避免影响其他测试
+        for k in [
+            "PORT", "HOST", "CC_API_BASE", "PROJECT_SLUG", "LOG_FILE",
+            "CC_USE_PROVIDER_MODELS", "CC_EMPTY_SYSTEM_PLACEHOLDER", "CMD_ZDR",
+            "CC_MAX_BODY_MB", "CC_CLIENT_DRAIN_TIMEOUT_MS", "CC_MAX_INFLIGHT",
+            "CC_ACCOUNT_STRATEGY", "CC_PREFERRED_ACCOUNT_ID",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+
+    /// 账户对象形态缺 user_id 时按 key 派生稳定占位。
+    #[test]
+    fn account_object_without_user_id_derives_legacy() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"cc_accounts":[{"key":"user_abc","user_name":"N"}]}"#,
+        )
+        .unwrap();
+        assert!(cfg.cc_accounts[0].user_id.starts_with("legacy-"));
+    }
+
+    /// load_file：文件损坏回退默认配置；文件缺失同样回退默认。
+    #[test]
+    fn load_file_bad_json_or_missing_falls_back() {
+        let dir = std::env::temp_dir();
+        let bad = dir.join(format!("cc-config-bad-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&bad);
+        std::fs::write(&bad, "{ not json ").unwrap();
+        let cfg = Config::load_file(&bad);
+        assert_eq!(cfg.port, Config::default().port);
+        let _ = std::fs::remove_file(&bad);
+
+        let missing = dir.join(format!("cc-config-missing-{}.json", std::process::id()));
+        let cfg2 = Config::load_file(&missing);
+        assert_eq!(cfg2.port, Config::default().port);
+    }
+
+    /// save：父目录不存在时自动创建。
+    #[test]
+    fn save_creates_parent_dirs() {
+        let dir = std::env::temp_dir().join(format!("cc-cfg-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("config.json");
+        Config::default().save(&path).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// migrate_legacy：空白 key 不迁移。
+    #[test]
+    fn migrate_legacy_blank_key_skipped() {
+        let mut cfg = Config::default();
+        cfg.migrate_legacy(Some("   "));
+        assert!(cfg.cc_accounts.is_empty());
+        cfg.migrate_legacy(None);
+        assert!(cfg.cc_accounts.is_empty());
+    }
 }

@@ -380,4 +380,49 @@ mod tests {
         let c = calculate_cost("unknown/model-x", 1_000_000, 1_000_000, 0, 0, 0);
         assert!((c - 4.0).abs() < 1e-9);
     }
+
+    /// 运行时注册表生效后 all_models 返回注册内容；catalog_json 输出完整结构。
+    #[test]
+    fn registry_roundtrip_and_catalog() {
+        let builtin = builtin_models();
+        let n = builtin.len();
+        set_models(builtin_models().to_vec());
+        assert_eq!(all_models().len(), n);
+        let catalog = catalog_json();
+        assert!(catalog.as_array().unwrap().len() >= n);
+        assert!(catalog[0].get("id").is_some());
+    }
+
+    /// 缓存写入 token 按写入单价单独计费，不与缓存命中重复。
+    #[test]
+    fn cache_write_tokens_priced_separately() {
+        let models = all_models();
+        let rate = find_pricing(&models, "claude-opus-4-8").unwrap().tiers[0].rates;
+        // 全量输入命中缓存写入：成本即 cache_write 单价
+        let c = calculate_cost("claude-opus-4-8", 1_000_000, 0, 0, 1_000_000, 0);
+        assert!((c - rate.cache_write).abs() < 1e-9, "全量缓存写入应按写入单价计价: {c} vs {}", rate.cache_write);
+    }
+
+    /// 档位表为空的模型回退兜底单价而非 panic。
+    #[test]
+    fn empty_tiers_model_uses_fallback_price() {
+        let mut models = builtin_models().to_vec();
+        models.push(ModelPricing {
+            id: "test-empty-tiers".into(),
+            name: String::new(),
+            category: "premium".into(),
+            provider: None,
+            context_window: None,
+            caps: ModelCaps { text: true, vision: false, reasoning: false },
+            deprecated: false,
+            deal: None,
+            time_of_day: None,
+            tiers: vec![],
+        });
+        set_models(models);
+        let c = calculate_cost("test-empty-tiers", 1_000_000, 1_000_000, 0, 0, 0);
+        // 空档位 → FALLBACK_PRICE（input 2.0 / output 2.0，与 unknown 模型兜底一致）
+        assert!((c - 4.0).abs() < 1e-9, "空档位应走兜底价: {c}");
+        set_models(builtin_models().to_vec());
+    }
 }

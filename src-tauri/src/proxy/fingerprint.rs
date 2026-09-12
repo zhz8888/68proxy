@@ -215,3 +215,38 @@ pub fn remember(path: &Path, id: &str, fp: &Fingerprint) -> Result<(), String> {
         )
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 指纹写入失败（父路径是文件无法建目录）返回错误而非 panic。
+    #[test]
+    fn remember_fails_when_path_unwritable() {
+        let dir = std::env::temp_dir().join(format!("fp-block-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 用一个文件占据 "目录" 位置，导致 create_dir_all/write 失败
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        let path = blocker.join("store.json");
+        let result = remember(&path, "id_1", &generate());
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// load_store 对损坏文件回退空存储，remember 之后可读回同一指纹。
+    #[test]
+    fn remember_roundtrip_and_corrupt_store() {
+        let dir = std::env::temp_dir().join(format!("fp-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.json");
+        std::fs::write(&path, "{ broken json").unwrap();
+        assert!(load_store(&path).is_empty(), "损坏文件应回退空存储");
+        let fp = generate();
+        remember(&path, "id_1", &fp).unwrap();
+        assert_eq!(load_store(&path).get("id_1").unwrap().thumbmark, fp.thumbmark);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

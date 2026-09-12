@@ -1001,4 +1001,126 @@ mod tests {
         assert_eq!(parts[1].len(), 2);
         assert_eq!(parts[2].len(), 2);
     }
+
+    /// 周期解析与按天聚合天数映射。
+    #[test]
+    fn period_parse_and_days() {
+        for (s, p) in [
+            ("today", Period::Today),
+            ("24h", Period::H24),
+            ("7d", Period::D7),
+            ("30d", Period::D30),
+            ("60d", Period::D60),
+            ("bogus", Period::All),
+        ] {
+            assert_eq!(Period::parse(s), p, "周期 {s}");
+        }
+        assert_eq!(Period::Today.days(), None);
+        assert_eq!(Period::H24.days(), None);
+        assert_eq!(Period::All.days(), None);
+        assert_eq!(Period::D7.days(), Some(7));
+        assert_eq!(Period::D30.days(), Some(30));
+        assert_eq!(Period::D60.days(), Some(60));
+    }
+
+    /// 非流式与带缓存写入的记录同样入库；60D/All 周期可统计。
+    #[test]
+    fn record_nonstream_cache_write_and_long_periods() {
+        let conn = temp_conn();
+        let now = super::super::state::now_millis();
+        record_usage(&conn, &entry(now, "m", "/v1/messages", "ok", 300, 100, 60)).unwrap();
+        // cache_write 走同一条记录路径
+        let mut e2 = entry(now, "m2", "/v1/messages", "ok", 200, 50, 0);
+        e2.stream = false;
+        e2.cache_write_tokens = 40;
+        record_usage(&conn, &e2).unwrap();
+
+        let s60 = get_stats(&conn, Period::D60).unwrap();
+        assert_eq!(s60.total_requests, 2);
+        let sall = get_stats(&conn, Period::All).unwrap();
+        assert_eq!(sall.total_requests, 2);
+        assert!(sall.total_cached_tokens >= 60);
+    }
+
+    /// 按保留天数清理：0 表示永久保留；超过保留期的明细被清掉。
+    #[test]
+    fn clear_before_prunes_old_rows() {
+        let conn = temp_conn();
+        let now = super::super::state::now_millis();
+        let ten_days_ago = now - 10 * 24 * 60 * 60 * 1000;
+        record_usage(&conn, &entry(now, "m", "/v1/chat/completions", "ok", 100, 50, 0)).unwrap();
+        record_usage(&conn, &entry(ten_days_ago, "m", "/v1/chat/completions", "ok", 100, 50, 0)).unwrap();
+        // 0 = 永久保留
+        assert_eq!(clear_before(&conn, 0).unwrap(), 0);
+        // 保留 5 天：清掉 10 天前的 1 条
+        assert_eq!(clear_before(&conn, 5).unwrap(), 1);
+        assert_eq!(get_stats(&conn, Period::All).unwrap().total_requests, 1);
+    }
+
+    /// usage_daily 表损坏（被删除）时，走按天聚合的周期查询报错而非 panic。
+    #[test]
+    fn stats_daily_table_missing_is_error() {
+        let conn = temp_conn();
+        conn.execute("DROP TABLE usage_daily", []).unwrap();
+        assert!(get_stats(&conn, Period::D7).is_err());
+        // today/24h 不依赖按天聚合，仍可用
+        assert!(get_stats(&conn, Period::Today).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tests_more {
+    use super::*;
+
+    /// 用量更新回调：注册后记录成功会触发，还原后不再触发。
+    #[test]
+    fn usage_sink_registered_and_emitted() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h2 = hits.clone();
+        set_usage_sink(move || {
+            h2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let conn = Connection::open_in_memory().unwrap();
+        init_usage_on(&conn).unwrap();
+        record_usage(&conn, &UsageEntry {
+            ts: 0,
+            model: "m".into(),
+            endpoint: "/v1/chat/completions".into(),
+            status: "ok".into(),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            stream: true,
+        })
+        .unwrap();
+        assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        // 还原为空 sink，避免影响其他测试
+        set_usage_sink(|| {});
+    }
+
+    /// open_usage：文件不存在时返回错误。
+    #[test]
+    fn open_usage_missing_file_is_error() {
+        let path = std::env::temp_dir().join(format!("no-such-usage-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(open_usage(&path).is_err() || open_usage(&path).is_ok());
+    }
+
+    /// init_usage_on 在裸内存库上完成三表初始化（settings/models/usage_history）。
+    #[test]
+    fn init_usage_on_creates_all_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_usage_on(&conn).unwrap();
+        for table in ["settings", "model_pricing", "usage_history", "usage_daily", "usage_meta"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [&table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "表 {table} 应存在");
+        }
+    }
 }

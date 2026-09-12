@@ -291,4 +291,15 @@ mod tests {
         assert!(promo.tiers[0].list_rates.is_some(), "播种后不应丢失 listRates");
         let _ = std::fs::remove_file(&path);
     }
+
+    /// 模型表被删除（异常环境）时：播种报错、load_all 回退内置表而非 panic。
+    #[test]
+    fn table_missing_degrades_gracefully() {
+        let conn = temp_conn();
+        conn.execute("DROP TABLE model_pricing", []).unwrap();
+        assert!(seed_if_empty(&conn).is_err());
+        // load_all 读表失败后回退内置兜底表
+        let rows = load_all(&conn);
+        assert_eq!(rows.len(), pricing::builtin_models().len());
+    }
 }

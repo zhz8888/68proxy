@@ -753,6 +753,21 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
                 "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"正文内容\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\"}\n",
             ));
         }
+        if parsed["params"]["model"] == "tool-caller" {
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"tool-call\",\"toolCallId\":\"call_1\",\"toolName\":\"get_weather\",\"input\":{\"city\":\"BJ\"}}\n{\"type\":\"finish\",\"finishReason\":\"tool-calls\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"inputTokenDetails\":{\"cacheReadTokens\":0}}}\n",
+            ));
+        }
+        if parsed["params"]["model"] == "reasoner" {
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"reasoning-delta\",\"text\":\"deep thought\"}\n{\"type\":\"text-delta\",\"text\":\"answer\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"inputTokenDetails\":{\"cacheReadTokens\":0}}}\n",
+            ));
+        }
+        if parsed["params"]["model"] == "bad-line" {
+            return axum::response::Response::new(axum::body::Body::from(
+                "not-a-json-line\n{\"type\":\"start\"}\n{\"type\":\"text-delta\",\"text\":\"after bad line\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":1,\"outputTokens\":1,\"inputTokenDetails\":{\"cacheReadTokens\":0}}}\n",
+            ));
+        }
         if parsed["params"]["model"] == "upstream-error" {
             return axum::response::Response::builder()
                 .status(429)
@@ -854,6 +869,32 @@ async fn start_proxy_impl(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     (format!("http://{addr}"), state)
+}
+
+
+/// 并行高负载下 macOS loopback 偶发 ConnectionReset/IncompleteMessage，
+/// 对连接层错误做最多 3 次重试（仅重试发送失败，HTTP 错误状态不重试）。
+async fn send_retry(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    token: &str,
+    body: Option<&Value>,
+) -> reqwest::Response {
+    let mut last_err = None;
+    for _ in 0..3 {
+        let mut req = client.request(method.clone(), url);
+        req = req.header("Authorization", format!("Bearer {token}"));
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        match req.send().await {
+            Ok(r) => return r,
+            Err(e) => last_err = Some(e),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    panic!("请求重试 3 次仍失败: {last_err:?}");
 }
 
 /// 启动 mock 上游与真实代理服务（无捕获）。
@@ -1052,21 +1093,23 @@ async fn models_and_health_and_401() {
     let body: Value = res.json().await.unwrap();
     assert!(body["data"].as_array().unwrap().iter().any(|m| m["id"] == "mock-model-1"));
 
-    let res = client.get(format!("{base}/health")).send().await.unwrap();
+    let res = send_retry(&client, reqwest::Method::GET, &format!("{base}/health"), "", None).await;
     assert_eq!(res.status(), 200);
     assert_eq!(res.text().await.unwrap(), "OK");
 
     // 根路径同样映射到健康检查
-    let res = client.get(format!("{base}/")).send().await.unwrap();
+    let res = send_retry(&client, reqwest::Method::GET, &format!("{base}/"), "", None).await;
     assert_eq!(res.status(), 200);
     assert_eq!(res.text().await.unwrap(), "OK");
 
-    let res = client
-        .post(format!("{base}/v1/chat/completions"))
-        .json(&json!({ "messages": [] }))
-        .send()
-        .await
-        .unwrap();
+    let res = send_retry(
+        &client,
+        reqwest::Method::POST,
+        &format!("{base}/v1/chat/completions"),
+        "",
+        Some(&json!({ "messages": [] })),
+    )
+    .await;
     assert_eq!(res.status(), 401);
     state.mark_stopped();
 }
@@ -1317,4 +1360,950 @@ async fn zero_output_not_recorded() {
     assert_eq!(stats.total_requests, 0);
     drop(guard);
     state.mark_stopped();
+}
+
+// ── SSE 翻译器边角分支 ─────────────────────────────────────
+
+/// OpenAI 翻译器：噪声行/坏 JSON/未知事件返回空帧，reasoning 与 tool-call 正确输出。
+#[test]
+fn openai_translator_edge_events() {
+    let mut t = OpenAiTranslator::new("m", "id1");
+    // 噪声输入一律空帧
+    assert!(t.parse_line("").is_empty());
+    assert!(t.parse_line("[DONE]").is_empty());
+    assert!(t.parse_line(": comment").is_empty());
+    assert!(t.parse_line("{ not json").is_empty());
+    assert!(t.parse_line(r#"{"no":"type"}"#).is_empty());
+    assert!(t.parse_line(r#"{"type":"mystery-event"}"#).is_empty());
+    // 忽略列表事件
+    assert!(t
+        .parse_line(r#"{"type":"tool-input-start","toolCallId":"t1"}"#)
+        .is_empty());
+
+    // text-delta 的 delta 字段别名与空文本早退
+    assert!(t.parse_line(r#"{"type":"text-delta"}"#).is_empty());
+    let frames = t.parse_line(r#"{"type":"text-delta","delta":"via-delta"}"#);
+    assert_eq!(frames.len(), 1);
+    assert!(frames[0].contains("via-delta"));
+
+    // reasoning-delta：首个 chunk 带 role，后续不带
+    let frames = t.parse_line(r#"{"type":"reasoning-delta","text":"thinking"}"#);
+    assert_eq!(frames.len(), 1);
+    assert!(frames[0].contains("reasoning_content"));
+
+    // tool-call：显式 id 与对象形态 input
+    let frames = t.parse_line(
+        r#"{"type":"tool-call","toolCallId":"call_1","toolName":"get_weather","input":{"city":"BJ"}}"#,
+    );
+    assert_eq!(frames.len(), 1);
+    assert!(frames[0].contains("call_1"));
+    assert!(frames[0].contains("get_weather"));
+
+    // finish-step 记录 usage，后续 finish 缺 usage 时保留（不被 0 覆盖）
+    assert!(t
+        .parse_line(r#"{"type":"finish-step","finishReason":"tool-calls","usage":{"inputTokens":7,"outputTokens":3}}"#)
+        .is_empty());
+    let frames = t.parse_line(r#"{"type":"finish","finishReason":"stop"}"#);
+    assert_eq!(frames.len(), 1);
+    assert!(frames[0].contains("tool_calls"));
+    assert!(frames[0].contains("\"completion_tokens\":3"));
+    // error 事件仅记日志，无帧
+    assert!(t
+        .parse_line(r#"{"type":"error","error":{"message":"boom"}}"#)
+        .is_empty());
+}
+
+/// Anthropic 翻译器：tool-call 产出 tool_use 块三连帧，error 产出 error 帧。
+#[test]
+fn anthropic_translator_tool_and_error() {
+    let mut t = AnthropicTranslator::new("claude-x", "msg_1");
+    let frames = t.process_line(r#"{"type":"tool-call","toolCallId":"tu_1","toolName":"calc","input":{"x":1}}"#);
+    // content_block_start + input_json_delta + content_block_stop
+    assert_eq!(frames.len(), 3);
+    assert!(frames[0].contains("tool_use"));
+    assert!(frames[1].contains("input_json_delta"));
+    assert!(frames[2].contains("content_block_stop"));
+
+    let frames = t.process_line(r#"{"type":"error","error":{"message":"upstream broke"}}"#);
+    assert_eq!(frames.len(), 1);
+    assert!(frames[0].contains("internal_error"));
+    assert!(frames[0].contains("upstream broke"));
+    // finalize 在已出错时不再发收尾帧
+    assert!(t.finalize().is_empty());
+}
+
+/// Responses 翻译器：tool-call 产出 function_call 四连帧，reasoning 后接正文自动收条目。
+#[test]
+fn responses_translator_tool_flow() {
+    let mut t = ResponsesTranslator::new("gpt-5-codex", "resp_1");
+    let mut all = Vec::new();
+    all.push(t.response_start());
+    all.extend(t.process_line(r#"{"type":"reasoning-delta","text":"think"}"#));
+    all.extend(t.process_line(r#"{"type":"text-delta","text":"answer"}"#));
+    all.extend(t.process_line(r#"{"type":"tool-call","toolCallId":"c1","toolName":"run","input":"{}"}"#));
+    all.extend(t.finalize());
+    let joined = all.join("");
+    assert!(joined.contains("response.reasoning_summary_text.delta"));
+    assert!(joined.contains("response.output_text.delta"));
+    assert!(joined.contains("response.function_call_arguments.delta"));
+    assert!(joined.contains("response.completed"));
+}
+
+// ── convert 纯函数边角 ─────────────────────────────────────
+
+/// tool 消息链路：assistant.tool_calls 与 role:tool 结果按 toolCallId 关联成 tool-result。
+#[test]
+fn build_cc_request_tool_roundtrip() {
+    let req = json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "messages": [
+            { "role": "user", "content": "天气如何" },
+            { "role": "assistant", "content": "", "tool_calls": [
+                { "id": "call_9", "type": "function",
+                  "function": { "name": "get_weather", "arguments": "{\"city\":\"BJ\"}" } }
+            ]},
+            { "role": "tool", "tool_call_id": "call_9", "content": "晴 25 度" }
+        ]
+    });
+    let cc = super::convert::build_cc_request(&req, true);
+    let msgs = cc["params"]["messages"].as_array().unwrap();
+    // assistant: tool-call part；tool: tool-result part
+    let assistant = &msgs[1];
+    let part = &assistant["content"][0];
+    assert_eq!(part["type"], "tool-call");
+    assert_eq!(part["toolCallId"], "call_9");
+    assert_eq!(part["toolName"], "get_weather");
+    let tool_msg = &msgs[2];
+    assert_eq!(tool_msg["role"], "tool");
+    let result = &tool_msg["content"][0];
+    assert_eq!(result["toolName"], "get_weather");
+    assert_eq!(result["output"]["value"], "晴 25 度");
+}
+
+/// tool 消息缺 tool_call_id 关联时回退 name 字段；非字符串 content 序列化为文本。
+#[test]
+fn build_cc_request_tool_fallback_name_and_object_content() {
+    let req = json!({
+        "model": "m",
+        "messages": [
+            { "role": "tool", "tool_call_id": "missing-id", "name": "fallback_tool",
+              "content": { "temperature": 25 } }
+        ]
+    });
+    let cc = super::convert::build_cc_request(&req, false);
+    let msgs = cc["params"]["messages"].as_array().unwrap();
+    let result = &msgs[0]["content"][0];
+    assert_eq!(result["toolName"], "fallback_tool");
+    assert!(result["output"]["value"].as_str().unwrap().contains("temperature"));
+}
+
+/// user content parts：image_url 转 image part，其余原样透传。
+#[test]
+fn build_cc_request_image_parts() {
+    let req = json!({
+        "model": "m",
+        "messages": [
+            { "role": "user", "content": [
+                { "type": "text", "text": "看图" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAA" } }
+            ]}
+        ]
+    });
+    let cc = super::convert::build_cc_request(&req, false);
+    let parts = cc["params"]["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(parts[0]["type"], "text");
+    assert_eq!(parts[1]["type"], "image");
+    assert_eq!(parts[1]["image"], "data:image/png;base64,AAA");
+}
+
+/// tool_choice 语义映射：required→any、指定函数→tool+name、未知字符串→auto。
+#[test]
+fn build_cc_request_tool_choice_mapping() {
+    let base = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] });
+    for (choice, expect_type, expect_name) in [
+        (json!("required"), "any", Value::Null),
+        (json!("auto"), "auto", Value::Null),
+        (json!("none"), "none", Value::Null),
+        (json!("weird"), "auto", Value::Null),
+        (
+            json!({ "type": "function", "function": { "name": "calc" } }),
+            "tool",
+            json!("calc"),
+        ),
+    ] {
+        let mut req = base.clone();
+        req["tool_choice"] = choice;
+        let cc = super::convert::build_cc_request(&req, false);
+        assert_eq!(cc["params"]["tool_choice"]["type"], expect_type);
+        if !expect_name.is_null() {
+            assert_eq!(cc["params"]["tool_choice"]["name"], expect_name);
+        }
+    }
+}
+
+/// finishReason 映射：tool-calls 归一、空值回 stop、未知透传；Anthropic 侧反向映射。
+#[test]
+fn finish_reason_mappings() {
+    assert_eq!(super::convert::map_finish_reason("tool-calls"), "tool_calls");
+    assert_eq!(super::convert::map_finish_reason("length"), "length");
+    assert_eq!(super::convert::map_finish_reason("stop"), "stop");
+    assert_eq!(super::convert::map_finish_reason(""), "stop");
+    assert_eq!(super::convert::map_finish_reason("content-filter"), "content-filter");
+    assert_eq!(super::convert::map_anthropic_stop_reason("tool_calls"), "tool_use");
+    assert_eq!(super::convert::map_anthropic_stop_reason("length"), "max_tokens");
+    assert_eq!(super::convert::map_anthropic_stop_reason("stop"), "end_turn");
+    assert_eq!(super::convert::map_anthropic_stop_reason("bogus"), "end_turn");
+}
+
+/// 非流式 OpenAI 响应构建：纯工具调用时 content 为 null，reasoning 为扩展字段。
+#[test]
+fn build_openai_response_variants() {
+    let tc = json!({ "id": "c1", "type": "function", "function": { "name": "f", "arguments": "{}" } });
+    let resp = super::convert::build_openai_response("id1", "m", "", "thinking...", Some(&[tc]), "tool_calls", 10, 5, 2);
+    let msg = &resp["choices"][0]["message"];
+    assert!(msg["content"].is_null());
+    assert_eq!(msg["reasoning_content"], "thinking...");
+    assert_eq!(msg["tool_calls"][0]["function"]["name"], "f");
+    assert_eq!(resp["usage"]["prompt_tokens_details"]["cached_tokens"], 2);
+
+    let plain = super::convert::build_openai_response("id2", "m", "text", "", None, "stop", 1, 1, 0);
+    assert_eq!(plain["choices"][0]["message"]["content"], "text");
+}
+
+// ── 额度 / 套餐 / 模型 / 账户验证的网络链路（mock 上游） ──────────
+
+/// 计数 mock：whoami/subscriptions/credits/summary 四端点 + 命中计数。
+async fn spawn_billing_mock(counter: Arc<std::sync::atomic::AtomicUsize>) -> String {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use axum::Json;
+    let whoami = Json(json!({
+        "success": true,
+        "org": { "id": "org_1" },
+        "user": { "id": "user_1", "userName": "Tester" },
+        "orgLimits": [ { "label": "Monthly", "pct": 0.8, "reached": false } ]
+    }));
+    let subs = Json(json!({
+        "success": true,
+        "data": {
+            "status": "active",
+            "planId": "individual-pro",
+            "currentPeriodStart": super::state::now_millis() - 5 * 86_400_000u64,
+            "currentPeriodEnd": super::state::now_millis() + 25 * 86_400_000u64,
+        }
+    }));
+    let credits = Json(json!({
+        "credits": {
+            "monthlyCredits": 30, "purchasedCredits": 5, "freeCredits": 2,
+            "windowLimits": { "limited": true, "fiveHour": { "used": 10, "cap": 50 }, "weekly": { "used": 100, "cap": 500 } }
+        }
+    }));
+    let summary = Json(json!({ "totalCost": 3.5 }));
+    let router = Router::new()
+        .route("/alpha/whoami", axum::routing::get(move || {
+            let c = counter.clone();
+            async move { c.fetch_add(1, Ordering::SeqCst); Json(whoami.0.clone()) }
+        }))
+        .route("/alpha/billing/subscriptions", axum::routing::get(move || { let v = subs.0.clone(); async move { Json(v) } }))
+        .route("/alpha/billing/credits", axum::routing::get(move || { let v = credits.0.clone(); async move { Json(v) } }))
+        .route("/alpha/usage/summary", axum::routing::get(move || { let v = summary.0.clone(); async move { Json(v) } }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+    format!("http://{addr}")
+}
+
+fn plain_state(api_base: &str) -> Arc<AppState> {
+    let cfg = Config { api_base: api_base.into(), ..Config::default() };
+    AppState::new(cfg)
+}
+
+/// 额度拉取全链路：whoami→订阅/额度→summary 的解析、口径计算与窗口限额。
+#[tokio::test]
+async fn quota_fetch_full_flow() {
+    let base = spawn_billing_mock(Arc::new(std::sync::atomic::AtomicUsize::new(0))).await;
+    let state = plain_state(&base);
+    let q = super::quota::fetch_account_quota(&state, "Tester", "user_…1", "user_k").await;
+    assert_eq!(q.error, None);
+    assert_eq!(q.plan_id.as_deref(), Some("individual-pro"));
+    assert_eq!(q.plan_name, "Pro");
+    assert_eq!(q.status.as_deref(), Some("active"));
+    assert_eq!(q.monthly_remaining, 30.0);
+    assert_eq!(q.purchased_remaining, 5.0);
+    assert_eq!(q.free_remaining, 2.0);
+    // 总池 = max(套餐月额度 30, 上报 30) + 5 + 2
+    assert_eq!(q.total_pool, 37.0);
+    assert_eq!(q.total_remaining, 37.0);
+    assert_eq!(q.total_spent, 3.5);
+    let five = q.five_hour.unwrap();
+    assert_eq!((five.used, five.cap), (10.0, 50.0));
+    let weekly = q.weekly.unwrap();
+    assert_eq!((weekly.used, weekly.cap), (100.0, 500.0));
+    assert_eq!(q.org_limits.len(), 1);
+    assert_eq!(q.org_limits[0].pct, 80.0, "0-1 比例应换算为百分比");
+    let days = q.days_left.unwrap();
+    assert!((24..=26).contains(&days), "周期剩余天数应约 25: {days}");
+}
+
+/// whoami 不可达时额度快照降级为失败占位（不 panic、error 码正确）。
+#[tokio::test]
+async fn quota_fetch_whoami_failed_degrades() {
+    // 指向未监听端口
+    let state = plain_state("http://127.0.0.1:1");
+    let q = super::quota::fetch_account_quota(&state, "N", "user_…x", "user_k").await;
+    assert_eq!(q.error.as_deref(), Some("whoami_failed"));
+    assert!(!q.has_billing);
+    assert_eq!(q.total_pool, 0.0);
+}
+
+/// 后台刷新：force 拉取后 TTL 内不再重拉；账户删除后缓存与在途标记被清理。
+#[tokio::test]
+async fn quota_refresh_caches_ttl_and_cleanup() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let counter = Arc::new(AtomicUsize::new(0));
+    let base = spawn_billing_mock(counter.clone()).await;
+    let state = plain_state(&base);
+    let acct = |id: &str| crate::proxy::config::Account {
+        key: format!("user_{id}"), user_id: id.into(),
+        user_name: id.into(), source: "manual".into(), added_at: 0,
+    };
+    state.config.write().unwrap().cc_accounts = vec![acct("a"), acct("b")];
+
+    super::quota::refresh_all_caches(&state, true).await;
+    assert_eq!(state.quota_cache.lock().unwrap().len(), 2);
+    let first = counter.load(Ordering::SeqCst);
+
+    // TTL 内非强制刷新：不发新请求
+    super::quota::refresh_all_caches(&state, false).await;
+    assert_eq!(counter.load(Ordering::SeqCst), first);
+
+    // 删除账户 b 后刷新：缓存收缩为 a
+    state.config.write().unwrap().cc_accounts = vec![acct("a")];
+    super::quota::refresh_all_caches(&state, true).await;
+    let cache = state.quota_cache.lock().unwrap();
+    assert_eq!(cache.len(), 1);
+    assert!(cache.contains_key("a"));
+}
+
+/// snapshot_all 命中未过期缓存时不发起上游请求，顺序与账户列表一致。
+#[tokio::test]
+async fn quota_snapshot_uses_cache() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let counter = Arc::new(AtomicUsize::new(0));
+    let base = spawn_billing_mock(counter.clone()).await;
+    let state = plain_state(&base);
+    state.config.write().unwrap().cc_accounts = vec![
+        crate::proxy::config::Account { key: "user_a".into(), user_id: "a".into(), user_name: "A".into(), source: "manual".into(), added_at: 0 },
+        crate::proxy::config::Account { key: "user_b".into(), user_id: "b".into(), user_name: "B".into(), source: "manual".into(), added_at: 0 },
+    ];
+    super::quota::refresh_all_caches(&state, true).await;
+    let first = counter.load(Ordering::SeqCst);
+    let snap = super::quota::snapshot_all(&state).await;
+    assert_eq!(snap.len(), 2);
+    assert_eq!(snap[0].user_name, "A");
+    assert_eq!(snap[1].user_name, "B");
+    assert_eq!(counter.load(Ordering::SeqCst), first, "命中缓存不应重拉");
+}
+
+/// 标记耗尽：把最窄可用窗口推满并清除该账户全部会话绑定。
+#[tokio::test]
+async fn quota_mark_exhausted_updates_cache_and_bindings() {
+    let state = plain_state("http://127.0.0.1:1");
+    let q = super::quota::AccountQuota {
+        user_name: "a".into(), masked_key: "user_…a".into(),
+        plan_id: None, plan_name: String::new(), status: None,
+        monthly_remaining: 0.0, purchased_remaining: 0.0, free_remaining: 0.0,
+        total_remaining: 9.0, total_pool: 10.0, total_spent: 0.0, usage_percent: 10.0,
+        has_billing: true, days_left: None, period_start: None, period_end: None,
+        five_hour: Some(super::quota::LimitWindow { used: 1.0, cap: 50.0, reset_at: None }),
+        weekly: None, org_limits: Vec::new(), error: None,
+    };
+    state.quota_cache.lock().unwrap().insert("a".into(), (q.clone(), super::state::now_millis()));
+    state.account_bindings.lock().unwrap().insert(
+        "sess-1".into(),
+        super::state::AccountBinding { user_id: "a".into(), bound_at: super::state::now_millis() },
+    );
+    super::quota::mark_exhausted(&state, "a");
+    let cached = state.quota_cache.lock().unwrap().get("a").unwrap().0.clone();
+    assert!(super::quota::is_exhausted(&cached), "5h 窗口应被推满");
+    assert!(state.account_bindings.lock().unwrap().is_empty(), "绑定应被清除");
+    // 缓存无该账户时不 panic
+    super::quota::mark_exhausted(&state, "ghost");
+}
+
+/// 套餐上下文拉取：完整链路得到 plan/credits；上游不可达时降级为放行。
+#[tokio::test]
+async fn plan_context_fetch_flow_and_failure() {
+    let base = spawn_billing_mock(Arc::new(std::sync::atomic::AtomicUsize::new(0))).await;
+    let state = plain_state(&base);
+    let ctx = super::plans::fetch_plan_context(&state, "user_k").await;
+    assert!(!ctx.fetch_failed);
+    assert_eq!(ctx.plan_id.as_deref(), Some("individual-pro"));
+    assert_eq!(ctx.plan_name, "Pro");
+    assert_eq!(ctx.purchased_credits, 5);
+    assert_eq!(ctx.free_credits, 2);
+
+    // 上游不可达 → fetch_failed 放行
+    let bad = plain_state("http://127.0.0.1:1");
+    let failed = super::plans::fetch_plan_context(&bad, "user_k").await;
+    assert!(failed.fetch_failed);
+    assert!(failed.plan_id.is_none());
+    // 放行语义：任意模型可用
+    let acc = super::plans::evaluate_access("claude-opus-4-8", &failed);
+    assert!(acc.allowed);
+}
+
+/// Provider 动态模型拉取成功路径与无 key 回退内置表。
+#[tokio::test]
+async fn fetch_models_provider_and_fallback() {
+    let captured: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
+    let mock = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = mock.local_addr().unwrap().to_string();
+    tokio::spawn(async move { let _ = axum::serve(mock, mock_upstream(Some(captured))).await; });
+    let state = plain_state(&format!("http://{addr}"));
+
+    // 带 key 走 Provider API
+    let (models, is_fallback) = super::cc_client::fetch_models(&state, Some("user_k")).await;
+    assert!(!is_fallback);
+    assert!(models.iter().any(|m| m.id == "mock-model-1"));
+
+    // 无 key 直接回退内置表（用全新 state，避免命中上一步的模型缓存）
+    let fresh = plain_state(&format!("http://{addr}"));
+    let (fallback, is_fallback2) = super::cc_client::fetch_models(&fresh, None).await;
+    assert!(is_fallback2);
+    assert!(fallback.len() >= 60);
+}
+
+/// 预请求（fingerprint/record + lifecycle-events）8h 节流：首次发送，二次跳过。
+#[tokio::test]
+async fn ensure_initialized_throttles_pre_requests() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h2 = hits.clone();
+    let router = Router::new()
+        .route("/alpha/fingerprint/record", post(move || {
+            let h = h2.clone();
+            async move { h.fetch_add(1, Ordering::SeqCst); axum::response::Response::new(axum::body::Body::from("{}")) }
+        }))
+        .route("/alpha/lifecycle-events", post(|| async {
+            axum::response::Response::new(axum::body::Body::from("{}"))
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+    let state = plain_state(&format!("http://{addr}"));
+
+    super::cc_client::ensure_initialized(&state, "user_k", "user_1").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    // 8h 节流窗口内：不再发送
+    super::cc_client::ensure_initialized(&state, "user_k", "user_1").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    // 清空键控状态后重新初始化
+    state.key_states.lock().unwrap().clear();
+    super::cc_client::ensure_initialized(&state, "user_k", "user_1").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+/// 账户 key 验证（whoami）：成功 / 缺 id / 401 / 非 JSON 各分支。
+#[tokio::test]
+async fn verify_account_key_variants() {
+    use axum::response::Response;
+    async fn spawn_with(status: u16, body: &'static str) -> Arc<AppState> {
+        let router = Router::new().route("/alpha/whoami", axum::routing::get(move || {
+            let s = status;
+            async move {
+                Response::builder().status(s).header("content-type", "application/json")
+                    .body(axum::body::Body::from(body)).unwrap()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+        plain_state(&format!("http://{addr}"))
+    }
+
+    async fn run_verify(status: u16, body: &'static str) -> Result<(String, String), String> {
+        let st = spawn_with(status, body).await;
+        crate::credentials::verify_account_key(&st.client(), &format!("http://localhost:1{}", ""), "user_k")
+            .await
+    }
+    let ok = spawn_with(200, r#"{"user":{"id":"id_1","userName":"N"}}"#).await;
+    let (uid, name) =
+        crate::credentials::verify_account_key(&ok.client(), &ok.config.read().unwrap().api_base, "user_k").await.unwrap();
+    assert_eq!((uid.as_str(), name.as_str()), ("id_1", "N"));
+
+    let no_id = spawn_with(200, r#"{"user":{}}"#).await;
+    assert!(crate::credentials::verify_account_key(&no_id.client(), &no_id.config.read().unwrap().api_base, "user_k").await.is_err());
+
+    let unauth = spawn_with(401, r#"{"message":"bad"}"#).await;
+    assert!(crate::credentials::verify_account_key(&unauth.client(), &unauth.config.read().unwrap().api_base, "user_k").await.is_err());
+
+    let bad_json = spawn_with(200, "not json").await;
+    assert!(crate::credentials::verify_account_key(&bad_json.client(), &bad_json.config.read().unwrap().api_base, "user_k").await.is_err());
+
+    // 上游 500 → 通用验证失败分支
+    let e500 = spawn_with(500, r#"{"message":"oops"}"#).await;
+    assert!(crate::credentials::verify_account_key(&e500.client(), &e500.config.read().unwrap().api_base, "user_k").await.is_err());
+}
+
+// ── server 各协议错误分支与流式边角 ─────────────────────────
+
+/// Anthropic 流式：reasoning → thinking 块，正文 → text 块，收尾 message_delta/stop。
+#[tokio::test]
+async fn anthropic_streaming_flow() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/messages"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "reasoner",
+            "max_tokens": 1000,
+            "stream": true,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+    assert!(text.contains("event: message_start"));
+    assert!(text.contains("thinking_delta"));
+    assert!(text.contains("deep thought"));
+    assert!(text.contains("text_delta"));
+    assert!(text.contains("message_stop"));
+    state.mark_stopped();
+}
+
+/// Anthropic 上游错误：429 映射为 Anthropic 风格错误体（type: error + retry_after）。
+#[tokio::test]
+async fn anthropic_upstream_error_mapped() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/messages"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "upstream-error",
+            "max_tokens": 100,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 429);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+    assert_eq!(body["error"]["message"], "rate limited");
+    state.mark_stopped();
+}
+
+/// Responses 上游错误：映射为 OpenAI 风格错误体。
+#[tokio::test]
+async fn responses_upstream_error_mapped() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "upstream-error",
+            "input": [{ "type": "message", "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 429);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+    assert_eq!(body["error"]["message"], "rate limited");
+    state.mark_stopped();
+}
+
+/// OpenAI 流式 tool-call：上游 tool-call 事件翻译为 chat.completion.chunk 的 tool_calls。
+#[tokio::test]
+async fn chat_completions_streaming_tool_calls() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "tool-caller",
+            "messages": [{ "role": "user", "content": "天气" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+    assert!(text.contains("tool_calls"));
+    assert!(text.contains("get_weather"));
+    assert!(text.contains("finish_reason"));
+    assert!(text.contains("[DONE]"));
+    state.mark_stopped();
+}
+
+/// 上游 NDJSON 中混入坏行：跳过该行继续翻译，不影响后续内容与收尾。
+#[tokio::test]
+async fn bad_ndjson_line_is_skipped() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "bad-line",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+    assert!(text.contains("after bad line"));
+    assert!(text.contains("[DONE]"));
+    state.mark_stopped();
+}
+
+/// 请求体超过 max_body_mb 上限时返回 413。
+#[tokio::test]
+async fn oversized_body_returns_413() {
+    let (base, state) = start_proxy_impl(None, |c| c.max_body_mb = 1).await;
+    let client = reqwest::Client::new();
+    let big = "x".repeat(2 * 1024 * 1024);
+    // 并行高负载下偶发收到非 413 的瞬时响应（如空 503），非 413 时重试
+    let mut status = 0u16;
+    let mut body = String::new();
+    for _ in 0..4 {
+        let res = send_retry(
+            &client,
+            reqwest::Method::POST,
+            &format!("{base}/v1/chat/completions"),
+            "sk-test-local-key-123",
+            Some(&json!({
+                "model": "m",
+                "messages": [{ "role": "user", "content": big }],
+            })),
+        )
+        .await;
+        status = res.status().as_u16();
+        body = res.text().await.unwrap_or_default();
+        if status == 413 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    assert_eq!(status, 413, "实际返回: {body}");
+    state.mark_stopped();
+}
+
+// ── cc_client 补充：预请求失败降级、指纹持久化失败降级、模型拉取坏响应 ──
+
+/// 预请求返回 500：仅记 warn 不 panic，节流时间仍被安排。
+#[tokio::test]
+async fn ensure_initialized_tolerates_upstream_error() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h2 = hits.clone();
+    let router = Router::new()
+        .route("/alpha/fingerprint/record", post(move || {
+            let h = h2.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                axum::response::Response::builder().status(500)
+                    .body(axum::body::Body::from("boom")).unwrap()
+            }
+        }))
+        .route("/alpha/lifecycle-events", post(|| async {
+            axum::response::Response::builder().status(500)
+                .body(axum::body::Body::from("boom")).unwrap()
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+    let state = plain_state(&format!("http://{addr}"));
+
+    super::cc_client::ensure_initialized(&state, "user_k", "user_1").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    state.key_states.lock().unwrap().clear();
+    super::cc_client::ensure_initialized(&state, "user_k", "user_1").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+/// 指纹持久化路径不可写时：生成仍成功（仅内存），不 panic。
+#[tokio::test]
+async fn fingerprint_persist_failure_keeps_memory_only() {
+    let state = plain_state("http://127.0.0.1:1");
+    let dir = std::env::temp_dir().join(format!("fp-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let blocker = dir.join("b");
+    std::fs::write(&blocker, "x").unwrap();
+    state.set_fingerprint_path(blocker.join("store.json"));
+    let fp = super::cc_client::key_fingerprint_for_test(&state, "user_1");
+    assert!(!fp.thumbmark.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Provider 模型接口返回坏 JSON / 空 data：回退内置表而非 panic。
+#[tokio::test]
+async fn fetch_models_bad_provider_response_falls_back() {
+    async fn spawn_with(body: &'static str) -> Arc<AppState> {
+        let router = Router::new().route("/provider/v1/models", axum::routing::get(move || {
+            async move { axum::response::Response::new(axum::body::Body::from(body)) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+        plain_state(&format!("http://{addr}"))
+    }
+    let bad = spawn_with("not json").await;
+    let (models, fallback) = super::cc_client::fetch_models(&bad, Some("user_k")).await;
+    assert!(fallback);
+    assert!(models.len() >= 60);
+    let empty = spawn_with(r#"{"data":[]}"#).await;
+    let (models2, fallback2) = super::cc_client::fetch_models(&empty, Some("user_k")).await;
+    assert!(fallback2);
+    assert!(models2.len() >= 60);
+}
+
+// ── convert 协议转换的更多分支 ─────────────────────────────
+
+/// Anthropic → OpenAI：system 数组合并、thinking 转 reasoning_content、tool_use/tool_result 关联。
+#[test]
+fn convert_anthropic_system_thinking_and_tools() {
+    let req = json!({
+        "model": "claude-sonnet-4-6",
+        "system": [
+            { "type": "text", "text": "sys-a" },
+            { "type": "text", "text": "sys-b" },
+            { "type": "image", "source": {} }
+        ],
+        "messages": [
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "content": [
+                { "type": "thinking", "thinking": "ponder" },
+                { "type": "tool_use", "id": "tu_1", "name": "calc", "input": { "x": 1 } }
+            ]},
+            { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "tu_1", "content": [
+                    { "type": "text", "text": "result-42" }
+                ]}
+            ]}
+        ]
+    });
+    let openai = super::convert::convert_anthropic_to_openai(&req);
+    let msgs = openai["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[0]["content"], "sys-a\nsys-b");
+    // assistant：thinking → reasoning_content，tool_use → tool_calls
+    let assistant = &msgs[2];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["reasoning_content"], "ponder");
+    assert_eq!(assistant["tool_calls"][0]["function"]["name"], "calc");
+    // tool_result：按 tool_use_id 关联出 name，数组 content 拼接
+    let tool = &msgs[3];
+    assert_eq!(tool["role"], "tool");
+    assert_eq!(tool["tool_call_id"], "tu_1");
+    assert_eq!(tool["name"], "calc");
+    assert_eq!(tool["content"], "result-42");
+}
+
+/// Responses → OpenAI：reasoning/function_call 并入 assistant，function_call_output 转 tool 消息。
+#[test]
+fn convert_responses_reasoning_and_function_calls() {
+    let resp = json!({
+        "model": "gpt-5-codex",
+        "instructions": "be brief",
+        "input": [
+            { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "step1" }] },
+            { "type": "function_call", "call_id": "call_r1", "name": "run", "arguments": "{\"q\":1}" },
+            { "type": "function_call_output", "call_id": "call_r1", "output": "done" }
+        ]
+    });
+    let openai = super::convert::convert_responses_to_openai(&resp);
+    let msgs = openai["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["role"], "system");
+    assert_eq!(msgs[0]["content"], "be brief");
+    // assistant 消息同时含 reasoning_content 与 tool_calls
+    let assistant = &msgs[1];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["reasoning_content"], "step1");
+    assert_eq!(assistant["tool_calls"][0]["function"]["name"], "run");
+    let tool = &msgs[2];
+    assert_eq!(tool["role"], "tool");
+    assert_eq!(tool["tool_call_id"], "call_r1");
+    assert_eq!(tool["content"], "done");
+}
+
+/// Responses 字符串形态 input 直接成为 user 消息；assistant 文本块拼接。
+#[test]
+fn convert_responses_string_input_and_assistant_blocks() {
+    let resp = json!({
+        "input": [
+            { "role": "assistant", "content": [{ "type": "output_text", "text": "a" }, { "type": "output_text", "text": "b" }] },
+            "plain user text"
+        ]
+    });
+    let openai = super::convert::convert_responses_to_openai(&resp);
+    let msgs = openai["messages"].as_array().unwrap();
+    // assistant 消息累积进 pending、函数尾部统一 flush，因此排在字符串 user 之后
+    assert_eq!(msgs[0]["role"], "user");
+    assert_eq!(msgs[0]["content"], "plain user text");
+    assert_eq!(msgs[1]["role"], "assistant");
+    assert_eq!(msgs[1]["content"], "ab");
+}
+
+/// OpenAI 请求中 system content 为 parts 数组时抽取 text；已有 cache_control 时不重复注入。
+#[test]
+fn build_cc_request_array_system_and_cache_marker() {
+    let req = json!({
+        "model": "m",
+        "prompt_cache_key": "ck-12345678",
+        "messages": [
+            { "role": "system", "content": [ { "type": "text", "text": "sys1" }, { "type": "image_url" } ] },
+            { "role": "user", "content": [ { "type": "text", "text": "u1", "cache_control": { "type": "ephemeral" } } ] }
+        ]
+    });
+    let cc = super::convert::build_cc_request(&req, false);
+    assert_eq!(cc["params"]["system"], "sys1");
+    let user_parts = cc["params"]["messages"][0]["content"].as_array().unwrap();
+    // 已有 cache_control：不再注入第二处标记
+    assert!(user_parts[0].get("cache_control").is_some());
+    let marked: Vec<_> = user_parts.iter().filter(|p| p.get("cache_control").is_some()).collect();
+    assert_eq!(marked.len(), 1);
+}
+
+// ── 版本刷新（注入 URL）与坏数据库文件 ─────────────────────
+
+/// registry 返回新版本号时写回状态；坏 JSON / 非成功状态保持原值。
+#[tokio::test]
+async fn refresh_cc_version_parses_and_persists() {
+    use axum::response::Response;
+    let state = plain_state("http://127.0.0.1:1");
+    let before = super::cc_client::cc_version(&state);
+
+    async fn spawn_registry(body: &'static str, status: u16) -> String {
+        let router = Router::new().route("/command-code/latest", axum::routing::get(move || {
+            async move {
+                Response::builder().status(status).header("content-type", "application/json")
+                    .body(axum::body::Body::from(body)).unwrap()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+        format!("http://{addr}")
+    }
+
+    // 正常版本号
+    let ok = spawn_registry(r#"{"version":"9.9.9"}"#, 200).await;
+    super::cc_client::refresh_cc_version_from(&state, &format!("{ok}/command-code/latest")).await;
+    assert_eq!(super::cc_client::cc_version(&state), "9.9.9");
+
+    // 坏 JSON：保持原值
+    let bad = spawn_registry("not json", 200).await;
+    super::cc_client::refresh_cc_version_from(&state, &format!("{bad}/command-code/latest")).await;
+    assert_eq!(super::cc_client::cc_version(&state), "9.9.9");
+
+    // 非 2xx：保持原值
+    let err = spawn_registry(r#"{"version":"0.0.1"}"#, 500).await;
+    super::cc_client::refresh_cc_version_from(&state, &format!("{err}/command-code/latest")).await;
+    assert_eq!(super::cc_client::cc_version(&state), "9.9.9");
+    let _ = before;
+}
+
+/// 数据库文件损坏（非 SQLite 格式）时：初始化报错而非 panic（models/settings/usage 各表）。
+#[test]
+fn init_tables_on_garbage_db_file_is_error() {
+    let path = std::env::temp_dir().join(format!("garbage-db-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"this is definitely not a sqlite database file").unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert!(super::models::init_models_on(&conn).is_err());
+    assert!(super::settings::init_settings_on(&conn).is_err());
+    drop(conn);
+    assert!(super::usage::init_usage(&path).is_err());
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Anthropic 非流式响应构建：thinking 首块 + tool_use 输入解析 + stop_reason 折算。
+#[test]
+fn build_anthropic_response_with_thinking_and_tools() {
+    let tc = json!({ "id": "tu_9", "type": "function", "function": { "name": "calc", "arguments": "{\"x\":2}" } });
+    let body = super::convert::build_anthropic_response(
+        "msg_1", "claude-x", "", "deep think", Some(&[tc]), "tool_calls", 11, 7, 3, None,
+    );
+    assert_eq!(body["role"], "assistant");
+    let content = body["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "thinking");
+    assert_eq!(content[0]["thinking"], "deep think");
+    assert_eq!(content[1]["type"], "tool_use");
+    assert_eq!(content[1]["name"], "calc");
+    assert_eq!(content[1]["input"]["x"], 2, "arguments 应解析为 JSON 对象");
+    assert_eq!(body["stop_reason"], "tool_use");
+    let usage = &body["usage"];
+    assert_eq!(usage["input_tokens"], 11);
+
+    // 纯文本响应
+    let plain = super::convert::build_anthropic_response("msg_2", "claude-x", "hi", "", None, "stop", 1, 1, 0, None);
+    let content = plain["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "hi");
+}
+
+// ── 只读连接触发 SQLite 写入错误分支 ────────────────────────
+
+/// 只读连接上写入：models 的 upsert 与 usage 的记录/清理返回错误而非 panic。
+#[test]
+fn readonly_connection_write_errors_are_mapped() {
+    let path = std::env::temp_dir().join(format!("ro-db-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    // 先以可写连接建好表
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        super::models::init_models_on(&conn).unwrap();
+        super::usage::init_usage_on(&conn).unwrap();
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+
+    // models：只读 upsert → 写入失败映射为错误码
+    let m = super::pricing::ModelPricing {
+        id: "ro-model".into(),
+        name: String::new(),
+        category: "premium".into(),
+        provider: None,
+        context_window: None,
+        caps: super::pricing::ModelCaps { text: true, vision: false, reasoning: false },
+        deprecated: false,
+        deal: None,
+        time_of_day: None,
+        tiers: vec![],
+    };
+    assert!(super::models::upsert_models(&conn, &[m], "manual").is_err());
+
+    // usage：只读记录 → 错误映射
+    let entry = super::usage::UsageEntry {
+        ts: super::state::now_millis(),
+        model: "m".into(),
+        endpoint: "/v1/chat/completions".into(),
+        status: "ok".into(),
+        prompt_tokens: 1,
+        completion_tokens: 1,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+        stream: true,
+    };
+    assert!(super::usage::record_usage(&conn, &entry).is_err());
+    // 只读清理 → 错误映射
+    assert!(super::usage::clear_before(&conn, 5).is_err());
+    drop(conn);
+    let _ = std::fs::remove_file(&path);
 }
