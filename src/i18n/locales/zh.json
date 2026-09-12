@@ -117,28 +117,6 @@
     "summary": "自代理启动以来 · 共 {{p0}} 条",
     "empty": "代理启动后，这里会实时显示每次请求的中继记录。代理停止或关闭软件时自动清空。"
   },
-  "relayRail": {
-    "title": "实时中继轨道",
-    "forwarding": "转发中",
-    "linkReady": "链路就绪",
-    "client": "客户端",
-    "proxy": "代理",
-    "upstream": "上游",
-    "empty": "还没有请求记录——启动代理后，向 /v1/chat/completions 发一次请求试试。",
-    "detailTitle": "请求详情",
-    "detailDesc": "单次代理请求的中继摘要",
-    "fieldRequestId": "请求 ID",
-    "fieldPath": "路径",
-    "fieldModel": "模型",
-    "fieldMode": "模式",
-    "modeStream": "流式",
-    "modeNonStream": "非流式",
-    "fieldStatus": "状态",
-    "fieldElapsed": "耗时",
-    "fieldLastEvent": "最后事件",
-    "tokenSummary": "输入 {{p0}} / 输出 {{p1}} / 缓存 {{p2}}",
-    "fieldTokens": "Token"
-  },
   "usageMiniBars": {
     "empty": "最近 10 分钟暂无请求",
     "justNow": "刚刚",

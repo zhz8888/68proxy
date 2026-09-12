@@ -117,28 +117,6 @@
     "summary": "Since proxy start · {{p0}} records",
     "empty": "Once the proxy starts, every request's relay record appears here in real time. It clears automatically when the proxy stops or the app closes."
   },
-  "relayRail": {
-    "title": "Live relay rail",
-    "forwarding": "Forwarding",
-    "linkReady": "Link ready",
-    "client": "Client",
-    "proxy": "Proxy",
-    "upstream": "Upstream",
-    "empty": "No requests yet — start the proxy and send a request to /v1/chat/completions.",
-    "detailTitle": "Request details",
-    "detailDesc": "Relay summary of a single proxy request",
-    "fieldRequestId": "Request ID",
-    "fieldPath": "Path",
-    "fieldModel": "Model",
-    "fieldMode": "Mode",
-    "modeStream": "Streaming",
-    "modeNonStream": "Non-streaming",
-    "fieldStatus": "Status",
-    "fieldElapsed": "Elapsed",
-    "fieldLastEvent": "Last event",
-    "tokenSummary": "in {{p0}} / out {{p1}} / cached {{p2}}",
-    "fieldTokens": "Tokens"
-  },
   "usageMiniBars": {
     "empty": "No requests in the last 10 minutes",
     "justNow": "Just now",

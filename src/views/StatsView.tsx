@@ -4,7 +4,7 @@ import { Activity, AlertTriangle, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ModelLogo } from "@/components/ModelLogo";
-import { StatusLamp } from "@/components/StatusLamp";
+import { RecentRequestsCard } from "@/components/RecentRequestsCard";
 import { UsageMiniBars } from "@/components/UsageMiniBars";
 import { UsageTrendChart } from "@/components/UsageTrendChart";
 import { Button } from "@/components/ui/button";
@@ -28,9 +28,8 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { translate } from "@/i18n";
 import { api, onStats, type AccountQuota, type UsageChartPoint, type UsageGroupRow, type UsagePeriod, type UsageStats } from "@/lib/api";
-import { formatCost, formatLogTime, formatTokens } from "@/lib/format";
+import { formatCost, formatTokens } from "@/lib/format";
 import { errText } from "@/lib/messages";
-import { lampForStatus } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { LimitWindowRow, MeterBar } from "@/components/QuotaDetail";
 
@@ -375,52 +374,7 @@ export function StatsView() {
           </Card>
 
           {/* 最近请求卡片 */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm">{t("stats.recentRequests")}</CardTitle>
-              <CardDescription>{t("stats.recentRequestsDesc")}</CardDescription>
-            </CardHeader>
-            <CardContent className="pt-0">
-              {!stats || stats.recent_requests.length === 0 ? (
-                <p className="py-8 text-center text-sm text-muted-foreground">
-                  {t("stats.noRecentRequests")}
-                </p>
-              ) : (
-                <div className="space-y-1">
-                  {stats.recent_requests.map((r, i) => (
-                    <div
-                      key={i}
-                      className="flex items-center gap-3 rounded-md border border-border/70 bg-secondary/30 px-3 py-2"
-                    >
-                      <ModelLogo model={r.model} size={16} className="!p-0.5" />
-                      <span className="w-20 shrink-0 select-text font-mono text-xs text-muted-foreground">
-                        {formatLogTime(r.ts)}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate select-text font-mono text-sm text-foreground/90">
-                        {r.model}
-                      </span>
-                      <span className="min-w-0 truncate text-xs text-muted-foreground">{r.endpoint}</span>
-                      <StatusLamp state={lampForStatus(r.status)} />
-                      <span className="w-14 text-right font-mono text-xs text-muted-foreground">
-                        {t("stats.tokenIn", { p0: formatTokens(r.prompt_tokens) })}
-                      </span>
-                      <span className="w-14 text-right font-mono text-xs text-muted-foreground">
-                        {t("stats.tokenOut", { p0: formatTokens(r.completion_tokens) })}
-                      </span>
-                      <span
-                        className={cn(
-                          "w-14 text-right font-mono text-xs",
-                          r.cached_tokens > 0 ? "text-signal-info" : "text-muted-foreground",
-                        )}
-                      >
-                        {t("stats.tokenCached", { p0: formatTokens(r.cached_tokens) })}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <RecentRequestsCard />
         </div>
       </ScrollArea>
 

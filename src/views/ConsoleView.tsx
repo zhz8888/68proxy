@@ -3,7 +3,7 @@ import { Activity, Play, RefreshCw, RotateCw, Square } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
-import { RelayRail } from "@/components/RelayRail";
+import { RecentRequestsCard } from "@/components/RecentRequestsCard";
 import { StatusLamp } from "@/components/StatusLamp";
 import { UrlRow } from "@/components/UrlRow";
 import { Badge } from "@/components/ui/badge";
@@ -116,8 +116,6 @@ export function ConsoleView() {
 
   return (
     <div className="space-y-4">
-      <RelayRail running={running} streaming={streaming} port={status?.port ?? DEFAULT_PORT} requests={requests} />
-
       <div className="grid grid-cols-3 gap-4">
         <Card className="min-w-0">
           <CardHeader className="pb-2">
@@ -164,6 +162,8 @@ export function ConsoleView() {
           </CardContent>
         </Card>
       </div>
+
+      <RecentRequestsCard />
 
       <Card>
         <CardHeader className="pb-2">
