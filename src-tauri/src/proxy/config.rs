@@ -125,8 +125,8 @@ pub struct Config {
     pub log_level: String,
     /// 是否从 Provider API 动态拉取模型列表（关闭时使用内置硬编码列表）。
     pub use_provider_models: bool,
-    /// 模型列表缓存刷新间隔（毫秒）。
-    pub model_refresh_interval_ms: u64,
+    /// 模型列表缓存刷新间隔（秒）。
+    pub model_refresh_interval_secs: u64,
     /// 应用启动后是否自动开启代理服务。
     pub auto_start_proxy: bool,
     /// 启动时是否显示主窗口。
@@ -166,7 +166,7 @@ impl Default for Config {
             log_file: String::new(),
             log_level: "info".into(),
             use_provider_models: true,
-            model_refresh_interval_ms: 300_000,
+            model_refresh_interval_secs: 300,
             auto_start_proxy: false,
             show_window_on_start: true,
             autostart: false,
@@ -209,11 +209,15 @@ impl Config {
     pub fn load_file(path: &Path) -> Config {
         match std::fs::read_to_string(path) {
             Ok(text) => {
-                let v: serde_json::Value =
+                let mut v: serde_json::Value =
                     serde_json::from_str(&text).unwrap_or_else(|e| {
                         log::warn(&format!("配置解析失败，使用默认值: {e}"));
                         serde_json::json!({})
                     });
+                // 单位迁移须在反序列化前完成（详见函数注释）
+                if let Some(obj) = v.as_object_mut() {
+                    migrate_refresh_interval_unit(obj);
+                }
                 let legacy = v
                     .get("api_key")
                     .and_then(|k| k.as_str())
@@ -223,23 +227,6 @@ impl Config {
                 cfg
             }
             Err(_) => Config::default(),
-        }
-    }
-
-    /// 兼容旧版配置迁移：旧字段 `api_key`（单个 user_ key）已拆分为账户列表 + 本地 key。
-    ///
-    /// 若账户列表为空且旧 key 非空，则把旧 key 作为首个 CC 账户迁入；本地 key 不迁移
-    /// （由 UI 随机生成）。调用方（settings::load_config / load_file）在反序列化后调用。
-    pub fn migrate_legacy(&mut self, legacy_api_key: Option<&str>) {
-        if self.cc_accounts.is_empty() {
-            if let Some(k) = legacy_api_key.filter(|k| !k.trim().is_empty()) {
-                let k = k.trim().to_string();
-                self.cc_accounts.push(Account {
-                    user_id: legacy_user_id(&k),
-                    key: k,
-                    ..Account::default()
-                });
-            }
         }
     }
 
@@ -308,6 +295,43 @@ impl Config {
             }
         }
     }
+
+    /// 兼容旧版配置迁移：旧字段 `api_key`（单个 user_ key）已拆分为账户列表 + 本地 key。
+    ///
+    /// 若账户列表为空且旧 key 非空，则把旧 key 作为首个 CC 账户迁入；本地 key 不迁移
+    /// （由 UI 随机生成）。调用方（settings::load_config / load_file）在反序列化后调用。
+    pub fn migrate_legacy(&mut self, legacy_api_key: Option<&str>) {
+        if self.cc_accounts.is_empty() {
+            if let Some(k) = legacy_api_key.filter(|k| !k.trim().is_empty()) {
+                let k = k.trim().to_string();
+                self.cc_accounts.push(Account {
+                    user_id: legacy_user_id(&k),
+                    key: k,
+                    ..Account::default()
+                });
+            }
+        }
+    }
+}
+
+/// 把旧版毫秒单位的刷新间隔迁移为秒（在反序列化**之前**对原始对象调用）。
+///
+/// 旧配置写作 `model_refresh_interval_ms`（如 300000）；新字段为
+/// `model_refresh_interval_secs`。仅当新字段缺失且旧字段存在时转换，随后删除旧字段
+/// 以免残留误导。必须在反序列化前执行：否则 `#[serde(default)]` 会先填默认值，
+/// 旧值无从还原。
+pub fn migrate_refresh_interval_unit(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    if obj.contains_key("model_refresh_interval_secs") {
+        obj.remove("model_refresh_interval_ms");
+        return;
+    }
+    if let Some(ms) = obj.get("model_refresh_interval_ms").and_then(|v| v.as_u64()) {
+        obj.insert(
+            "model_refresh_interval_secs".into(),
+            serde_json::json!(ms / 1000),
+        );
+    }
+    obj.remove("model_refresh_interval_ms");
 }
 
 #[cfg(test)]
@@ -357,6 +381,38 @@ mod tests {
         assert_eq!(legacy_user_id("user_abc"), legacy_user_id("user_abc"));
         assert_ne!(legacy_user_id("user_abc"), legacy_user_id("user_def"));
         assert!(legacy_user_id("user_abc").starts_with("legacy-"));
+    }
+
+    #[test]
+    fn refresh_interval_migrates_ms_to_secs() {
+        // 旧配置写作毫秒字段：应换算为秒并删除旧键
+        let mut obj = serde_json::json!({ "model_refresh_interval_ms": 300000 });
+        migrate_refresh_interval_unit(obj.as_object_mut().unwrap());
+        assert_eq!(obj["model_refresh_interval_secs"], serde_json::json!(300));
+        assert!(obj.get("model_refresh_interval_ms").is_none());
+
+        // 已是新字段时保持原值，仅清理可能残留的旧键
+        let mut obj2 = serde_json::json!({ "model_refresh_interval_secs": 45, "model_refresh_interval_ms": 999 });
+        migrate_refresh_interval_unit(obj2.as_object_mut().unwrap());
+        assert_eq!(obj2["model_refresh_interval_secs"], serde_json::json!(45));
+
+        // 两者都缺失：不注入字段，交给默认值
+        let mut obj3 = serde_json::json!({ "port": 3050 });
+        migrate_refresh_interval_unit(obj3.as_object_mut().unwrap());
+        assert!(obj3.get("model_refresh_interval_secs").is_none());
+        assert_eq!(obj3["port"], serde_json::json!(3050));
+    }
+
+    #[test]
+    fn load_file_applies_unit_migration() {
+        // 端到端：旧 json 落盘后经 load_file 应得到秒值
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("cc-config-refresh-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, r#"{"model_refresh_interval_ms":120000}"#).unwrap();
+        let cfg = Config::load_file(&path);
+        assert_eq!(cfg.model_refresh_interval_secs, 120);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

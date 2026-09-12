@@ -340,7 +340,7 @@ pub async fn fetch_models(state: &AppState, api_key: Option<&str>) -> (Vec<Model
     // 缓存非空且未过期时直接命中；用独立块提前释放读锁，避免后续写缓存时死锁
     {
         let cache = state.models.read().unwrap();
-        if !cache.models.is_empty() && now - cache.fetched_at < cfg.model_refresh_interval_ms {
+        if !cache.models.is_empty() && now - cache.fetched_at < cfg.model_refresh_interval_secs * 1000 {
             return (cache.models.clone(), false);
         }
     }

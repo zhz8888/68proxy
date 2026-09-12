@@ -183,7 +183,7 @@ pub async fn serve(
             "session: 12h + 1h jitter per API key | zdr: {} | emptySystemPlaceholder: {} | model refresh: {}s | stream idle: {}s | nonstream idle: {}s",
             cfg.zdr,
             cfg.empty_system_placeholder,
-            cfg.model_refresh_interval_ms / 1000,
+            cfg.model_refresh_interval_secs,
             STREAM_IDLE_TIMEOUT.as_secs(),
             NONSTREAM_IDLE_TIMEOUT.as_secs(),
         ));

@@ -53,7 +53,7 @@ const DEFAULTS: Config = {
   log_file: "",
   log_level: "info",
   use_provider_models: true,
-  model_refresh_interval_ms: 300000,
+  model_refresh_interval_secs: 300,
   auto_start_proxy: false,
   show_window_on_start: true,
   autostart: false,
@@ -478,11 +478,12 @@ export function ConfigView() {
                 onCheckedChange={(v) => update("use_provider_models", v)}
               />
             </div>
-            <Field label="刷新间隔（毫秒）">
+            <Field label="刷新间隔（秒）">
               <Input
                 type="number"
-                value={cfg.model_refresh_interval_ms}
-                onChange={(e) => update("model_refresh_interval_ms", Number(e.target.value))}
+                min={1}
+                value={cfg.model_refresh_interval_secs}
+                onChange={(e) => update("model_refresh_interval_secs", Number(e.target.value))}
               />
             </Field>
           </Section>

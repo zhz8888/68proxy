@@ -11,7 +11,7 @@ export interface Config {
   log_file: string;
   log_level: string;
   use_provider_models: boolean;
-  model_refresh_interval_ms: number;
+  model_refresh_interval_secs: number;
   auto_start_proxy: boolean;
   show_window_on_start: boolean;
   autostart: boolean;

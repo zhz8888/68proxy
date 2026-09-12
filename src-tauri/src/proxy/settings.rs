@@ -76,7 +76,9 @@ pub fn load_config(conn: &Connection) -> Config {
 /// 直接 `from_value(...).unwrap_or_default()` 会因任一行 value 类型不符而让整份配置
 /// 静默回退默认（用户端口/账户/开关全部丢失且可能被写回），故先按单字段反序列化，
 /// 只丢弃/记录出错字段，其余字段照常生效。
-fn config_from_map(map: Map<String, Value>) -> Config {
+fn config_from_map(mut map: Map<String, Value>) -> Config {
+    // 旧版刷新间隔为毫秒，须在逐字段处理前换算为秒（详见 config 模块注释）
+    super::config::migrate_refresh_interval_unit(&mut map);
     let mut obj = Map::new();
     let mut defaults = serde_json::to_value(Config::default())
         .ok()
