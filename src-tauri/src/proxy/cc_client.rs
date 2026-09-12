@@ -84,6 +84,14 @@ pub fn fake_project_slug(session_id: &str) -> String {
     }
 }
 
+/// 判断字符串能否安全用作 HTTP 头值：仅可见 ASCII（可含空格），排除控制字符与多字节字符。
+///
+/// 会话 ID 最终会写入 `x-session-id` 头，而候选来源（请求体 prompt_cache_key）由下游
+/// 任意填写，故必须过滤，否则 HeaderValue 解析失败。
+fn is_header_safe(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+}
+
 /// 解析本次请求应使用的会话 ID。
 ///
 /// 优先透传下游客户端头 `x-session-id` / `x-claude-code-session-id` / `session_id`
@@ -103,7 +111,8 @@ fn get_session_id(
         }
     }
     if let Some(k) = prompt_cache_key {
-        if k.len() >= 8 {
+        // 请求体字段不可信：非可见 ASCII（如含中文）会让后续写入请求头时解析失败
+        if k.len() >= 8 && is_header_safe(k) {
             return k.to_string();
         }
     }
@@ -129,7 +138,9 @@ fn ensure_session(state: &AppState, user_id: &str) -> String {
             expires_at: now + AppState::session_duration_ms() + jitter,
         },
     );
-    log::info(&format!("Session created for user {}", &user_id[..user_id.len().min(8)]));
+    // user_id 来自上游 whoami，可能是任意字符串：按字符截断避免字节切片落在字符中间 panic
+    let short_id: String = user_id.chars().take(8).collect();
+    log::info(&format!("Session created for user {short_id}"));
     session_id
 }
 
@@ -195,7 +206,8 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str, user_id: &str) 
     if cfg.zdr {
         headers.insert("x-cmd-zdr", "1".parse().unwrap());
     }
-    let fingerprint = get_or_create_key_state(state, api_key).fingerprint;
+    // 指纹同样以 user_id 键控：同一账户换 key 后保持同一设备身份
+    let fingerprint = get_or_create_key_state(state, user_id).fingerprint;
     let client = state.client.clone();
 
     // 两个初始化预请求的 URL 与请求体：上报指纹 + 上报 CLI 会话存活事件
@@ -239,11 +251,13 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str, user_id: &str) 
     let mut rng = rand::thread_rng();
     let jitter = rng.gen_range(0..AppState::init_jitter_ms());
     let next_at = now + AppState::init_refresh_ms() + jitter;
+    // 与读取处（第 187 行）保持同一键控键，否则 user_id 条目的 next_init_at
+    // 永远停在 0，8h 节流会失效、每个请求都重发两个预请求
     state
         .key_states
         .lock()
         .unwrap()
-        .get_mut(api_key)
+        .get_mut(user_id)
         .map(|s| s.next_init_at = next_at);
     log::info("Fingerprint/lifecycle next refresh scheduled");
 }
@@ -291,7 +305,11 @@ pub async fn forward_to_cc(
 
     // 在公共头基础上补齐 CLI 会话/项目/链路追踪等伪装头
     let mut headers = base_headers(state, api_key);
-    headers.insert("x-session-id", session_id.parse().unwrap());
+    // session_id 已由 get_session_id 保证为可见 ASCII；此处仍用 try_from 兜底，
+    // 避免任何异常输入导致 parse().unwrap() panic（release 下 panic=abort 会整进程退出）
+    let session_header = reqwest::header::HeaderValue::try_from(session_id.as_str())
+        .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("session"));
+    headers.insert("x-session-id", session_header);
     headers.insert("x-taste-learning", "false".parse().unwrap());
     headers.insert("x-project-slug", slug.parse().unwrap());
     headers.insert("traceparent", generate_traceparent().parse().unwrap());

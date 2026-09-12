@@ -144,28 +144,30 @@ pub fn accounts_from_state(state: &crate::proxy::state::AppState) -> Vec<Account
 
 /// 掩码显示：user_ab12…cd34（长度不足时整体打点）。
 pub fn mask_key(key: &str) -> String {
-    if key.len() <= 8 {
+    // 按字符而非字节截断：key 可能含多字节字符（用户手填），字节切片会 panic
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 8 {
         "••••".to_string()
     } else {
-        format!("{}…{}", &key[..5], &key[key.len() - 4..])
+        let head: String = chars[..5].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{head}…{tail}")
     }
 }
 
 /// 从账户列表轮询取下一个账户：游标递增取模，多账户交替使用。
 ///
-/// 账户列表为空时返回 None，单账户时恒返回该账户。游标为进程级静态计数，
-/// 不同 AppState 实例（如测试）各自基于自己的列表取模，互不影响。
+/// 账户列表为空时返回 None，单账户时恒返回该账户。游标挂在 AppState 上，
+/// 每个实例（含测试）各自从 0 开始，互不影响。
 pub fn next_account(state: &crate::proxy::state::AppState) -> Option<Account> {
     let accounts = accounts_from_state(state);
     if accounts.is_empty() {
         return None;
     }
-    let idx = ROUND_ROBIN.fetch_add(1, Ordering::Relaxed) % accounts.len();
+    let idx =
+        state.round_robin.fetch_add(1, Ordering::Relaxed) % accounts.len();
     Some(accounts[idx].clone())
 }
-
-/// 进程级轮询游标（静态计数，递增取模即得账户下标）。
-static ROUND_ROBIN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// 用 API Key 调用上游 `/alpha/whoami` 验证有效性并取回账户身份（userId/userName）。
 ///

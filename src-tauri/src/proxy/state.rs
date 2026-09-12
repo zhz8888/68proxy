@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
@@ -98,6 +98,8 @@ pub struct AppState {
     pub cc_version: RwLock<String>,
     /// 连续超时计数，达到阈值后在超时错误中提示缩减上下文。
     pub consecutive_timeouts: AtomicU32,
+    /// CC 账户轮询游标：每个 AppState 实例独立，避免实例间（如测试）互相干扰。
+    pub round_robin: AtomicUsize,
     /// 进程内在途请求计数（业务路径，/health 不计），配合 max_inflight 做并发上限。
     pub inflight: AtomicU32,
     /// 代理服务是否正在监听。
@@ -131,6 +133,7 @@ impl AppState {
             }),
             cc_version: RwLock::new("0.32.3".into()),
             consecutive_timeouts: AtomicU32::new(0),
+            round_robin: AtomicUsize::new(0),
             inflight: AtomicU32::new(0),
             running: AtomicBool::new(false),
             started_at: Mutex::new(None),
