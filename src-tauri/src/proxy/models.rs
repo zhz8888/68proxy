@@ -96,7 +96,7 @@ fn legacy_table_exists(conn: &Connection) -> Result<bool, String> {
 
 /// 旧版合并表迁移：改名备份 → 建新表 → 逐行拆分写入 → 删除备份。
 ///
-/// 整个过程包在单个事务里，中途失败整体回滚，下次启动重试。
+/// 整个过程包在单个事务里，中途失败（含坏行解析失败）整体回滚、旧表保留，下次启动重试。
 fn migrate_legacy_if_needed(conn: &Connection) -> Result<(), String> {
     if !legacy_table_exists(conn)? {
         return Ok(());
@@ -133,15 +133,17 @@ fn migrate_legacy_if_needed(conn: &Connection) -> Result<(), String> {
     let now = now_secs();
     let mut migrated = 0usize;
     for (data, source) in rows {
-        let Ok(rec) = serde_json::from_str::<FullModelRecord>(&data) else {
-            log::warn(&format!(
-                "{} {} {}: 旧表行解析失败，已跳过",
-                i18n::pick("模型", "Model"),
-                i18n::pick("迁移", "migration"),
-                i18n::pick("数据解析失败", "failed to parse")
-            ));
-            continue;
-        };
+        // 任一行解析失败即整体失败并回滚：旧表迁移的语义是「全有或全无」，
+        // 若跳过坏行后仍删除旧表，这些模型/价格将永久丢失且无法重试
+        let rec = serde_json::from_str::<FullModelRecord>(&data).map_err(|e| {
+            format!(
+                "{}: {e}",
+                i18n::pick(
+                    "旧版模型表存在无法解析的行，迁移已中止（旧表保留，可稍后重试）",
+                    "A legacy model row could not be parsed; migration aborted (legacy table kept for retry)"
+                )
+            )
+        })?;
         let entry = entry_from_record(&rec);
         tx.execute(
             "INSERT OR REPLACE INTO models
@@ -644,6 +646,38 @@ mod tests {
             context_length: Some(1000),
             caps: ModelCaps { text: true, vision: false, reasoning: true },
         }
+    }
+
+    /// 旧表迁移遇到无法解析的行：整体中止并保留旧表，避免数据永久丢失。
+    #[test]
+    fn legacy_migration_aborts_and_keeps_table_on_bad_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 构造旧版合并表：model_pricing 带 data 列（触发迁移识别）
+        conn.execute_batch(
+            "CREATE TABLE model_pricing (id TEXT PRIMARY KEY, data TEXT NOT NULL, source TEXT NOT NULL);",
+        )
+        .unwrap();
+        let good = r#"{"id":"m-good","name":"Good","tiers":[]}"#;
+        conn.execute(
+            "INSERT INTO model_pricing (id, data, source) VALUES ('m-good', ?1, 'builtin')",
+            params![good],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO model_pricing (id, data, source) VALUES ('m-bad', 'not json', 'builtin')",
+            [],
+        )
+        .unwrap();
+
+        // 迁移应失败而非静默跳过坏行
+        assert!(init_models_on(&conn).is_err());
+        // 事务整体回滚：原 model_pricing 表（含 data 列与全部行）保留，可稍后重试
+        let legacy_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM model_pricing", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(legacy_rows, 2, "迁移中止后旧表数据应完整保留");
+        // 回滚后旧表仍是带 data 列的形态，下次启动会重新尝试迁移
+        assert!(legacy_table_exists(&conn).unwrap());
     }
 
     /// 快捷构造一个带单档费率的价格条目。
