@@ -207,7 +207,7 @@
     },
     "searchPlaceholder": "Search models…",
     "totalModels": "{{p0}} models",
-    "fallbackNotice": "Showing the built-in model list: no Command Code account added or the provider fetch failed. Add an account on the Accounts page, then refresh.",
+    "fallbackNotice": "Showing the cached model list: the provider fetch failed. Click Refresh to retry.",
     "currentPlan": "Current plan: ",
     "creditsUnlock": "· Pay-as-you-go credits ${{p0}} (unlocks all models)",
     "unavailableCount": "· {{p0}} models are unavailable on your current plan",

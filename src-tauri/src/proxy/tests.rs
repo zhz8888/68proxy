@@ -796,7 +796,7 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
                 axum::response::Response::builder()
                     .header("Content-Type", "application/json")
                     .body(axum::body::Body::from(
-                        r#"{"data":[{"id":"mock-model-1","object":"model"}]}"#,
+                        r#"{"data":[{"id":"mock-model-1","object":"model","name":"Mock Model 1","context_length":1000,"owned_by":"command-code"}]}"#,
                     ))
                     .unwrap()
             }),
@@ -1574,7 +1574,7 @@ fn build_openai_response_variants() {
 
 /// 计数 mock：whoami/subscriptions/credits/summary 四端点 + 命中计数。
 async fn spawn_billing_mock(counter: Arc<std::sync::atomic::AtomicUsize>) -> String {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use axum::Json;
     let whoami = Json(json!({
         "success": true,
@@ -1752,7 +1752,7 @@ async fn plan_context_fetch_flow_and_failure() {
     assert!(acc.allowed);
 }
 
-/// Provider 动态模型拉取成功路径与无 key 回退内置表。
+/// Provider 端点拉取成功路径与拉取失败回退。
 #[tokio::test]
 async fn fetch_models_provider_and_fallback() {
     let captured: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
@@ -1761,14 +1761,14 @@ async fn fetch_models_provider_and_fallback() {
     tokio::spawn(async move { let _ = axum::serve(mock, mock_upstream(Some(captured))).await; });
     let state = plain_state(&format!("http://{addr}"));
 
-    // 带 key 走 Provider API
-    let (models, is_fallback) = super::cc_client::fetch_models(&state, Some("user_k")).await;
+    // 走 Provider 端点（公开接口，无需 key）
+    let (models, is_fallback) = super::cc_client::fetch_models(&state).await;
     assert!(!is_fallback);
     assert!(models.iter().any(|m| m.id == "mock-model-1"));
 
-    // 无 key 直接回退内置表（用全新 state，避免命中上一步的模型缓存）
-    let fresh = plain_state(&format!("http://{addr}"));
-    let (fallback, is_fallback2) = super::cc_client::fetch_models(&fresh, None).await;
+    // 端点不可达时回退（用全新 state，避免命中上一步的模型缓存）
+    let fresh = plain_state("http://127.0.0.1:9");
+    let (fallback, is_fallback2) = super::cc_client::fetch_models(&fresh).await;
     assert!(is_fallback2);
     assert!(fallback.len() >= 60);
 }
@@ -1821,11 +1821,6 @@ async fn verify_account_key_variants() {
         plain_state(&format!("http://{addr}"))
     }
 
-    async fn run_verify(status: u16, body: &'static str) -> Result<(String, String), String> {
-        let st = spawn_with(status, body).await;
-        crate::credentials::verify_account_key(&st.client(), &format!("http://localhost:1{}", ""), "user_k")
-            .await
-    }
     let ok = spawn_with(200, r#"{"user":{"id":"id_1","userName":"N"}}"#).await;
     let (uid, name) =
         crate::credentials::verify_account_key(&ok.client(), &ok.config.read().unwrap().api_base, "user_k").await.unwrap();
@@ -2061,11 +2056,11 @@ async fn fetch_models_bad_provider_response_falls_back() {
         plain_state(&format!("http://{addr}"))
     }
     let bad = spawn_with("not json").await;
-    let (models, fallback) = super::cc_client::fetch_models(&bad, Some("user_k")).await;
+    let (models, fallback) = super::cc_client::fetch_models(&bad).await;
     assert!(fallback);
     assert!(models.len() >= 60);
     let empty = spawn_with(r#"{"data":[]}"#).await;
-    let (models2, fallback2) = super::cc_client::fetch_models(&empty, Some("user_k")).await;
+    let (models2, fallback2) = super::cc_client::fetch_models(&empty).await;
     assert!(fallback2);
     assert!(models2.len() >= 60);
 }
@@ -2277,17 +2272,11 @@ fn readonly_connection_write_errors_are_mapped() {
     // models：只读 upsert → 写入失败映射为错误码
     let m = super::pricing::ModelPricing {
         id: "ro-model".into(),
-        name: String::new(),
-        category: "premium".into(),
-        provider: None,
-        context_window: None,
-        caps: super::pricing::ModelCaps { text: true, vision: false, reasoning: false },
-        deprecated: false,
         deal: None,
         time_of_day: None,
         tiers: vec![],
     };
-    assert!(super::models::upsert_models(&conn, &[m], "manual").is_err());
+    assert!(super::models::upsert_pricing(&conn, &[m], "manual").is_err());
 
     // usage：只读记录 → 错误映射
     let entry = super::usage::UsageEntry {

@@ -314,7 +314,8 @@ fn auth_login_cancel(app: AppHandle) -> Result<(), String> {
 }
 
 /// 获取可用模型列表。`force` 为 true 时先清空缓存再向上游拉取；
-/// 返回 `{ data: 模型列表, fallback: 是否使用兜底列表 }`。
+/// 返回 `{ data: 模型列表, fallback: 是否为兜底列表 }`。
+/// 拉取成功后整表落库（models 表），失败时回退数据库缓存 / 内置表。
 #[tauri::command]
 async fn models_get(app: AppHandle, force: bool) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
@@ -324,15 +325,11 @@ async fn models_get(app: AppHandle, force: bool) -> Result<Value, String> {
             fetched_at: 0,
         };
     }
-    let account_key = credentials::accounts_from_state(&ctx.proxy_state)
-        .first()
-        .map(|a| a.key.clone());
-    let (list, fallback) = proxy::cc_client::fetch_models(&ctx.proxy_state, account_key.as_deref())
-        .await;
+    let (list, fallback) = proxy::cc_client::fetch_models(&ctx.proxy_state).await;
     Ok(json!({ "data": list, "fallback": fallback }))
 }
 
-/// 获取当前生效的模型计费表（含能力、折扣、免费与闲/忙时信息），供前端模型页展示。
+/// 获取当前生效的模型价格表（促销、分档费率与闲/忙时信息），供前端模型页展示。
 ///
 /// 数据源为 SQLite `model_pricing` 表（首次启动由内置表播种，见 models 模块）。
 #[tauri::command]
@@ -340,8 +337,8 @@ fn models_catalog() -> Value {
     proxy::pricing::catalog_json()
 }
 
-/// 覆盖写入模型信息（数据更新用）：按模型 ID UPSERT 落库并刷新运行时注册表，
-/// 使名称/能力/价目等更新无需重新发版；未提及的旧模型保留，同 ID 的旧数据被覆盖。
+/// 覆盖写入模型价格（数据更新用）：按模型 ID UPSERT 落库并刷新运行时注册表，
+/// 使价目/促销/闲忙时更新无需重新发版；未提及的旧模型保留，同 ID 的旧数据被覆盖。
 #[tauri::command]
 fn models_catalog_update(
     app: AppHandle,
@@ -352,13 +349,13 @@ fn models_catalog_update(
     let (updated, all) = {
         let guard = ctx.proxy_state.usage.lock().unwrap();
         let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
-        let n = proxy::models::upsert_models(conn, &models, source.as_deref().unwrap_or("manual"))?;
-        (n, proxy::models::load_all(conn))
+        let n = proxy::models::upsert_pricing(conn, &models, source.as_deref().unwrap_or("manual"))?;
+        (n, proxy::models::load_pricing(conn))
     };
     proxy::pricing::set_models(all);
     proxy::log::info(&format!(
         "{} {updated}",
-        i18n::pick("模型信息已更新", "Model info updated:")
+        i18n::pick("模型价格已更新", "Model pricing updated:")
     ));
     Ok(json!({ "updated": updated }))
 }

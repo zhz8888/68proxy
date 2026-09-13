@@ -1692,17 +1692,14 @@ fn parse_ndjson_line(
 
 // ── 其他路由 ──────────────────────────────────────────
 
-/// GET /v1/models：返回模型列表（OpenAI list 格式），用第一个 Command Code 账户拉取；
-/// 无账户或拉取失败时回退硬编码列表。
+/// GET /v1/models：返回模型列表（OpenAI list 格式），从 Provider 端点拉取
+/// （带缓存与本地回退）。
 async fn models(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
     let _ = headers;
-    let account_key = crate::credentials::accounts_from_state(&st)
-        .first()
-        .map(|a| a.key.clone());
-    let (list, _) = cc_client::fetch_models(&st, account_key.as_deref()).await;
+    let (list, _) = cc_client::fetch_models(&st).await;
     Json(json!({
         "object": "list",
         "data": list

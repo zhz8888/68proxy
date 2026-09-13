@@ -535,7 +535,7 @@ mod tests {
     /// validate 的全部非法分支：字段值逐一越界时应返回对应错误码。
     #[test]
     fn validate_rejects_each_invalid_field() {
-        let mut c = Config::default();
+        let c = Config::default();
         c.validate().unwrap(); // 默认配置合法
         let cases: &[(&str, fn(&mut Config))] = &[
             ("config_invalid_port", |c: &mut Config| c.port = 0),

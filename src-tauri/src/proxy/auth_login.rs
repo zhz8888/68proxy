@@ -551,7 +551,7 @@ mod flow_tests {
     #[tokio::test]
     async fn cancel_clears_session_and_page() {
         let _serial = SERIAL.lock().await;
-        let (st, port, _token) = started().await;
+        let (st, _port, _token) = started().await;
         cancel_auth_login(&st);
         // 会话被清空：poll 回 idle（loopback 服务器的优雅停机在测试环境的
         // current_thread runtime 下不停止 accept，故不断言端口不可达）

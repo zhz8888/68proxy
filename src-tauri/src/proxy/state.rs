@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -52,13 +52,23 @@ pub struct AccountBinding {
     pub bound_at: u64,
 }
 
-/// 对外暴露的模型条目（/v1/models 展示用）。
-#[derive(Debug, Clone, Serialize)]
+/// 对外暴露的模型条目（模型列表页与 /v1/models 展示用）。
+///
+/// 数据来源为 `models` 表（内置列表文件播种 / Provider 端点同步），价格信息见
+/// `model_pricing` 表，两者按模型 ID 关联。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
-    /// 模型 ID（请求时使用的名称）。
+    /// 模型 ID（请求时使用的名称，如 `tencent/hy3-paid`）。
     pub id: String,
     /// 模型展示名。
     pub name: String,
+    /// 厂商显示名（由 ID 前缀推导或内置表补齐）。
+    pub provider: Option<String>,
+    /// 上下文长度（token）。
+    pub context_length: Option<u64>,
+    /// 能力标记（文本 / 视觉 / 思考）。
+    pub caps: super::pricing::ModelCaps,
 }
 
 /// 模型列表缓存（避免每次 /v1/models 都请求 Provider API）。

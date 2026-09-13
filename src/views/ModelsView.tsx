@@ -42,6 +42,13 @@ function tierLabel(low: number, high: number | null): string {
   return `${formatContextTokens(low)}–${formatContextTokens(high)}`;
 }
 
+/** 卡片上展示的模型 ID：厂商已知（有厂商标识）时省略 ID 的厂商前缀段，归属由厂商标表达；完整 ID 仍通过复制与悬停提示获取。 */
+function displayId(id: string, provider?: string | null): string {
+  if (!provider) return id;
+  const slash = id.indexOf("/");
+  return slash > 0 && slash < id.length - 1 ? id.slice(slash + 1) : id;
+}
+
 /** 卡片价格区：单档一行；闲/忙时各一行；分档模型每档一行（同价档位已合并）。 */
 function PriceLines({ pricing, free }: { pricing?: ModelPricing; free: boolean }) {
   const { t } = useTranslation();
@@ -197,8 +204,8 @@ export function ModelsView() {
 
   const counts = useMemo(
     () => ({
-      vision: rows.filter((r) => r.pricing?.caps.vision).length,
-      reasoning: rows.filter((r) => r.pricing?.caps.reasoning).length,
+      vision: rows.filter((r) => r.model.caps?.vision).length,
+      reasoning: rows.filter((r) => r.model.caps?.reasoning).length,
       free: rows.filter((r) => r.pricing?.deal?.free).length,
       unavailable: rows.filter((r) => r.access?.allowed === false).length,
     }),
@@ -213,9 +220,9 @@ export function ModelsView() {
       }
       switch (filter) {
         case "vision":
-          return !!pricing?.caps.vision;
+          return !!model.caps?.vision;
         case "reasoning":
-          return !!pricing?.caps.reasoning;
+          return !!model.caps?.reasoning;
         case "free":
           return !!pricing?.deal?.free;
         case "unavailable":
@@ -333,7 +340,7 @@ export function ModelsView() {
       ) : (
         <div className="grid grid-cols-3 gap-3 overflow-y-auto pb-4 pr-1">
           {filtered.map(({ model: m, pricing, access: acc }) => {
-            const provider = pricing?.provider ?? providerForModel(m.id);
+            const provider = m.provider ?? providerForModel(m.id);
             const free = !!pricing?.deal?.free;
             const discount = pricing?.deal && !free ? pricing.deal.discountPercent : 0;
             const unavailable = acc?.allowed === false;
@@ -355,7 +362,7 @@ export function ModelsView() {
                   <ModelLogo model={m.id} size={22} />
                   <div className="min-w-0 flex-1">
                     <p className="select-text truncate font-mono text-xs" title={m.id}>
-                      {m.id}
+                      {displayId(m.id, m.provider ?? providerForModel(m.id))}
                     </p>
                     <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                       {provider && (
@@ -397,13 +404,13 @@ export function ModelsView() {
                       -{discount}%
                     </Badge>
                   )}
-                  {pricing?.caps.vision && (
+                  {m.caps?.vision && (
                     <Badge variant="outline" className="shrink-0 gap-0.5 px-1.5 py-0 text-2xs">
                       <Eye className="h-2.5 w-2.5" />
                       {t("models.caps.vision")}
                     </Badge>
                   )}
-                  {pricing?.caps.reasoning && (
+                  {m.caps?.reasoning && (
                     <Badge variant="outline" className="shrink-0 gap-0.5 px-1.5 py-0 text-2xs">
                       <Sparkles className="h-2.5 w-2.5" />
                       {t("models.caps.reasoning")}
@@ -414,10 +421,10 @@ export function ModelsView() {
                 {/* 价格概览：闲/忙时或多档模型分行展示，右侧保留上下文规模 */}
                 <div className="flex items-center justify-between gap-2 text-2xs text-muted-foreground">
                   <PriceLines pricing={pricing} free={free} />
-                  {pricing?.contextWindow && (
+                  {m.contextLength != null && (
                     <span className="shrink-0">
                       {t("models.contextTokens", {
-                        p0: formatContextTokens(pricing.contextWindow),
+                        p0: formatContextTokens(m.contextLength),
                       })}
                     </span>
                   )}

@@ -207,7 +207,7 @@
     },
     "searchPlaceholder": "搜索模型…",
     "totalModels": "共 {{p0}} 个模型",
-    "fallbackNotice": "当前显示内置模型列表：未添加 Command Code 账户或 Provider 拉取失败。可在「账户管理」页添加账户后刷新。",
+    "fallbackNotice": "当前显示本地缓存的模型列表：Provider 拉取失败。可点击「刷新」重试。",
     "currentPlan": "当前套餐：",
     "creditsUnlock": "· 按量额度 ${{p0}}（可解锁全部模型）",
     "unavailableCount": "· 有 {{p0}} 个模型当前套餐不可用",

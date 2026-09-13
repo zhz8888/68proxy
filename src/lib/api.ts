@@ -73,10 +73,16 @@ export interface LogEntry {
   msg: string;
 }
 
-/** 模型条目：id 为调用时使用的模型名，name 为展示名。 */
+/** 模型列表条目（models 表）：id 为调用时使用的模型名，其余为展示与归属信息。 */
 export interface ModelInfo {
   id: string;
   name: string;
+  /** 厂商显示名；缺失时前端可按 ID 前缀推断。 */
+  provider?: string;
+  /** 上下文长度（token）。 */
+  contextLength?: number;
+  /** 能力标记；未收录模型可能缺失。 */
+  caps?: ModelCaps;
 }
 
 /** 一次中继请求的摘要信息（路径、模型、状态、耗时与 token 用量等）。 */
@@ -214,15 +220,9 @@ export interface ModelDeal {
   endsWhen?: string;
 }
 
-/** 内置计费表中的单个模型（含能力、分档价格、折扣与闲忙时）。 */
+/** 模型价格条目（model_pricing 表）：促销、分档费率与闲/忙时，按模型 ID 与列表关联。 */
 export interface ModelPricing {
   id: string;
-  name: string;
-  category: string;
-  provider?: string;
-  contextWindow?: number;
-  caps: ModelCaps;
-  deprecated?: boolean;
   deal?: ModelDeal;
   timeOfDay?: ModelTimeOfDay;
   tiers: ModelTier[];

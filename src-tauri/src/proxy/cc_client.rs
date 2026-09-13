@@ -8,17 +8,6 @@ use super::fingerprint;
 use super::log;
 use super::state::{now_millis, AppState, KeyState, ModelInfo, SessionEntry};
 
-/// 兜底模型回退列表（动态拉取失败时使用），按当前生效的模型表推导，
-/// 保证与模型清单一致（数据来自 SQLite，未落库时回退内置表）。
-pub fn hardcoded_models() -> Vec<ModelInfo> {
-    super::pricing::all_models()
-        .iter()
-        .map(|m| ModelInfo {
-            id: m.id.clone(),
-            name: if m.name.is_empty() { m.id.clone() } else { m.name.clone() },
-        })
-        .collect()
-}
 
 /// 生成 W3C traceparent 头（`00-{32位trace}-{16位parent}-01`），模拟 CLI 的链路追踪。
 pub fn generate_traceparent() -> String {
@@ -368,10 +357,11 @@ pub(crate) async fn refresh_cc_version_from(state: &AppState, url: &str) {
     ));
 }
 
-/// 模型列表：Provider API 动态拉取（按配置间隔缓存），失败回退硬编码列表。
+/// 模型列表：Provider 端点动态拉取（公开接口，按配置间隔缓存），成功后整表落库；
+/// 失败时回退数据库缓存的列表，再回退内置表。
 ///
-/// 返回 `(模型列表, 是否为硬编码回退)`；缓存未过期时直接命中缓存不发请求。
-pub async fn fetch_models(state: &AppState, api_key: Option<&str>) -> (Vec<ModelInfo>, bool) {
+/// 返回 `(模型列表, 是否为兜底列表)`；缓存未过期时直接命中缓存不发请求。
+pub async fn fetch_models(state: &AppState) -> (Vec<ModelInfo>, bool) {
     let cfg = state.config.read().unwrap().clone();
     let now = now_millis();
     // 缓存非空且未过期时直接命中；用独立块提前释放读锁，避免后续写缓存时死锁
@@ -382,67 +372,71 @@ pub async fn fetch_models(state: &AppState, api_key: Option<&str>) -> (Vec<Model
         }
     }
 
-    if let Some(key) = api_key {
-        if cfg.use_provider_models {
-            let url = format!("{}/provider/v1/models", cfg.api_base);
-            let headers = base_headers(state, key);
-            match tokio::time::timeout(Duration::from_secs(10), async {
-                state.client().get(&url).headers(headers).send().await
-            })
-            .await
-            {
-                Ok(Ok(r)) if r.status().is_success() => {
-                    if let Ok(data) = r.json::<Value>().await {
-                        if let Some(arr) = data.get("data").and_then(|d| d.as_array()) {
-                            let models: Vec<ModelInfo> = arr
-                                .iter()
+    if cfg.use_provider_models {
+        // 公开端点，无需鉴权
+        let url = format!("{}/provider/v1/models", cfg.api_base);
+        let resp =
+            tokio::time::timeout(Duration::from_secs(10), state.client().get(&url).send()).await;
+        match resp {
+            Ok(Ok(r)) if r.status().is_success() => {
+                let entries = match r.json::<Value>().await {
+                    Ok(data) => data
+                        .get("data")
+                        .and_then(|d| d.as_array())
+                        .map(|arr| {
+                            arr.iter()
                                 .filter_map(|m| {
-                                    let id = m.get("id").and_then(|v| v.as_str())?;
-                                    Some(ModelInfo {
-                                        id: id.to_string(),
-                                        name: id.to_string(),
-                                    })
+                                    serde_json::from_value::<super::models::RemoteModel>(m.clone())
+                                        .ok()
                                 })
-                                .collect();
-                            if !models.is_empty() {
-                                *state.models.write().unwrap() = super::state::ModelsCache {
-                                    models: models.clone(),
-                                    fetched_at: now,
-                                };
-                                log::info(&format!(
-                                    "{} {}",
-                                    crate::i18n::pick("已从 Provider API 拉取模型数：", "Fetched models from Provider API:"),
-                                    models.len()
-                                ));
-                                return (models, false);
-                            }
-                        }
+                                .map(super::models::enrich_remote)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    Err(e) => {
+                        log::warn(&format!(
+                            "{}: {e}",
+                            crate::i18n::pick("Provider 模型响应解析出错", "Provider models response parse error")
+                        ));
+                        Vec::new()
                     }
+                };
+                if !entries.is_empty() {
+                    *state.models.write().unwrap() = super::state::ModelsCache {
+                        models: entries.clone(),
+                        fetched_at: now,
+                    };
+                    super::models::persist_models_for(state, &entries);
+                    log::info(&format!(
+                        "{} {}",
+                        crate::i18n::pick("已从 Provider API 拉取模型数：", "Fetched models from Provider API:"),
+                        entries.len()
+                    ));
+                    return (entries, false);
                 }
-                Ok(Ok(r)) => log::warn(&format!(
-                    "{}: {}",
-                    crate::i18n::pick("Provider 模型拉取失败", "Provider models fetch failed"),
-                    r.status()
-                )),
-                Ok(Err(e)) => log::warn(&format!(
-                    "{}: {e}",
-                    crate::i18n::pick("Provider 模型拉取出错", "Provider models fetch error")
-                )),
-                Err(_) => log::warn(crate::i18n::pick("Provider 模型拉取超时", "Provider models fetch timeout")),
+                log::warn(crate::i18n::pick(
+                    "Provider 模型列表为空",
+                    "Provider model list is empty",
+                ));
             }
+            Ok(Ok(r)) => log::warn(&format!(
+                "{}: {}",
+                crate::i18n::pick("Provider 模型拉取失败", "Provider models fetch failed"),
+                r.status()
+            )),
+            Ok(Err(e)) => log::warn(&format!(
+                "{}: {e}",
+                crate::i18n::pick("Provider 模型拉取出错", "Provider models fetch error")
+            )),
+            Err(_) => log::warn(crate::i18n::pick("Provider 模型拉取超时", "Provider models fetch timeout")),
         }
-    } else if cfg.use_provider_models {
-        log::info(crate::i18n::pick(
-            "未提供 API Key，使用内置模型列表",
-            "No API key provided; using the built-in model list",
-        ));
     }
 
     log::warn(crate::i18n::pick(
-        "Provider 模型拉取失败，使用内置模型列表",
-        "Provider models fetch failed, using hardcoded list",
+        "模型列表未从 Provider 拉取成功，回退数据库缓存的列表",
+        "Model list not fetched from provider; falling back to the cached list",
     ));
-    (hardcoded_models(), true)
+    (super::models::load_models_for(state), true)
 }
 
 #[cfg(test)]
