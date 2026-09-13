@@ -1796,8 +1796,8 @@ async fn plan_context_fetch_flow_and_failure() {
     assert!(!ctx.fetch_failed);
     assert_eq!(ctx.plan_id.as_deref(), Some("individual-pro"));
     assert_eq!(ctx.plan_name, "Pro");
-    assert_eq!(ctx.purchased_credits, 5);
-    assert_eq!(ctx.free_credits, 2);
+    assert_eq!(ctx.purchased_credits, 5.0);
+    assert_eq!(ctx.free_credits, 2.0);
 
     // 上游不可达 → fetch_failed 放行
     let bad = plain_state("http://127.0.0.1:1");

@@ -37,10 +37,10 @@ pub struct PlanContext {
     pub plan_id: Option<String>,
     /// 套餐展示名（如 Go / GOAT / Pro / Max）；无套餐时为空字符串（前端按当前语言显示「无订阅」）。
     pub plan_name: String,
-    /// 已购买按量额度（美元）。
-    pub purchased_credits: u64,
-    /// 赠送额度（美元）。
-    pub free_credits: u64,
+    /// 已购买按量额度（美元，可能为小数）。
+    pub purchased_credits: f64,
+    /// 赠送额度（美元，可能为小数）。
+    pub free_credits: f64,
     /// 是否拉取失败（失败时不做任何限制）。
     pub fetch_failed: bool,
     /// 附加说明：不展示给用户的内部原因码（如 `plan_fetch_failed` / `no_account`），空串表示无。
@@ -54,8 +54,8 @@ impl PlanContext {
             plan_id: None,
             // 空串作为「无订阅」哨兵：文案由前端按当前语言渲染
             plan_name: String::new(),
-            purchased_credits: 0,
-            free_credits: 0,
+            purchased_credits: 0.0,
+            free_credits: 0.0,
             fetch_failed: true,
             note: reason.into(),
         }
@@ -310,7 +310,7 @@ pub fn evaluate_access(model_id: &str, ctx: &PlanContext) -> AccessInfo {
         return AccessInfo::allowed();
     }
     // 1. 按量额度可解锁套餐外模型
-    if ctx.purchased_credits > 0 || ctx.free_credits > 0 {
+    if ctx.purchased_credits > 0.0 || ctx.free_credits > 0.0 {
         return AccessInfo::allowed();
     }
     // 2. 无有效套餐 / 未知套餐：不限制
@@ -396,11 +396,13 @@ pub async fn fetch_plan_context(state: &AppState, api_key: &str) -> PlanContext 
 
     // 额度：credits.purchasedCredits / credits.freeCredits（兼容包在 data 下的写法）
     let credits_obj = credits.as_ref().and_then(|v| v.get("credits").or_else(|| v.pointer("/data/credits")));
-    let read_credits = |key: &str| -> u64 {
+    // 这两个字段是美元金额，上游可能返回小数（如 4.5）；用 as_u64 读会把小数静默当 0，
+    // 导致「按量额度解锁」判定失败、把本来可用的高级模型误标为不可用
+    let read_credits = |key: &str| -> f64 {
         credits_obj
             .and_then(|c| c.get(key))
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0)
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0)
     };
     let purchased = read_credits("purchasedCredits");
     let free = read_credits("freeCredits");
@@ -472,7 +474,7 @@ mod tests {
     use super::*;
 
     /// 快捷构造套餐上下文（订阅名 + 购买/赠送额度）。
-    fn ctx(plan: Option<&str>, purchased: u64, free: u64) -> PlanContext {
+    fn ctx(plan: Option<&str>, purchased: f64, free: f64) -> PlanContext {
         PlanContext {
             plan_id: plan.map(|s| s.to_string()),
             plan_name: plan.map(plan_display_name).unwrap_or_else(|| "无订阅".into()),
@@ -510,7 +512,7 @@ mod tests {
     /// Go 套餐：仅开源池可用，premium 提示 Provider，屏敝模型提示 GOAT。
     #[test]
     fn go_plan_only_opensource_and_blocklist() {
-        let c = ctx(Some("individual-go"), 0, 0);
+        let c = ctx(Some("individual-go"), 0.0, 0.0);
         // premium 不可用，提示最低套餐
         let opus = evaluate_access("claude-opus-4-8", &c);
         assert!(!opus.allowed);
@@ -526,27 +528,27 @@ mod tests {
     /// Pro 套餐：放开除顶级（opus/gpt-6）外的模型；Max 无屏蔽。
     #[test]
     fn pro_plan_blocks_top_tier() {
-        let c = ctx(Some("individual-pro"), 0, 0);
+        let c = ctx(Some("individual-pro"), 0.0, 0.0);
         assert!(evaluate_access("claude-sonnet-4-6", &c).allowed);
         assert!(evaluate_access("gpt-5.5", &c).allowed);
         assert!(!evaluate_access("claude-opus-4-8", &c).allowed);
         assert!(!evaluate_access("gpt-6-astra", &c).allowed);
         // max 及以上无屏蔽
-        let max = ctx(Some("individual-max"), 0, 0);
+        let max = ctx(Some("individual-max"), 0.0, 0.0);
         assert!(evaluate_access("claude-opus-4-8", &max).allowed);
     }
 
     /// 有额度（购买/赠送）即全放开；无套餐/未知套餐/拉取失败一律放行。
     #[test]
     fn credits_unlock_everything_and_unknown_plan_is_permissive() {
-        let paid = ctx(Some("individual-go"), 5, 0);
+        let paid = ctx(Some("individual-go"), 5.0, 0.0);
         assert!(evaluate_access("claude-opus-4-8", &paid).allowed);
-        let free = ctx(Some("individual-go"), 0, 10);
+        let free = ctx(Some("individual-go"), 0.0, 10.0);
         assert!(evaluate_access("claude-opus-4-8", &free).allowed);
         // 无套餐 / 未知套餐 / 拉取失败：一律放行
-        assert!(evaluate_access("claude-opus-4-8", &ctx(None, 0, 0)).allowed);
-        assert!(evaluate_access("claude-opus-4-8", &ctx(Some("weird-plan"), 0, 0)).allowed);
-        let mut failed = ctx(Some("individual-go"), 0, 0);
+        assert!(evaluate_access("claude-opus-4-8", &ctx(None, 0.0, 0.0)).allowed);
+        assert!(evaluate_access("claude-opus-4-8", &ctx(Some("weird-plan"), 0.0, 0.0)).allowed);
+        let mut failed = ctx(Some("individual-go"), 0.0, 0.0);
         failed.fetch_failed = true;
         assert!(evaluate_access("claude-opus-4-8", &failed).allowed);
     }
@@ -554,11 +556,20 @@ mod tests {
     /// 套餐状态 JSON 的结构：套餐信息 + 各模型准入结论。
     #[test]
     fn plan_status_json_shape() {
-        let v = plan_status_json(&ctx(Some("individual-go"), 0, 0));
+        let v = plan_status_json(&ctx(Some("individual-go"), 0.0, 0.0));
         assert_eq!(v["plan"]["plan_name"], "Go");
         assert!(v["access"].is_object());
         // 计费表中的模型都应给出准入结论
         assert!(v["access"].get("claude-opus-4-8").is_some());
         assert_eq!(v["access"]["claude-opus-4-8"]["allowed"], false);
+    }
+
+    /// 小数金额的按量额度同样解锁：上游金额为浮点时不能读成 0 而误判不可用。
+    #[test]
+    fn fractional_credits_unlock_models() {
+        let tiny = ctx(Some("individual-go"), 4.5, 0.0);
+        assert!(evaluate_access("claude-opus-4-8", &tiny).allowed);
+        let tiny_free = ctx(Some("individual-go"), 0.0, 0.25);
+        assert!(evaluate_access("claude-opus-4-8", &tiny_free).allowed);
     }
 }
