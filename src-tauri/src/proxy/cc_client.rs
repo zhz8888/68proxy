@@ -118,7 +118,10 @@ fn ensure_session(state: &AppState, user_id: &str) -> String {
     );
     // user_id 来自上游 whoami，可能是任意字符串：按字符截断避免字节切片落在字符中间 panic
     let short_id: String = user_id.chars().take(8).collect();
-    log::info(&format!("Session created for user {short_id}"));
+    log::info(&format!(
+            "{} {short_id}",
+            crate::i18n::pick("会话已创建，用户：", "Session created for user")
+        ));
     session_id
 }
 
@@ -137,7 +140,7 @@ fn get_or_create_key_state(state: &AppState, user_id: &str) -> KeyState {
         .and_then(|p| fingerprint::load_store(p).remove(&id))
     {
         Some(fp) => {
-            log::info("Fingerprint restored for user");
+            log::info(crate::i18n::pick("已从磁盘恢复账户指纹", "Fingerprint restored for user"));
             fp
         }
         None => {
@@ -153,7 +156,7 @@ fn get_or_create_key_state(state: &AppState, user_id: &str) -> KeyState {
                     ));
                 }
             }
-            log::info("Fingerprint generated for user");
+            log::info(crate::i18n::pick("已为账户生成新指纹", "Fingerprint generated for user"));
             fp
         }
     };
@@ -219,10 +222,20 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str, user_id: &str) 
             })
             .await;
             match res {
-                Ok(Ok(r)) if r.status().is_success() => log::info("Fingerprint/lifecycle event sent"),
-                Ok(Ok(r)) => log::warn(&format!("Command Code pre-request failed: {}", r.status())),
-                Ok(Err(e)) => log::warn(&format!("Command Code pre-request error: {e}")),
-                Err(_) => log::warn("Command Code pre-request timeout"),
+                Ok(Ok(r)) if r.status().is_success() => log::info(crate::i18n::pick(
+                    "指纹/生命周期预请求已发送",
+                    "Fingerprint/lifecycle event sent",
+                )),
+                Ok(Ok(r)) => log::warn(&format!(
+                    "{}: {}",
+                    crate::i18n::pick("Command Code 预请求失败", "Command Code pre-request failed"),
+                    r.status()
+                )),
+                Ok(Err(e)) => log::warn(&format!(
+                    "{}: {e}",
+                    crate::i18n::pick("Command Code 预请求出错", "Command Code pre-request error")
+                )),
+                Err(_) => log::warn(crate::i18n::pick("Command Code 预请求超时", "Command Code pre-request timeout")),
             }
         }
     };
@@ -243,7 +256,10 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str, user_id: &str) 
         .unwrap()
         .get_mut(user_id)
         .map(|s| s.next_init_at = next_at);
-    log::info("Fingerprint/lifecycle next refresh scheduled");
+    log::info(crate::i18n::pick(
+        "指纹/生命周期预请求已排定下次刷新",
+        "Fingerprint/lifecycle next refresh scheduled",
+    ));
 }
 
 /// 构造 Command Code 上游公共请求头：JSON 内容类型、CLI 环境标识、Bearer 鉴权与 CLI 版本号。
@@ -327,16 +343,29 @@ pub(crate) async fn refresh_cc_version_from(state: &AppState, url: &str) {
             if let Ok(pkg) = r.json::<Value>().await {
                 if let Some(v) = pkg.get("version").and_then(|v| v.as_str()) {
                     *state.cc_version.write().unwrap() = v.to_string();
-                    log::info(&format!("Command Code version refreshed from npm: {v}"));
+                    log::info(&format!(
+                    "{} {v}",
+                    crate::i18n::pick("已从 npm 刷新 Command Code 版本：", "Command Code version refreshed from npm:")
+                ));
                     return;
                 }
             }
         }
-        Ok(Ok(r)) => log::warn(&format!("Command Code version fetch failed: {}", r.status())),
-        Ok(Err(e)) => log::warn(&format!("Command Code version fetch error: {e}")),
-        Err(_) => log::warn("Command Code version fetch timeout"),
+        Ok(Ok(r)) => log::warn(&format!(
+                    "{}: {}",
+                    crate::i18n::pick("Command Code 版本获取失败", "Command Code version fetch failed"),
+                    r.status()
+                )),
+        Ok(Err(e)) => log::warn(&format!(
+                    "{}: {e}",
+                    crate::i18n::pick("Command Code 版本获取出错", "Command Code version fetch error")
+                )),
+        Err(_) => log::warn(crate::i18n::pick("Command Code 版本获取超时", "Command Code version fetch timeout")),
     }
-    log::warn("Command Code version fetch failed, using current");
+    log::warn(crate::i18n::pick(
+        "Command Code 版本获取失败，沿用当前值",
+        "Command Code version fetch failed, using current",
+    ));
 }
 
 /// 模型列表：Provider API 动态拉取（按配置间隔缓存），失败回退硬编码列表。
@@ -380,15 +409,26 @@ pub async fn fetch_models(state: &AppState, api_key: Option<&str>) -> (Vec<Model
                                     models: models.clone(),
                                     fetched_at: now,
                                 };
-                                log::info(&format!("Fetched {} models from Provider API", models.len()));
+                                log::info(&format!(
+                                    "{} {}",
+                                    crate::i18n::pick("已从 Provider API 拉取模型数：", "Fetched models from Provider API:"),
+                                    models.len()
+                                ));
                                 return (models, false);
                             }
                         }
                     }
                 }
-                Ok(Ok(r)) => log::warn(&format!("Provider models fetch failed: {}", r.status())),
-                Ok(Err(e)) => log::warn(&format!("Provider models fetch error: {e}")),
-                Err(_) => log::warn("Provider models fetch timeout"),
+                Ok(Ok(r)) => log::warn(&format!(
+                    "{}: {}",
+                    crate::i18n::pick("Provider 模型拉取失败", "Provider models fetch failed"),
+                    r.status()
+                )),
+                Ok(Err(e)) => log::warn(&format!(
+                    "{}: {e}",
+                    crate::i18n::pick("Provider 模型拉取出错", "Provider models fetch error")
+                )),
+                Err(_) => log::warn(crate::i18n::pick("Provider 模型拉取超时", "Provider models fetch timeout")),
             }
         }
     } else if cfg.use_provider_models {
@@ -398,7 +438,10 @@ pub async fn fetch_models(state: &AppState, api_key: Option<&str>) -> (Vec<Model
         ));
     }
 
-    log::warn("Provider models fetch failed, using hardcoded list");
+    log::warn(crate::i18n::pick(
+        "Provider 模型拉取失败，使用内置模型列表",
+        "Provider models fetch failed, using hardcoded list",
+    ));
     (hardcoded_models(), true)
 }
 
