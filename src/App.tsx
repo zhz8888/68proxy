@@ -174,12 +174,12 @@ function App() {
             <p className="font-mono text-2xs leading-relaxed text-muted-foreground">
               Develop by 6ix8ight
               <br />
-              fork by zhz8888
+              Fork by zhz8888
               {/* 版本号独占一行；浏览器调试环境无版本信息时整行省略，避免留下空行 */}
               {version && (
                 <>
                   <br />
-                  {`V${version}`}
+                  {`v${version}`}
                 </>
               )}
             </p>

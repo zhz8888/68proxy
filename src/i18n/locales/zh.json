@@ -170,7 +170,7 @@
     "cachedTokens": "缓存 Tokens",
     "outputTokens": "输出 Tokens",
     "estimatedCost": "估算成本",
-    "estimatedCostHint": "Estimated, not actual billing",
+    "estimatedCostHint": "估算值，非实际账单",
     "last10Minutes": "最近 10 分钟",
     "last10MinutesDesc": "按分钟聚合的 token 用量（输入 + 输出）",
     "usageTrend": "用量趋势",

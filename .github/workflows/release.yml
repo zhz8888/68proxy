@@ -24,30 +24,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 校验 tag 与 tauri.conf.json 中的版本一致，防止发布错版产物
+  # 归一化版本 tag，作为后续构建与发布的唯一版本来源
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      # 归一化结果：version 为纯语义化版本（如 1.2.1），tag 为规范 tag（如 v1.2.1）
+      version: ${{ steps.normalize.outputs.version }}
+      tag: ${{ steps.normalize.outputs.tag }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Read version
-        id: version
+      # 剥离可选的 v/V 前缀后校验为合法 semver：重复 v 前缀、缺位、分支名等一律拒绝，
+      # 避免把 vv1.2.1 之类的输入写进 package.json 并打进产物
+      - name: Normalize version tag
+        id: normalize
         shell: bash
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          # tauri.conf.json 的 version 指向 ../package.json，取 package.json 的实际版本
-          VERSION=$(jq -r '.version' package.json)
-          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Validate tag matches version
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          EXPECTED_TAG="v${{ steps.version.outputs.value }}"
-          if [ "${GITHUB_REF_NAME}" != "$EXPECTED_TAG" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match app version ${EXPECTED_TAG}"
+          set -euo pipefail
+          VERSION="${RAW_TAG#[vV]}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::无效的版本 tag '${RAW_TAG}'：应形如 v1.2.1（v 前缀可省略）"
             exit 1
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
 
   release:
     needs: validate
@@ -64,7 +64,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          # 用手动输入或触发 tag 归一化后的规范 tag 检出（v 前缀统一补齐）
+          ref: ${{ needs.validate.outputs.tag }}
 
       - uses: pnpm/action-setup@v4
         with:
@@ -91,12 +92,27 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      # 将标签版本（去 v 前缀）写入 package.json，tauri.conf.json 引用它作为应用版本
+      # 将已归一化的版本号写入 package.json，tauri.conf.json 引用它作为应用版本
       - name: Sync app version from tag
         shell: bash
-        run: npm version --no-git-tag-version --allow-same-version "${VERSION_TAG#v}"
         env:
-          VERSION_TAG: ${{ inputs.tag || github.ref_name }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: npm version --no-git-tag-version --allow-same-version "$VERSION"
+
+      # 打包前的最后一道闸：确认 tauri.conf.json 实际读取到的版本就是归一化版本，
+      # 防止 v/vv 前缀或意外改写混入安装包、dmg 与应用内显示的版本号
+      - name: Verify app version
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          SYNCED=$(node -p "require('./package.json').version")
+          if [ "$SYNCED" != "$VERSION" ]; then
+            echo "::error::package.json 版本 '${SYNCED}' 与归一化版本 '${VERSION}' 不一致"
+            exit 1
+          fi
+          echo "待打包的应用版本：${SYNCED}"
 
       - name: Frontend typecheck
         run: pnpm build
@@ -123,7 +139,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
-          $VERSION = "${{ inputs.tag || github.ref_name }}"  # 例如 v1.0.0
+          $VERSION = "${{ needs.validate.outputs.tag }}"  # 例如 v1.0.0
           $targetRoot = 'src-tauri/target/release'
 
           # 1) NSIS 安装包
@@ -156,7 +172,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release-assets
-          VERSION="${{ inputs.tag || github.ref_name }}"  # 例如 v1.0.0
+          VERSION="${{ needs.validate.outputs.tag }}"  # 例如 v1.0.0
 
           DMG=$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name "*.dmg" | head -1 || true)
           if [ -n "$DMG" ]; then
@@ -182,7 +198,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: release
+    needs: [validate, release]
     permissions:
       contents: write
     steps:
@@ -196,12 +212,14 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      # 优先使用 release-notes/v{版本}.md，缺失时回退到默认文案
+      # 优先使用 release-notes/{tag}.md，缺失时回退到默认文案
       - name: Load release notes
         id: release_notes
         shell: bash
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          NOTES_FILE="release-notes/${GITHUB_REF_NAME}.md"
+          NOTES_FILE="release-notes/${TAG}.md"
           if [ -f "$NOTES_FILE" ]; then
             {
               echo 'body<<__RELEASE_NOTES__'
@@ -212,11 +230,11 @@ jobs:
           else
             {
               echo "body<<__RELEASE_NOTES__"
-              echo "## 68proxy ${{ github.ref_name }}"
+              echo "## 68proxy ${TAG}"
               echo
               echo "### 下载"
-              echo "- **Windows (x86_64)**: \`68proxy-${{ github.ref_name }}-Windows-x64-setup.exe\`（NSIS 安装版）或 \`68proxy-${{ github.ref_name }}-Windows-x64-Portable.zip\`（绿色版）"
-              echo "- **macOS (Apple Silicon / arm64)**: \`68proxy-${{ github.ref_name }}-macOS-aarch64.dmg\`。应用未签名与公证，首次打开请右键 →「打开」绕过 Gatekeeper，或在终端执行 \`sudo xattr -r -d com.apple.quarantine /Applications/68proxy.app\` 移除隔离属性"
+              echo "- **Windows (x86_64)**: \`68proxy-${TAG}-Windows-x64-setup.exe\`（NSIS 安装版）或 \`68proxy-${TAG}-Windows-x64-Portable.zip\`（绿色版）"
+              echo "- **macOS (Apple Silicon / arm64)**: \`68proxy-${TAG}-macOS-aarch64.dmg\`。应用未签名与公证，首次打开请右键 →「打开」绕过 Gatekeeper，或在终端执行 \`sudo xattr -r -d com.apple.quarantine /Applications/68proxy.app\` 移除隔离属性"
               echo
               echo '### 使用前提'
               echo '- 需要 \`user_\` 开头的 Command Code API Key'
@@ -234,8 +252,8 @@ jobs:
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          name: 68proxy ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: 68proxy ${{ needs.validate.outputs.tag }}
           draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || true }}
           prerelease: false
           generate_release_notes: true
