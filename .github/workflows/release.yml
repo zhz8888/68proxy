@@ -125,14 +125,16 @@ jobs:
         shell: pwsh
         run: pnpm tauri build --bundles nsis
 
-      # macOS：arm64 dmg（现状不变）
+      # macOS：arm64 dmg + .app
+      # 必须同时指定 app：只构建 dmg 时 Tauri 会把中间产物 .app 清理掉，
+      # 导致后续打包 .app.zip 找不到目录
       - name: Build Tauri App (macOS)
         if: runner.os == 'macOS'
         shell: bash
         timeout-minutes: 60
         run: |
           set -euo pipefail
-          pnpm tauri build --bundles dmg --target aarch64-apple-darwin
+          pnpm tauri build --bundles app,dmg --target aarch64-apple-darwin
 
       # Windows 资产：NSIS 安装包 + 便携 exe
       - name: Prepare Windows Assets
