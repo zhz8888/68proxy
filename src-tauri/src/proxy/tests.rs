@@ -1432,6 +1432,63 @@ fn anthropic_translator_tool_and_error() {
     assert!(t.finalize().is_empty());
 }
 
+/// Anthropic 流式收尾的 stop_reason：上游 tool-calls 必须映射为 tool_use，
+/// 且尾部 finish 的 "stop" 不得覆盖 finish-step 记录的工具调用结论。
+#[test]
+fn anthropic_translator_tool_stop_reason() {
+    let mut t = AnthropicTranslator::new("claude-x", "msg_1");
+    t.process_line(r#"{"type":"tool-call","toolCallId":"tu_1","toolName":"calc","input":"{}"}"#);
+    // 上游真实报文：finish-step 携带 tool-calls（带连字符），随后 finish 携带 stop
+    t.process_line(r#"{"type":"finish-step","finishReason":"tool-calls","usage":{"inputTokens":7,"outputTokens":3}}"#);
+    t.process_line(r#"{"type":"finish","finishReason":"stop"}"#);
+    let end = t.finalize().join("");
+    assert!(
+        end.contains("\"stop_reason\":\"tool_use\""),
+        "工具调用流的 stop_reason 应为 tool_use，实际：{end}"
+    );
+}
+
+/// Anthropic 入站 user 图片块：base64/url 两种 source 都转换为 OpenAI image_url，
+/// 与文本块合并为 content 数组，不再被静默丢弃。
+#[test]
+fn anthropic_to_openai_user_image_blocks() {
+    let req = json!({
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 100,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "看图" },
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "AAA" } },
+                { "type": "image", "source": { "type": "url", "url": "https://x.test/a.png" } }
+            ]
+        }]
+    });
+    let openai = convert::convert_anthropic_to_openai(&req);
+    let content = openai["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "看图");
+    assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAA");
+    assert_eq!(content[2]["image_url"]["url"], "https://x.test/a.png");
+}
+
+/// Anthropic 采样/停止参数：top_p 与 stop_sequences 归一后必须真正进入上游 params，
+/// 而非止步于中间 openai_req（否则客户端停止序列被静默忽略）。
+#[test]
+fn anthropic_top_p_and_stop_forwarded_to_params() {
+    let req = json!({
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 100,
+        "top_p": 0.7,
+        "stop_sequences": ["END"],
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+    let openai = convert::convert_anthropic_to_openai(&req);
+    let body = convert::build_cc_request(&openai, false);
+    assert_eq!(body["params"]["top_p"], 0.7);
+    assert_eq!(body["params"]["stop"][0], "END");
+}
+
 /// Responses 翻译器：tool-call 产出 function_call 四连帧，reasoning 后接正文自动收条目。
 #[test]
 fn responses_translator_tool_flow() {

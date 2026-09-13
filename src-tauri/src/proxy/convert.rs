@@ -324,6 +324,14 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
     if let Some(p) = openai_req.get("parallel_tool_calls") {
         params.insert("parallel_tool_calls".into(), p.clone());
     }
+    // 采样与停止序列：Anthropic 的 top_p / stop_sequences 经上游归一为 OpenAI 命名后
+    // 必须在此转发，否则客户端设置的停止序列会被静默忽略、生成不会在预期处停止
+    if let Some(p) = openai_req.get("top_p") {
+        params.insert("top_p".into(), p.clone());
+    }
+    if let Some(s) = openai_req.get("stop") {
+        params.insert("stop".into(), s.clone());
+    }
 
     body
 }
@@ -632,11 +640,29 @@ pub fn build_responses_response(
     body
 }
 
+/// Anthropic 图片块 → OpenAI `image_url.url` 字符串。
+///
+/// `base64` 源拼成 `data:<media_type>;base64,<data>`（上游据此还原图片），
+/// `url` 源原样透传；缺字段或未知 source 类型返回 None（调用方记日志）。
+fn anthropic_image_to_url(block: &Value) -> Option<String> {
+    let source = block.get("source")?;
+    match source.get("type").and_then(|t| t.as_str()) {
+        Some("base64") => {
+            let media_type = source.get("media_type").and_then(|v| v.as_str())?;
+            let data = source.get("data").and_then(|v| v.as_str())?;
+            Some(format!("data:{media_type};base64,{data}"))
+        }
+        Some("url") => source.get("url").and_then(|v| v.as_str()).map(str::to_string),
+        _ => None,
+    }
+}
+
 /// Anthropic Messages 请求 → OpenAI Chat Completions 请求（供 build_cc_request 复用）。
 ///
 /// 主要转换：system 字符串或 text 块数组归并为 system 消息；assistant 的 text/tool_use
-/// 块合并为 content + tool_calls；user 的 tool_result 块拆为独立的 role=tool 消息
-/// （工具名通过 tool_use_id 反查）；tools/tool_choice/thinking 等参数按对应语义映射，
+/// 块合并为 content + tool_calls；user 的 text/image 块转为 content（图片转 image_url）、
+/// tool_result 块拆为独立的 role=tool 消息（工具名通过 tool_use_id 反查）；
+/// tools/tool_choice/thinking 等参数按对应语义映射，
 /// 其中 thinking 的 budget_tokens 阈值（≥10000 高 / ≥5000 中 / 其余低）折算为 reasoning_effort。
 pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
     // 1. system
@@ -729,6 +755,7 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
             }
             Some("user") => {
                 let mut text_content = String::new();
+                let mut image_parts: Vec<Value> = Vec::new();
                 let mut tool_results: Vec<Value> = Vec::new();
                 match msg.get("content") {
                     Some(Value::String(s)) => text_content = s.clone(),
@@ -740,15 +767,43 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                                         text_content.push_str(t);
                                     }
                                 }
+                                // Anthropic 图片块（base64 / url）转 OpenAI image_url：
+                                // 不转换的话客户端粘贴的截图会被静默丢弃，模型只能看到文本
+                                Some("image") => match anthropic_image_to_url(block) {
+                                    Some(url) => image_parts
+                                        .push(json!({ "type": "image_url", "image_url": { "url": url } })),
+                                    None => super::log::warn(crate::i18n::pick(
+                                        "Anthropic 图片块缺少 source/media_type/data，已忽略",
+                                        "Anthropic image block missing source/media_type/data; skipped",
+                                    )),
+                                },
                                 Some("tool_result") => tool_results.push(block.clone()),
-                                _ => {}
+                                // document 等暂不支持的类型记日志，避免静默丢失用户输入
+                                Some(other) => super::log::warn(&format!(
+                                    "{}: {other}",
+                                    crate::i18n::pick(
+                                        "暂不支持的 Anthropic 内容块类型，已忽略",
+                                        "Unsupported Anthropic content block type; skipped"
+                                    )
+                                )),
+                                None => {}
                             }
                         }
                     }
                     _ => {}
                 }
-                if !text_content.is_empty() {
-                    openai_messages.push(json!({ "role": "user", "content": text_content }));
+                // 有图片时用 content 数组（text + image_url）；纯文本沿用字符串形态
+                if image_parts.is_empty() {
+                    if !text_content.is_empty() {
+                        openai_messages.push(json!({ "role": "user", "content": text_content }));
+                    }
+                } else {
+                    let mut parts: Vec<Value> = Vec::new();
+                    if !text_content.is_empty() {
+                        parts.push(json!({ "type": "text", "text": text_content }));
+                    }
+                    parts.extend(image_parts);
+                    openai_messages.push(json!({ "role": "user", "content": parts }));
                 }
                 for tr in &tool_results {
                     let tool_use_id = as_str_or_empty(tr.get("tool_use_id").unwrap_or(&Value::Null));
@@ -832,9 +887,6 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
     if let Some(ss) = anthropic_req.get("stop_sequences") {
         openai_req["stop"] = ss.clone();
     }
-    if let Some(uid) = anthropic_req.pointer("/metadata/user_id") {
-        openai_req["user"] = uid.clone();
-    }
 
     // 7. thinking → reasoning_effort
     if let Some(thinking) = anthropic_req.get("thinking") {
@@ -872,9 +924,12 @@ pub fn map_finish_reason(reason: &str) -> String {
 }
 
 /// OpenAI finish_reason → Anthropic stop_reason（tool_use / max_tokens / end_turn，未知一律 end_turn）。
+///
+/// 同时接受上游原始的 `tool-calls` 写法：调用方通常已用 `map_finish_reason` 归一，
+/// 但流式路径直接传入原始值时若漏归一，这里仍能正确映射为 tool_use。
 pub fn map_anthropic_stop_reason(reason: &str) -> &'static str {
     match reason {
-        "tool_calls" => "tool_use",
+        "tool_calls" | "tool-calls" => "tool_use",
         "length" => "max_tokens",
         "stop" => "end_turn",
         _ => "end_turn",

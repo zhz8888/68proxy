@@ -919,8 +919,22 @@ impl AnthropicTranslator {
                 self.output_tokens += 20;
             }
             "finish-step" | "finish" => {
-                if let Some(fr) = event.get("finishReason").and_then(|v| v.as_str()) {
-                    self.stop_reason = Some(map_anthropic_stop_reason(fr).to_string());
+                // 上游 finishReason 是 OpenAI 口径（工具调用为带连字符的 tool-calls），
+                // 必须先经 map_finish_reason 归一，否则 map_anthropic_stop_reason 会落到
+                // end_turn，客户端据此判定回合结束、不再执行 tool_use。
+                // finish-step 为权威来源；尾部 finish 仅在尚无值时回退，避免其 "stop" 覆盖前者。
+                if event_type == "finish-step" {
+                    if let Some(fr) = event.get("finishReason").and_then(|v| v.as_str()) {
+                        self.stop_reason =
+                            Some(map_anthropic_stop_reason(&map_finish_reason(fr)).to_string());
+                    }
+                } else if self.stop_reason.is_none() {
+                    let fr = event
+                        .get("finishReason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("stop");
+                    self.stop_reason =
+                        Some(map_anthropic_stop_reason(&map_finish_reason(fr)).to_string());
                 }
                 let u = event
                     .get("totalUsage")
