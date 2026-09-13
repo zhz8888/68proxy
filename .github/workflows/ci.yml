@@ -25,14 +25,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      # 钉住主版本：latest 会随上游跨主版本漂移，与 pnpm-lock.yaml 的
+      # lockfileVersion 9.0 可能不兼容（--frozen-lockfile 会因此失败）
+      - uses: pnpm/action-setup@v6
         with:
-          version: latest
+          version: '12'
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: pnpm
@@ -159,7 +161,7 @@ jobs:
 
       - name: Upload build artifacts
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-bundles-${{ runner.os }}
           path: release-assets/*

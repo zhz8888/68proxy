@@ -26,17 +26,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      # 钉住主版本：latest 会随上游跨主版本漂移，与 pnpm-lock.yaml 的
+      # lockfileVersion 9.0 可能不兼容
+      - uses: pnpm/action-setup@v6
         with:
-          version: latest
+          version: '12'
 
+      # 本工作流只读取 lockfile 远程比对版本，不执行 pnpm install，
+      # 故不配置 cache: pnpm——pnpm store 不会生成，缓存步骤会因路径不存在而报错
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
-          cache: pnpm
 
       # cargo-outdated 需要 cargo metadata，因此仍需 Rust 工具链
       - name: Setup Rust
@@ -100,7 +103,7 @@ jobs:
 
       - name: Upload dependency reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dependency-reports
           path: dependency-reports/

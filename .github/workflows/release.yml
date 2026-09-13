@@ -62,17 +62,19 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # 用手动输入或触发 tag 归一化后的规范 tag 检出（v 前缀统一补齐）
           ref: ${{ needs.validate.outputs.tag }}
 
-      - uses: pnpm/action-setup@v4
+      # 钉住主版本：latest 会随上游跨主版本漂移，与 pnpm-lock.yaml 的
+      # lockfileVersion 9.0 可能不兼容（--frozen-lockfile 会因此失败）
+      - uses: pnpm/action-setup@v6
         with:
-          version: latest
+          version: '12'
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: pnpm
@@ -214,7 +216,7 @@ jobs:
         run: ls -la release-assets || true
 
       - name: Upload release artifacts to workflow
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-assets-${{ runner.os }}
           path: release-assets/*
@@ -228,10 +230,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download built release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-assets-*
           path: release-assets
