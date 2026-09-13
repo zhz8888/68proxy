@@ -1,0 +1,97 @@
+# Dependabot 依赖更新配置
+#
+# 按下方计划自动开依赖升级 PR；配套的 .github/workflows/dependency-check.yml
+# 只做只读巡检，不生成 PR、也不改动任何文件。
+version: 2
+
+updates:
+  # ---------------- 前端依赖（package.json + pnpm-lock.yaml） ----------------
+  - package-ecosystem: npm
+    directory: /
+    target-branch: main
+    schedule:
+      interval: weekly
+      day: monday
+      # 与巡检工作流同一时间窗口（周一 09:00 北京时间），便于对照结果
+      time: '09:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      # Tauri 的 JS 侧 api/cli/plugin 需整体同版本推进，拆散易出现版本错位
+      tauri:
+        patterns:
+          - '@tauri-apps/*'
+      # Radix 组件库同源，合并升级便于统一回归
+      radix-ui:
+        patterns:
+          - '@radix-ui/*'
+      # 其余依赖的次版本与补丁合并为一个 PR；主版本不并入，
+      # 仍各自单独开 PR 以便逐个评估破坏性变更
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # ---------------- 桌面端 Rust（src-tauri） ----------------
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    target-branch: main
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      # tauri 主包与 tauri-plugin-* / tauri-build 需与前端 @tauri-apps/* 版本配套
+      tauri:
+        patterns:
+          - 'tauri'
+          - 'tauri-*'
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # ---------------- 图标渲染工具（tools/icon-render） ----------------
+  - package-ecosystem: cargo
+    directory: /tools/icon-render
+    target-branch: main
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # ---------------- GitHub Actions ----------------
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: main
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Asia/Shanghai
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      # 各 action 之间无版本耦合，合并成一个 PR 减少噪音
+      actions:
+        patterns:
+          - '*'

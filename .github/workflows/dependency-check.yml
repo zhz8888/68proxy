@@ -1,0 +1,108 @@
+name: Dependency Check
+
+# 依赖版本巡检：定期检查前端与 Rust 直接依赖是否落后于最新版本，
+# 结果汇总到 job summary（Markdown 表格），不修改任何文件、不自动升级。
+on:
+  schedule:
+    # 每周一 01:00 UTC（北京时间 09:00）
+    - cron: '0 1 * * 1'
+  workflow_dispatch:
+    inputs:
+      fail-on-outdated:
+        description: '存在非最新依赖时判定为失败（默认仅报告，不失败）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # cargo-outdated 需要 cargo metadata，因此仍需 Rust 工具链
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 直接取官方预编译产物（cargo-outdated 未包含在 install-action 托管清单中），
+      # 固定版本避免上游发布新版本时巡检口径漂移
+      - name: Install cargo-outdated
+        shell: bash
+        env:
+          CARGO_OUTDATED_VERSION: 0.19.0
+        run: |
+          set -euo pipefail
+          url="https://github.com/kbknapp/cargo-outdated/releases/download/v${CARGO_OUTDATED_VERSION}/cargo-outdated-${CARGO_OUTDATED_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          mkdir -p "$HOME/.cargo/bin"
+          curl -sSfL "$url" | tar -xz -C "$HOME/.cargo/bin"
+          cargo outdated --version
+
+      # 检查本身不因「发现新版本」而失败：工具的退出码与输出统一落到
+      # dependency-reports/，由下一步汇总判定，失败原因写入同名 .error 标记文件
+      - name: Run dependency checks
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p dependency-reports
+
+          # npm：存在过期依赖时 pnpm outdated 返回非 0，属正常结果；
+          # 仅在没有任何 JSON 输出时（例如未生成 lockfile）才判定为执行失败
+          if ! pnpm outdated --format json > dependency-reports/npm.json 2> dependency-reports/npm.err; then
+            if [ ! -s dependency-reports/npm.json ]; then
+              { echo "pnpm outdated 执行失败"; tail -n 20 dependency-reports/npm.err; } \
+                > dependency-reports/npm.json.error
+            fi
+          fi
+
+          # Rust：逐清单检查直接依赖（--root-deps-only），输出为逐行 JSON
+          check_cargo() {
+            local name="$1" manifest="$2"
+            local out="dependency-reports/${name}.json"
+            if ! cargo outdated --manifest-path "$manifest" --root-deps-only \
+                 --color never --format json > "$out" 2> "$out.err" || [ ! -s "$out" ]; then
+              { echo "cargo outdated 执行失败（${manifest}）"; tail -n 20 "$out.err"; } > "$out.error"
+            fi
+          }
+          check_cargo cargo-src-tauri src-tauri/Cargo.toml
+          check_cargo cargo-icon-render tools/icon-render/Cargo.toml
+
+      # always()：检查步骤即使整体失败，也要给出尽可能完整的汇总与失败原因
+      - name: Summarize dependency status
+        if: always()
+        shell: bash
+        env:
+          # 取 workflow_dispatch 原始输入字符串，由脚本按 'true' 判定：
+          # 避免布尔/字符串在 GitHub 表达式真假判定上的歧义
+          FAIL_ON_OUTDATED: ${{ github.event.inputs['fail-on-outdated'] }}
+        run: |
+          node .github/scripts/dependency-report.mjs \
+            dependency-reports/npm.json \
+            src-tauri=dependency-reports/cargo-src-tauri.json \
+            tools/icon-render=dependency-reports/cargo-icon-render.json
+
+      - name: Upload dependency reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-reports
+          path: dependency-reports/
+          if-no-files-found: warn
+          retention-days: 14
