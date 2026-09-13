@@ -146,6 +146,7 @@ API Key                      the local forwarding Key (sk- prefixed, see
 ├── assets/readme/            # README decoration assets (SVG)
 ├── screenshots/            # UI preview screenshots (en/ = English UI)
 ├── tools/fetch-pricing.mjs   # Pricing scraper (generates the packaged pricing.json)
+├── tools/clean_cache.py      # Build cache cleaner (scans, then deletes after confirmation)
 └── tools/icon-render/        # Icon rendering tool
 ```
 

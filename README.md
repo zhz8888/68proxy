@@ -147,6 +147,7 @@ API Key                本地转发 Key（sk- 开头，见「配置」），
 ├── assets/readme/            # README 装饰资源（SVG）
 ├── screenshots/            # 界面预览截图（en/ 为英文界面）
 ├── tools/fetch-pricing.mjs   # 价格数据爬取脚本（生成打包用 pricing.json）
+├── tools/clean_cache.py      # 构建缓存清理脚本（遍历后经确认再删除）
 └── tools/icon-render/        # 图标渲染工具
 ```
 
