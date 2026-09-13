@@ -98,10 +98,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
           Copy-Item $exePath $portableDir
           @('# 68proxy portable build marker', 'portable=true') | Set-Content -Path (Join-Path $portableDir 'portable.ini') -Encoding UTF8
+          # 压缩包必须落在 release-assets/ 内，否则会被后续 path: release-assets/* 漏掉
           $portableZip = "68proxy-$VERSION-Windows-x64-Portable.zip"
-          Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
+          $portableZipPath = Join-Path 'release-assets' $portableZip
+          Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZipPath -Force
           Remove-Item -Recurse -Force $portableDir
-          Write-Host "Windows portable zip created: $portableZip"
+          Write-Host "Windows portable zip created: $portableZipPath"
+
+          # 兜底校验：上传步骤只按目录收集，若产物写错位置会静默漏发（历史故障），
+          # 这里显式确认两个 Windows 资产都已就位
+          foreach ($asset in @($installerDest, $portableZip)) {
+            if (-not (Test-Path (Join-Path 'release-assets' $asset))) {
+              throw "Expected asset missing from release-assets: $asset"
+            }
+          }
 
       # macOS 资产：dmg
       - name: Prepare macOS Assets

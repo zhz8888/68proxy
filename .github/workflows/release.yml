@@ -160,10 +160,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
           Copy-Item $exePath $portableDir
           @('# 68proxy portable build marker', 'portable=true') | Set-Content -Path (Join-Path $portableDir 'portable.ini') -Encoding UTF8
+          # 压缩包必须落在 release-assets/ 内，否则会被后续 path: release-assets/* 漏掉
           $portableZip = "68proxy-$VERSION-Windows-x64-Portable.zip"
-          Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
+          $portableZipPath = Join-Path 'release-assets' $portableZip
+          Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZipPath -Force
           Remove-Item -Recurse -Force $portableDir
-          Write-Host "Windows portable zip created: $portableZip"
+          Write-Host "Windows portable zip created: $portableZipPath"
+
+          # 兜底校验：上传步骤只按目录收集，若产物写错位置会静默漏发（历史故障），
+          # 这里显式确认两个 Windows 资产都已就位
+          foreach ($asset in @($installerDest, $portableZip)) {
+            if (-not (Test-Path (Join-Path 'release-assets' $asset))) {
+              throw "Expected asset missing from release-assets: $asset"
+            }
+          }
 
       # macOS 资产：dmg（现状不变）
       - name: Prepare macOS Assets
@@ -212,38 +222,35 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      # 优先使用 release-notes/{tag}.md，缺失时回退到默认文案
+      # 发版说明优先取 release-notes/{tag}.md（该版本专属），否则回退到
+      # release-notes/default.md 通用模板；两者都用 {{TAG}} / {{REPO}} 占位符，
+      # 在此统一替换。正文从工作流内联字符串搬到模板文件，避免大量 echo 转义出错；
+      # 模板正文会被原样写入，故不要在其中使用 HTML 注释
       - name: Load release notes
         id: release_notes
         shell: bash
         env:
           TAG: ${{ needs.validate.outputs.tag }}
+          REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           NOTES_FILE="release-notes/${TAG}.md"
-          if [ -f "$NOTES_FILE" ]; then
-            {
-              echo 'body<<__RELEASE_NOTES__'
-              cat "$NOTES_FILE"
-              echo
-              echo '__RELEASE_NOTES__'
-            } >> "$GITHUB_OUTPUT"
-          else
-            {
-              echo "body<<__RELEASE_NOTES__"
-              echo "## 68proxy ${TAG}"
-              echo
-              echo "### 下载"
-              echo "- **Windows (x86_64)**: \`68proxy-${TAG}-Windows-x64-setup.exe\`（NSIS 安装版）或 \`68proxy-${TAG}-Windows-x64-Portable.zip\`（绿色版）"
-              echo "- **macOS (Apple Silicon / arm64)**: \`68proxy-${TAG}-macOS-aarch64.dmg\`。应用未签名与公证，首次打开请右键 →「打开」绕过 Gatekeeper，或在终端执行 \`sudo xattr -r -d com.apple.quarantine /Applications/68proxy.app\` 移除隔离属性"
-              echo
-              echo '### 使用前提'
-              echo '- 需要 \`user_\` 开头的 Command Code API Key'
-              echo '- 支持 OpenAI / Anthropic 兼容协议接入'
-              echo '- 详见 [README](https://github.com/zhz8888/68proxy#readme)'
-              echo
-              echo '__RELEASE_NOTES__'
-            } >> "$GITHUB_OUTPUT"
+          if [ ! -f "$NOTES_FILE" ]; then
+            NOTES_FILE="release-notes/default.md"
           fi
+          if [ ! -f "$NOTES_FILE" ]; then
+            echo "::error::缺少发版说明模板：release-notes/${TAG}.md 与 release-notes/default.md 均不存在"
+            exit 1
+          fi
+
+          # 先替换占位符再写入 output；用 heredoc 保留多行与 Markdown 原样
+          BODY=$(sed -e "s|{{TAG}}|${TAG}|g" -e "s|{{REPO}}|${REPO}|g" "$NOTES_FILE")
+          {
+            echo 'body<<__RELEASE_NOTES__'
+            printf '%s\n' "$BODY"
+            echo '__RELEASE_NOTES__'
+          } >> "$GITHUB_OUTPUT"
+          echo "使用发版说明模板：${NOTES_FILE}"
 
       - name: List downloaded release artifacts
         shell: bash
