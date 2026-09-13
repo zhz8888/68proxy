@@ -17,10 +17,19 @@ export function RelayView() {
 
   // 挂载时加载历史记录并订阅请求/状态事件，卸载时取消订阅
   useEffect(() => {
-    // 初始拉取最近 500 条请求记录
+    // 初始拉取最近 500 条请求记录：与期间实时推入的事件**合并去重**而非整体替换，
+    // 否则快照到达前推入的请求会被覆盖丢弃（本视图不重新拉取，丢了就不再出现）
     api
       .requestsGet(500)
-      .then((r) => setRelay(r))
+      .then((snapshot) =>
+        setRelay((prev) => {
+          const byId = new Map<string, RequestInfo>();
+          for (const r of [...prev, ...snapshot]) byId.set(r.id, r);
+          return [...byId.values()]
+            .sort((a, b) => b.started_at - a.started_at)
+            .slice(0, 500);
+        }),
+      )
       .catch(() => {});
     // 新请求插入列表头部并按 id 去重，最多保留 500 条
     const offReq = onRequest((r) =>

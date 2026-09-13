@@ -43,9 +43,22 @@ export function LogsView() {
 
   // 挂载时拉取最近 500 条历史日志，并订阅实时日志事件
   useEffect(() => {
+    // 历史日志与期间实时推入的事件**合并去重**（按 seq）而非整体替换：
+    // 否则快照到达前推入的日志会被覆盖丢弃，且本视图不会重新拉取
     api
       .logsGet(500)
-      .then((entries) => setLogs(entries))
+      .then((snapshot) =>
+        setLogs((prev) => {
+          const merged = [...prev, ...snapshot].sort((a, b) => a.seq - b.seq);
+          const seen = new Set<number>();
+          const deduped = merged.filter((e) => {
+            if (seen.has(e.seq)) return false;
+            seen.add(e.seq);
+            return true;
+          });
+          return deduped.slice(-1000);
+        }),
+      )
       .catch(() => {});
     // 新日志追加到末尾，内存中最多保留 1000 条
     const off = onLog((entry) => setLogs((prev) => [...prev.slice(-999), entry]));

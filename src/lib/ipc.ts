@@ -54,6 +54,11 @@ export async function listen<T>(
   return () => {
     bag.delete(fn);
     if (bag.size === 0) bridgeHandlers.delete(event);
+    // 已无任何订阅：取消待重连，避免空跑
+    if (bridgeHandlers.size === 0 && bridgeReconnect) {
+      clearTimeout(bridgeReconnect);
+      bridgeReconnect = null;
+    }
   };
 }
 
@@ -62,10 +67,16 @@ const bridgeHandlers = new Map<string, Set<(e: { payload: unknown }) => void>>()
 
 /** 共享 SSE 连接的当前状态（用于重连与避免重复建立）。 */
 let bridgeStream: { close: () => void } | null = null;
+/** 重连定时器句柄（避免重复排定多次重连）。 */
+let bridgeReconnect: ReturnType<typeof setTimeout> | null = null;
+/** 重连退避时间（毫秒），连接成功后复位；指数增长并封顶 30s。 */
+let bridgeBackoffMs = 1000;
 
-/** 确保共享 SSE 连接已建立（幂等；断线后自动重连）。 */
+/** 确保共享 SSE 连接已建立（幂等；断线后按退避自动重连）。 */
 function ensureBridgeStream() {
   if (bridgeStream) return;
+  // 已有排定的重连：直接复用，避免每次新订阅都叠一个定时器
+  if (bridgeReconnect) return;
   const controller = new AbortController();
   bridgeStream = {
     close: () => {
@@ -77,6 +88,8 @@ function ensureBridgeStream() {
     try {
       const res = await fetch(`${BRIDGE_BASE}/events`, { signal: controller.signal });
       if (!res.body) throw new Error(translate("errors.event_stream_unavailable"));
+      // 连接建立成功：复位退避
+      bridgeBackoffMs = 1000;
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -108,9 +121,18 @@ function ensureBridgeStream() {
         }
       }
     } catch {
-      /* 连接失败/被中断：仅忽略，下一次订阅会重新建立 */
+      /* 连接失败/被中断：交由下方排定重连 */
     } finally {
       bridgeStream = null;
+      // 仍有订阅者时才重连：避免页面已无监听却持续轮询后端
+      if (bridgeHandlers.size > 0) {
+        const delay = bridgeBackoffMs;
+        bridgeBackoffMs = Math.min(bridgeBackoffMs * 2, 30_000);
+        bridgeReconnect = setTimeout(() => {
+          bridgeReconnect = null;
+          ensureBridgeStream();
+        }, delay);
+      }
     }
   })();
 }

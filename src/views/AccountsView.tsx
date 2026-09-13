@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ExternalLink,
@@ -123,6 +123,8 @@ export function AccountsView() {
   const [detailQuota, setDetailQuota] = useState<AccountQuota | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
+  // 详情请求序号：用于丢弃乱序到达的过期响应（见 openAccountDetail）
+  const detailReqSeq = useRef(0);
   // 账户使用规则（策略 + 优先消耗账户）
   const [routing, setRouting] = useState<AccountRouting>({
     strategy: "round_robin",
@@ -130,14 +132,17 @@ export function AccountsView() {
   });
   const [routingSaving, setRoutingSaving] = useState(false);
 
-  /** 保存账户使用规则（策略或优先账户变更时调用）。 */
+  /** 保存账户使用规则（策略或优先账户变更时调用）；失败时回滚乐观更新。 */
   async function saveRouting(next: AccountRouting) {
+    const prev = routing;
     setRouting(next);
     setRoutingSaving(true);
     try {
       await api.accountRoutingSet(next.strategy, next.preferred_account_id);
       toast.success(t("accounts.routingSaved"));
     } catch (e) {
+      // 失败必须回滚：否则界面显示的策略与后端实际生效的不一致
+      setRouting(prev);
       toast.error(errText(e));
     } finally {
       setRoutingSaving(false);
@@ -215,16 +220,22 @@ export function AccountsView() {
 
   /** 打开账户详情弹窗并加载该账户的完整额度。 */
   async function openAccountDetail(a: AccountEntry) {
+    const seq = ++detailReqSeq.current;
     setDetailAccount(a);
     setDetailQuota(null);
     setDetailError("");
     setDetailLoading(true);
     try {
-      setDetailQuota(await api.accountQuota(a.userId));
+      const q = await api.accountQuota(a.userId);
+      // 丢弃过期响应：先点 A 再快速点 B 时，A 的响应可能后到，
+      // 若不校验会把 A 的额度展示在 B 的弹窗里
+      if (seq !== detailReqSeq.current) return;
+      setDetailQuota(q);
     } catch (e) {
+      if (seq !== detailReqSeq.current) return;
       setDetailError(String(e));
     } finally {
-      setDetailLoading(false);
+      if (seq === detailReqSeq.current) setDetailLoading(false);
     }
   }
 
