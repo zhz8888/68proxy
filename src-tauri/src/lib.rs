@@ -1006,8 +1006,8 @@ pub fn run() {
             }
             // 首次启动：config.json 存在且 settings 表为空时迁移到 SQLite
             proxy::settings::migrate_from_config(&usage_conn, &config_path)?;
-            // 旧版 api_key 行迁移到 cc_accounts 后清理，避免每次启动重复迁移
-            let _ = proxy::settings::purge_legacy_api_key(&usage_conn);
+            // 旧版 api_key 行：迁移到 cc_accounts 并落库后再清理，避免升级时账户丢失
+            let _ = proxy::settings::migrate_legacy_api_key(&usage_conn);
             // 从 SQLite 加载配置（缺字段走默认）
             let mut cfg = proxy::settings::load_config(&usage_conn);
             // 后端日志语言跟随配置（此后产生的日志按该语言输出）

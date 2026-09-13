@@ -85,31 +85,33 @@ pub fn load_config(conn: &Connection) -> Config {
 fn config_from_map(mut map: Map<String, Value>) -> Config {
     // 旧版刷新间隔为毫秒，须在逐字段处理前换算为秒（详见 config 模块注释）
     super::config::migrate_refresh_interval_unit(&mut map);
-    let mut obj = Map::new();
-    let mut defaults = serde_json::to_value(Config::default())
+    // 以默认配置为基底逐字段覆盖：候选值先单独替换进默认副本并整体反序列化，
+    // 真正验证它能落到该字段类型。仅比较 JSON 值种类无法发现「同类型但非法」的值
+    // （如端口越界、cc_accounts 条目缺 key），那种值会通过校验、却让最终 from_value
+    // 整体失败，导致整份配置回退默认。
+    let defaults = serde_json::to_value(Config::default())
         .ok()
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
+    let mut obj = defaults.clone();
     for (k, v) in map {
-        // 已知字段逐个用其默认值的类型做校验：类型不符则告警并保留默认
-        let probe = defaults.get(&k).cloned().unwrap_or(Value::Null);
-        let same_kind = std::mem::discriminant(&probe) == std::mem::discriminant(&v)
-            || probe.is_null();
-        if same_kind {
+        // 未知字段 serde 会忽略，保留以维持旧行为
+        if !defaults.contains_key(&k) {
+            obj.insert(k, v);
+            continue;
+        }
+        let mut candidate = defaults.clone();
+        candidate.insert(k.clone(), v.clone());
+        if serde_json::from_value::<Config>(Value::Object(candidate)).is_ok() {
             obj.insert(k, v);
         } else {
-            let expected = type_name(&probe);
             log::warn(&format!(
-                "{}: {k} ({} {expected})",
+                "{}: {k}",
                 i18n::pick(
-                    "设置项类型不符，已忽略并使用默认值",
-                    "Setting type mismatch; ignored and using default"
+                    "设置项取值非法，已忽略并使用默认值",
+                    "Invalid setting value; ignored and using default"
                 ),
-                i18n::pick("期望", "expected"),
             ));
-            if let Some(d) = defaults.remove(&k) {
-                obj.insert(k, d);
-            }
         }
     }
     serde_json::from_value(Value::Object(obj)).unwrap_or_else(|e| {
@@ -121,18 +123,6 @@ fn config_from_map(mut map: Map<String, Value>) -> Config {
     })
 }
 
-/// 取 JSON 值的类型名，仅用于日志提示。
-fn type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "bool",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
 /// 清理旧版 `api_key` 残留行：旧字段已拆分为 `cc_accounts` + `local_api_key`，
 /// 该行仅用于一次性迁移（见 `load_config`）。调用方应在迁移完成后执行，
 /// 避免每次启动都从旧行重复迁移（例如用户删光账户后旧 key 又「复活」）。
@@ -140,6 +130,29 @@ pub fn purge_legacy_api_key(conn: &Connection) -> Result<(), String> {
     conn.execute("DELETE FROM settings WHERE key = 'api_key'", [])
         .map_err(|e| i18n::err_args("purge_legacy_failed", &[&e.to_string()]))?;
     Ok(())
+}
+
+/// 一次性完成旧版 `api_key` 行的迁移与清理：迁移结果**落库后**才删除旧行。
+///
+/// `load_config` 只在内存里把旧 `api_key` 迁入 `cc_accounts`，不会写回设置表；
+/// 若在此之前直接 `purge_legacy_api_key`，旧行被删而账户又没落库，升级时用户账户
+/// 就永久丢失（只能重新登录/粘贴）。故这里按「读取迁移 → 落库 → 清理」的顺序执行，
+/// 且仅在旧行确实存在时才动作，天然幂等。无旧行时直接返回。
+pub fn migrate_legacy_api_key(conn: &Connection) -> Result<(), String> {
+    let has_legacy: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'api_key'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| i18n::err_args("count_settings_failed", &[&e.to_string()]))?;
+    if has_legacy == 0 {
+        return Ok(());
+    }
+    // load_config 内部会把旧 api_key 迁入 cc_accounts（仅内存），此处显式落库
+    let cfg = load_config(conn);
+    save_config(conn, &cfg)?;
+    purge_legacy_api_key(conn)
 }
 
 /// 首次启动迁移：settings 表为空且 config.json 存在时，把文件内容导入 settings 表。
@@ -293,8 +306,7 @@ mod tests {
 
     /// 单字段类型损坏仅该字段回退默认，其余字段照常生效。
     #[test]
-    fn load_config_tolerates_bad_field_types() {
-        // 单个字段类型损坏不应导致整份配置回退默认
+    fn load_config_tolerates_bad_field_types() {        // 单个字段类型损坏不应导致整份配置回退默认
         let conn = temp_conn();
         let mut cfg = Config::default();
         cfg.port = 4567;
@@ -319,5 +331,44 @@ mod tests {
         conn.execute("DROP TABLE settings", []).unwrap();
         let got = load_config(&conn);
         assert_eq!(got.port, Config::default().port);
+    }
+
+    /// 同类型但非法的值（端口越界）只让该字段回退默认，其余字段不得被整体重置。
+    #[test]
+    fn load_config_rejects_same_kind_invalid_value() {
+        let conn = temp_conn();
+        let mut cfg = Config::default();
+        cfg.port = 4567;
+        cfg.zdr = true;
+        save_config(&conn, &cfg).unwrap();
+        // 端口写成越界整数：类型仍是 number，但无法落进 u16
+        conn.execute("UPDATE settings SET value = '70000' WHERE key = 'port'", [])
+            .unwrap();
+        let got = load_config(&conn);
+        assert_eq!(got.port, Config::default().port, "非法端口应回退默认");
+        assert!(got.zdr, "其余字段不得因单个非法值被重置");
+    }
+
+    /// 旧 api_key 行的迁移清理必须原子：账户落库后旧行才删除，账户不丢失。
+    #[test]
+    fn migrate_legacy_api_key_persists_account_before_purge() {
+        let conn = temp_conn();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('api_key', '\"user_old_key\"')",
+            [],
+        )
+        .unwrap();
+        migrate_legacy_api_key(&conn).unwrap();
+        // 旧行已清理，但账户已落库（重开连接读库仍能看到）
+        let cfg = load_config(&conn);
+        assert_eq!(cfg.cc_accounts.len(), 1);
+        assert_eq!(cfg.cc_accounts[0].key, "user_old_key");
+        let legacy: i64 = conn
+            .query_row("SELECT COUNT(*) FROM settings WHERE key='api_key'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(legacy, 0, "旧 api_key 行应已清理");
+        // 幂等：再次调用不新增账户、不报错
+        migrate_legacy_api_key(&conn).unwrap();
+        assert_eq!(load_config(&conn).cc_accounts.len(), 1);
     }
 }
