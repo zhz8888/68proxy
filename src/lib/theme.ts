@@ -14,6 +14,15 @@ const STORAGE_KEY = "68proxy-theme";
 /** 系统深色偏好的媒体查询。 */
 const darkQuery = () => window.matchMedia("(prefers-color-scheme: dark)");
 
+/**
+ * 当前生效的主题模式（模块级，初值取本地缓存兜底）。
+ *
+ * 系统明暗变化的监听器需要读「用户当前选择」，而选择可能由配置页（ConfigView）
+ * 或首屏配置加载（App）分别写入；用模块级变量统一记录，避免各处各自维护一份
+ * 引用导致不同步（如启动值为 system、用户改选深色后监听器仍按 system 覆盖）。
+ */
+let currentMode: ThemeMode = cachedTheme();
+
 /** 把主题模式解析为实际生效的明暗（system 时取系统偏好）。 */
 export function resolveDark(mode: ThemeMode): boolean {
   if (mode === "dark") return true;
@@ -27,6 +36,7 @@ export function resolveDark(mode: ThemeMode): boolean {
  * 立即生效、无需重启；调用方在配置页改动时同步更新后端配置以持久化。
  */
 export function applyTheme(mode: ThemeMode): void {
+  currentMode = mode;
   document.documentElement.classList.toggle("dark", resolveDark(mode));
   try {
     localStorage.setItem(STORAGE_KEY, mode);
@@ -46,11 +56,16 @@ export function cachedTheme(): ThemeMode {
   return "system";
 }
 
+/** 当前主题模式（供系统明暗监听器等外部逻辑读取）。 */
+export function currentTheme(): ThemeMode {
+  return currentMode;
+}
+
 /** 监听系统明暗变化：仅当模式为「跟随系统」时重新应用（返回取消订阅函数）。 */
-export function watchSystemTheme(getMode: () => ThemeMode): () => void {
+export function watchSystemTheme(): () => void {
   const mq = darkQuery();
   const handler = () => {
-    if (getMode() === "system") applyTheme("system");
+    if (currentTheme() === "system") applyTheme("system");
   };
   mq.addEventListener("change", handler);
   return () => mq.removeEventListener("change", handler);

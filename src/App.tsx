@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   BarChart3,
   Boxes,
@@ -28,7 +28,7 @@ import { api, onStatus, type ProxyStatus } from "@/lib/api";
 import { DEFAULT_PORT } from "@/lib/constants";
 import { errText } from "@/lib/messages";
 import { appVersion, appWindow } from "@/lib/platform";
-import { applyTheme, watchSystemTheme, type ThemeMode } from "@/lib/theme";
+import { applyTheme, watchSystemTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { AboutView } from "@/views/AboutView";
 import { AccountsView } from "@/views/AccountsView";
@@ -73,8 +73,6 @@ function App() {
   const [busy, setBusy] = useState<"start" | "stop" | null>(null);
   const [maximized, setMaximized] = useState(false);
   const [version, setVersion] = useState("");
-  // 当前主题模式：供系统明暗变化时判断是否需要跟随重设
-  const themeRef = useRef<ThemeMode>("system");
 
   useEffect(() => {
     // 读取应用版本（来自 tauri.conf.json ← package.json，随发版 tag 自动联动）；
@@ -86,13 +84,13 @@ function App() {
     api.configGet()
       .then((c) => {
         if (!mounted) return;
-        themeRef.current = c.theme;
         applyTheme(c.theme);
         applyLanguage(c.language);
       })
       .catch(() => {});
     // 系统明暗变化：仅在「跟随系统」模式下重新应用
-    const unwatchTheme = watchSystemTheme(() => themeRef.current);
+    // （当前模式由 theme.ts 模块级记录，配置页改动主题后此处无需同步）
+    const unwatchTheme = watchSystemTheme();
     // 挂载时拉取一次代理状态，并订阅后端推送；同时以 3 秒间隔轮询兜底
     api.proxyStatus().then(setStatus).catch(() => {});
     const off = onStatus(setStatus);
