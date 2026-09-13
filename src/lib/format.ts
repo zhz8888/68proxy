@@ -88,3 +88,52 @@ export function formatContextTokens(n: number): string {
   if (n >= 1000) return `${Number((n / 1000).toFixed(0))}K`;
   return String(n);
 }
+
+/** 本地时区相对 UTC 的偏移分钟数（东八区为 +480）。 */
+function localOffsetMinutes(): number {
+  return -new Date().getTimezoneOffset();
+}
+
+/** 将窗口内的绝对分钟数取模到一天内，格式化为 HH:MM（整点省略分钟）。 */
+function formatWindowMinutes(mins: number): string {
+  const wrapped = ((mins % 1440) + 1440) % 1440;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const m = wrapped % 60;
+  return m === 0 ? `${pad(Math.floor(wrapped / 60))}` : `${pad(Math.floor(wrapped / 60))}:${pad(m)}`;
+}
+
+/** 时区偏移标签：UTC / UTC+8 / UTC+5:30 / UTC-4。 */
+function formatUtcOffset(offMin: number): string {
+  if (offMin === 0) return "UTC";
+  const abs = Math.abs(offMin);
+  const m = abs % 60;
+  return `UTC${offMin > 0 ? "+" : "-"}${Math.floor(abs / 60)}${m ? `:${String(m).padStart(2, "0")}` : ""}`;
+}
+
+/**
+ * 将闲/忙时窗口（UTC 小时区间）换算为系统本地时区的可读描述，
+ * 星期文本随界面语言本地化，并附上 UTC 偏移标签，
+ * 如「周一至周五 09–12 & 14–18 UTC+8」。缺少结构化区间时回退到后端自带的英文描述。
+ */
+export function formatPeakWindows(tod: {
+  peakRanges?: Array<[number, number]>;
+  weekdaysOnly?: boolean;
+  windows?: string;
+}): string {
+  const ranges = tod.peakRanges ?? [];
+  if (ranges.length === 0) return tod.windows ?? "";
+  const offMin = localOffsetMinutes();
+  const segs: string[] = [];
+  for (const [s, e] of ranges) {
+    const start = s * 60 + offMin;
+    const end = e * 60 + offMin;
+    if (start !== end && ((start % 1440) + 1440) % 1440 >= ((end % 1440) + 1440) % 1440) {
+      // 窗口跨过本地午夜：拆成两段，保持 [start, end) 语义清晰
+      segs.push(`${formatWindowMinutes(start)}–24`, `00–${formatWindowMinutes(end)}`);
+    } else {
+      segs.push(`${formatWindowMinutes(start)}–${formatWindowMinutes(end)}`);
+    }
+  }
+  const weekdays = tod.weekdaysOnly ? `${translate("models.timeWeekdays")} ` : "";
+  return `${weekdays}${segs.join(" & ")} ${formatUtcOffset(offMin)}`;
+}

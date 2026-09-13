@@ -198,6 +198,11 @@ export interface ModelTier {
 /** 闲时/忙时费率信息（仅 DeepSeek 系列）。 */
 export interface ModelTimeOfDay {
   peak: ModelRates;
+  /** 忙时窗口，UTC 小时区间 [start, end)，如 [[1,4],[6,10]]。 */
+  peakRanges?: Array<[number, number]>;
+  /** 忙时窗口是否仅限周一至周五。 */
+  weekdaysOnly?: boolean;
+  /** 后端自带的英文窗口描述，仅在前端无法本地化时兜底。 */
   windows: string;
 }
 

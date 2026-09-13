@@ -217,15 +217,18 @@
     "free": "免费",
     "freeLimited": "限时免费，0 成本",
     "priceUnknown": "未收录价格",
-    "tiered": "分档",
     "tieredTitle": "按输入规模分档计费",
-    "timeOfDay": "闲/忙时",
+    "timeOfDayWindows": "忙时窗口 {{p0}}，其余时间按闲时价",
+    "timeWeekdays": "周一至周五",
     "caps": {
       "vision": "视觉",
       "reasoning": "思考"
     },
     "unavailableShort": "套餐不可用",
     "pricePerM": "输入 {{p0}} / 输出 {{p1}} · 每 1M",
+    "priceOffPeak": "闲时 输入 {{p0}} / 输出 {{p1}} · 每 1M",
+    "pricePeak": "忙时 输入 {{p0}} / 输出 {{p1}} · 每 1M",
+    "priceTier": "{{p0}} 输入 {{p1}} / 输出 {{p2}} · 每 1M",
     "contextTokens": "上下文 {{p0}}"
   },
   "tools": {

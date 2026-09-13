@@ -217,15 +217,18 @@
     "free": "Free",
     "freeLimited": "Free for a limited time, zero cost",
     "priceUnknown": "Price not listed",
-    "tiered": "Tiered",
     "tieredTitle": "Tiered pricing by input size",
-    "timeOfDay": "Off-peak/peak",
+    "timeOfDayWindows": "Peak hours {{p0}}, off-peak rates apply otherwise",
+    "timeWeekdays": "Mon–Fri",
     "caps": {
       "vision": "Vision",
       "reasoning": "Reasoning"
     },
     "unavailableShort": "Plan unavailable",
     "pricePerM": "in {{p0}} / out {{p1}} per 1M",
+    "priceOffPeak": "off-peak in {{p0}} / out {{p1}} per 1M",
+    "pricePeak": "peak in {{p0}} / out {{p1}} per 1M",
+    "priceTier": "{{p0}} in {{p1}} / out {{p2}} per 1M",
     "contextTokens": "ctx {{p0}}"
   },
   "tools": {

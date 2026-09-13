@@ -7,17 +7,95 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { api, type ModelAccessInfo, type ModelInfo, type ModelPricing, type PlanContext } from "@/lib/api";
-import { copyText, formatContextTokens, formatPrice } from "@/lib/format";
+import { api, type ModelAccessInfo, type ModelInfo, type ModelPricing, type ModelRates, type ModelTier, type PlanContext } from "@/lib/api";
+import { copyText, formatContextTokens, formatPeakWindows, formatPrice } from "@/lib/format";
 import { errText } from "@/lib/messages";
 import { cn } from "@/lib/utils";
 
 /** 能力/价格筛选维度。 */
 type Filter = "all" | "vision" | "reasoning" | "free" | "unavailable";
 
-/** 模型卡片当前应展示的最低档费率（用于列表内的价格概览）。 */
-function baseRates(p: ModelPricing | undefined) {
-  return p?.tiers[0]?.rates;
+/** 四项费率完全一致时视为同价档位。 */
+function ratesEqual(a: ModelRates, b: ModelRates): boolean {
+  return a.input === b.input && a.output === b.output && a.cacheRead === b.cacheRead && a.cacheWrite === b.cacheWrite;
+}
+
+/** 相邻档位费率相同时合并为一档（如 minimax-m3 两档同价），避免重复的价格行。 */
+function mergeEqualTiers(tiers: ModelTier[]): ModelTier[] {
+  const out: ModelTier[] = [];
+  for (const tier of tiers) {
+    const prev = out[out.length - 1];
+    if (prev && ratesEqual(prev.rates, tier.rates)) {
+      // 合并后的档位上界取并集（即靠后档位的 maxContext）
+      out[out.length - 1] = { maxContext: tier.maxContext, rates: prev.rates };
+    } else {
+      out.push(tier);
+    }
+  }
+  return out;
+}
+
+/** 档位区间标签：首档 ≤X、中档 X–Y、末档 >X；唯一档位不显示标签。 */
+function tierLabel(low: number, high: number | null): string {
+  if (high === null) return low > 0 ? `>${formatContextTokens(low)}` : "";
+  if (low === 0) return `≤${formatContextTokens(high)}`;
+  return `${formatContextTokens(low)}–${formatContextTokens(high)}`;
+}
+
+/** 卡片价格区：单档一行；闲/忙时各一行；分档模型每档一行（同价档位已合并）。 */
+function PriceLines({ pricing, free }: { pricing?: ModelPricing; free: boolean }) {
+  const { t } = useTranslation();
+  if (!pricing || pricing.tiers.length === 0) {
+    return <span>{t("models.priceUnknown")}</span>;
+  }
+  if (free) {
+    return <span className="text-signal-success">{t("models.freeLimited")}</span>;
+  }
+  const perM = (r: ModelRates) =>
+    t("models.pricePerM", { p0: formatPrice(r.input), p1: formatPrice(r.output) });
+
+  // 闲/忙时模型（DeepSeek 系列）均为单档：档位价即闲时价，忙时价单独给出
+  if (pricing.timeOfDay) {
+    const off = pricing.tiers[0].rates;
+    const peak = pricing.timeOfDay.peak;
+    return (
+      <div
+        className="flex flex-col gap-0.5"
+        title={t("models.timeOfDayWindows", { p0: formatPeakWindows(pricing.timeOfDay) })}
+      >
+        <span className="font-mono">
+          {t("models.priceOffPeak", { p0: formatPrice(off.input), p1: formatPrice(off.output) })}
+        </span>
+        <span className="font-mono text-signal-info">
+          {t("models.pricePeak", { p0: formatPrice(peak.input), p1: formatPrice(peak.output) })}
+        </span>
+      </div>
+    );
+  }
+
+  const tiers = mergeEqualTiers(pricing.tiers);
+  if (tiers.length > 1) {
+    return (
+      <div className="flex flex-col gap-0.5" title={t("models.tieredTitle")}>
+        {tiers.map((tier, i) => {
+          const low = i === 0 ? 0 : tiers[i - 1].maxContext ?? 0;
+          const label = tierLabel(low, tier.maxContext);
+          return (
+            <span key={i} className="font-mono">
+              {label
+                ? t("models.priceTier", {
+                    p0: label,
+                    p1: formatPrice(tier.rates.input),
+                    p2: formatPrice(tier.rates.output),
+                  })
+                : perM(tier.rates)}
+            </span>
+          );
+        })}
+      </div>
+    );
+  }
+  return <span className="font-mono">{perM(tiers[0].rates)}</span>;
 }
 
 /**
@@ -256,10 +334,8 @@ export function ModelsView() {
         <div className="grid grid-cols-3 gap-3 overflow-y-auto pb-4 pr-1">
           {filtered.map(({ model: m, pricing, access: acc }) => {
             const provider = pricing?.provider ?? providerForModel(m.id);
-            const rates = baseRates(pricing);
             const free = !!pricing?.deal?.free;
             const discount = pricing?.deal && !free ? pricing.deal.discountPercent : 0;
-            const multiTier = (pricing?.tiers.length ?? 0) > 1;
             const unavailable = acc?.allowed === false;
             const accessHint = unavailable
               ? acc?.minimum_plan
@@ -335,37 +411,16 @@ export function ModelsView() {
                   )}
                 </div>
 
-                {/* 价格概览：按 1M tokens 的输入/输出单价；免费或未收录时给出对应说明 */}
-                <div className="flex items-center justify-between text-2xs text-muted-foreground">
-                  {rates ? (
-                    free ? (
-                      <span className="text-signal-success">{t("models.freeLimited")}</span>
-                    ) : (
-                      <span className="font-mono">
-                        {t("models.pricePerM", {
-                          p0: formatPrice(rates.input),
-                          p1: formatPrice(rates.output),
-                        })}
-                      </span>
-                    )
-                  ) : (
-                    <span>{t("models.priceUnknown")}</span>
+                {/* 价格概览：闲/忙时或多档模型分行展示，右侧保留上下文规模 */}
+                <div className="flex items-center justify-between gap-2 text-2xs text-muted-foreground">
+                  <PriceLines pricing={pricing} free={free} />
+                  {pricing?.contextWindow && (
+                    <span className="shrink-0">
+                      {t("models.contextTokens", {
+                        p0: formatContextTokens(pricing.contextWindow),
+                      })}
+                    </span>
                   )}
-                  <span className="flex items-center gap-1">
-                    {multiTier && <span title={t("models.tieredTitle")}>{t("models.tiered")}</span>}
-                    {pricing?.timeOfDay && (
-                      <span className="text-signal-info" title={pricing.timeOfDay.windows}>
-                        {t("models.timeOfDay")}
-                      </span>
-                    )}
-                    {pricing?.contextWindow && (
-                      <span>
-                        {t("models.contextTokens", {
-                          p0: formatContextTokens(pricing.contextWindow),
-                        })}
-                      </span>
-                    )}
-                  </span>
                 </div>
               </Card>
             );
