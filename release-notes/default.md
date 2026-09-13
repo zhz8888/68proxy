@@ -5,7 +5,9 @@
 | 平台 | 架构 | 下载 | 说明 |
 | :--- | :--- | :--- | :--- |
 | 🪟 **Windows** | x86_64 | [安装版](https://github.com/{{REPO}}/releases/download/{{TAG}}/68proxy-{{TAG}}-Windows-x64-setup.exe) · [绿色版](https://github.com/{{REPO}}/releases/download/{{TAG}}/68proxy-{{TAG}}-Windows-x64-Portable.zip) | 安装版含快捷方式与卸载项；绿色版解压即用，不写注册表 |
-| 🍎 **macOS** | Apple Silicon (arm64) | [磁盘映像 dmg](https://github.com/{{REPO}}/releases/download/{{TAG}}/68proxy-{{TAG}}-macOS-aarch64.dmg) | 拖入「应用程序」即可 |
+| 🍎 **macOS** | Apple Silicon (arm64) | [磁盘映像 dmg](https://github.com/{{REPO}}/releases/download/{{TAG}}/68proxy-{{TAG}}-macOS-aarch64.dmg) · [应用包 zip](https://github.com/{{REPO}}/releases/download/{{TAG}}/68proxy-{{TAG}}-macOS-aarch64.app.zip) | dmg 打开后拖入「应用程序」；zip 解压得到 `68proxy.app`，同样拖入即可 |
+
+> macOS 的两个产物内容相同，按习惯二选一：**dmg** 适合常规安装，**zip** 适合脚本分发或不便挂载磁盘映像的场景。
 
 ## ⚠️ 首次打开提示
 

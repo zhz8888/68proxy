@@ -175,7 +175,9 @@ jobs:
             }
           }
 
-      # macOS 资产：dmg（现状不变）
+      # macOS 资产：dmg 镜像 + .app 压缩包
+      # 两者内容相同（同一构建产物的两种封装）：dmg 面向常规安装，.app zip 免挂载
+      # 磁盘映像，便于脚本分发与自动化部署
       - name: Prepare macOS Assets
         if: runner.os == 'macOS'
         shell: bash
@@ -183,14 +185,27 @@ jobs:
           set -euxo pipefail
           mkdir -p release-assets
           VERSION="${{ needs.validate.outputs.tag }}"  # 例如 v1.0.0
+          BUNDLE_DIR="src-tauri/target/aarch64-apple-darwin/release/bundle"
 
-          DMG=$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name "*.dmg" | head -1 || true)
+          DMG=$(find "$BUNDLE_DIR/dmg" -name "*.dmg" | head -1 || true)
           if [ -n "$DMG" ]; then
             NEW_DMG="68proxy-${VERSION}-macOS-aarch64.dmg"
             cp "$DMG" "release-assets/$NEW_DMG"
             echo "✅ DMG copied: $NEW_DMG"
           else
-            echo "No DMG found under target/aarch64-apple-darwin/release/bundle/dmg" >&2
+            echo "No DMG found under $BUNDLE_DIR/dmg" >&2
+            exit 1
+          fi
+
+          # .app 目录（dmg 同一构建产物）；--keepParent 让 zip 顶层就是 .app 本身，
+          # 解压后可直接拖入「应用程序」；-k 生成 zip，--sequesterRsrc 保留扩展属性
+          APP=$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name "*.app" | head -1 || true)
+          if [ -n "$APP" ]; then
+            NEW_APP_ZIP="68proxy-${VERSION}-macOS-aarch64.app.zip"
+            ditto -c -k --sequesterRsrc --keepParent "$APP" "release-assets/$NEW_APP_ZIP"
+            echo "✅ app zip created: $NEW_APP_ZIP"
+          else
+            echo "No .app found under $BUNDLE_DIR/macos" >&2
             exit 1
           fi
 

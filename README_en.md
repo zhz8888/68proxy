@@ -169,8 +169,9 @@ Artifacts produced:
 | 🖥️ Windows | **Installer** | `target/release/bundle/nsis/68proxy_<version>_x64-setup.exe` | NSIS setup with desktop shortcut, Start Menu entry and uninstaller — recommended for daily use |
 | 🖥️ Windows | **Portable** | `68proxy.exe` | No install needed, double-click to run — great for on-the-go use |
 | 🍎 macOS | **dmg image** | `target/aarch64-apple-darwin/release/bundle/dmg/68proxy_<version>_aarch64.dmg` | Apple Silicon (arm64) dmg; not Apple-notarized (see first-launch note below) |
+| 🍎 macOS | **App bundle zip** | `target/aarch64-apple-darwin/release/bundle/macos/68proxy.app` | Packed as `68proxy-<version>-macOS-aarch64.app.zip`; unzip to get `68proxy.app` and drag it into Applications — handy for scripted distribution or when mounting a disk image is inconvenient |
 
-> Both Windows versions and the macOS dmg are shipped on GitHub Releases, each verified by sha256.
+> GitHub Releases ships both Windows versions plus the macOS dmg and app-bundle zip; the two macOS artifacts are identical in content, pick whichever you prefer.
 
 > **First launch on macOS**: the app is not signed or notarized by Apple, so Gatekeeper may block it on first launch. Right-click the app in Finder → Applications → **Open** to bypass, or remove the quarantine attribute in Terminal:
 >
