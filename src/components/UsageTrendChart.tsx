@@ -5,6 +5,18 @@ import type { UsageChartPoint } from "@/lib/api";
 import { formatCompactNumber } from "@/lib/format";
 
 /**
+ * 成本模式的 Y 轴刻度文本：美元值不能取整后再格式化为紧凑数字，
+ * 否则亚美元区间（如最大 $0.55）的刻度会全部四舍五入成 0，看起来像没有成本。
+ * 按数值大小选择精度：≥$10 取整、≥$0.1 保留 2 位、更小保留 4 位。
+ */
+function formatCostTick(v: number): string {
+  if (v === 0) return "$0";
+  if (v >= 10) return `$${Math.round(v)}`;
+  if (v >= 0.1) return `$${v.toFixed(2)}`;
+  return `$${v.toFixed(4)}`;
+}
+
+/**
  * token 用量趋势图：纯 SVG 手绘面积图（不引入图表库，保持项目零依赖极简风格）。
  * 支持 tokens / cost 双模式切换；tokens 模式画输入+输出叠加面积，cost 模式画成本线。
  */
@@ -92,7 +104,9 @@ export function UsageTrendChart({
               className="fill-muted-foreground"
               fontSize="10"
             >
-              {formatCompactNumber(Math.round(t.value))}
+              {mode === "tokens"
+                ? formatCompactNumber(t.value)
+                : formatCostTick(t.value)}
             </text>
           </g>
         ))}

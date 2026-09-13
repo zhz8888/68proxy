@@ -155,6 +155,11 @@ export function ConfigView() {
   const [proxyPortInput, setProxyPortInput] = useState(
     DEFAULTS.proxy_port > 0 ? String(DEFAULTS.proxy_port) : "",
   );
+  // 模型刷新间隔以字符串保存（同端口输入模式）：清空/非法值期间不同步到配置，
+  // 否则 Number("") 得 0 会让模型缓存判断恒为未命中、每次取模型都打上游
+  const [refreshInput, setRefreshInput] = useState(
+    String(DEFAULTS.model_refresh_interval_secs),
+  );
   // 是否已完成一次成功的加载：用于跳过一次「加载后立即自动保存」
   const skipNextAutosave = useRef(true);
   // 本地转发 Key（sk-）的凭据状态
@@ -175,6 +180,7 @@ export function ConfigView() {
         setCfg({ ...c, language: c.language === "en" ? "en" : "zh" });
         setPortInput(String(c.port));
         setProxyPortInput(c.proxy_port > 0 ? String(c.proxy_port) : "");
+        setRefreshInput(String(c.model_refresh_interval_secs));
         setLocalKey(k);
         setLoaded(true);
       })
@@ -210,6 +216,15 @@ export function ConfigView() {
     const n = Number(raw);
     if (raw.trim() !== "" && Number.isInteger(n) && n >= 1 && n <= 65535) {
       update("proxy_port", n);
+    }
+  }
+
+  /** 更新模型刷新间隔输入：仅在正整数时同步到配置，空值/非法值期间不触发保存。 */
+  function updateRefreshInterval(raw: string) {
+    setRefreshInput(raw);
+    const n = Number(raw);
+    if (raw.trim() !== "" && Number.isInteger(n) && n >= 1) {
+      update("model_refresh_interval_secs", n);
     }
   }
 
@@ -371,8 +386,8 @@ export function ConfigView() {
               <Input
                 type="number"
                 min={1}
-                value={cfg.model_refresh_interval_secs}
-                onChange={(e) => update("model_refresh_interval_secs", Number(e.target.value))}
+                value={refreshInput}
+                onChange={(e) => updateRefreshInterval(e.target.value)}
               />
             </Field>
           </Section>
