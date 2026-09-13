@@ -597,8 +597,8 @@ pub fn get_stats(conn: &Connection, period: Period) -> Result<UsageStats, String
     })
 }
 
-/// 趋势图数据：today/24h 按小时 24 桶，7D/30D/60D 按天 N 桶
-/// （数组按时间从旧到新排列，index 0 最早）。
+/// 趋势图数据：today/24h 按小时 24 桶，7D/30D/60D 按天 N 桶，
+/// all 按数据实际跨度自动按天/按月出桶（数组按时间从旧到新排列，index 0 最早）。
 pub fn get_chart(conn: &Connection, period: Period) -> Result<Vec<ChartPoint>, String> {
     let now = super::state::now_millis();
     match period.days() {
@@ -619,6 +619,11 @@ pub fn get_chart(conn: &Connection, period: Period) -> Result<Vec<ChartPoint>, S
             Ok(points)
         }
         None => {
+            // 「全部」与 get_stats（cutoff 0）的终身口径对齐：若仍按 24 小时出桶，
+            // 汇总卡片是终身数据而趋势图只有一天，口径自相矛盾
+            if period == Period::All {
+                return chart_all(conn);
+            }
             let cutoff = match period {
                 Period::Today => local_midnight_millis(),
                 _ => now.saturating_sub(24 * 60 * 60 * 1000),
@@ -657,6 +662,75 @@ pub fn get_chart(conn: &Connection, period: Period) -> Result<Vec<ChartPoint>, S
                 .collect())
         }
     }
+}
+
+/// 「全部」范围的趋势图：与 `get_stats` 的终身口径一致（从最早明细起）。
+///
+/// 起点取 `usage_history` 最早一条记录；跨度 ≤ 90 天按天出桶（复用按天聚合），
+/// 更长则按月聚合，避免桶数与 X 轴标签过多导致图表不可读。无数据返回空数组。
+fn chart_all(conn: &Connection) -> Result<Vec<ChartPoint>, String> {
+    let earliest: Option<i64> = conn
+        .query_row("SELECT MIN(ts) FROM usage_history", [], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
+        .map_err(|e| i18n::err_args("query_rows_failed", &[&e.to_string()]))?;
+    let Some(earliest) = earliest.filter(|v| *v > 0) else {
+        return Ok(Vec::new());
+    };
+    let start = chrono::DateTime::from_timestamp(earliest / 1000, 0)
+        .map(|dt| dt.with_timezone(&Local))
+        .unwrap_or_else(Local::now)
+        .date_naive();
+    let today = Local::now().date_naive();
+
+    let mut points = Vec::new();
+    if (today - start).num_days() <= 90 {
+        // 按天：起点日到今日逐日取聚合
+        let mut d = start;
+        while d <= today {
+            let key = format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day());
+            let agg = load_day(conn, &key);
+            points.push(ChartPoint {
+                label: format!("{:02}-{:02}", d.month(), d.day()),
+                prompt_tokens: agg.prompt_tokens,
+                completion_tokens: agg.completion_tokens,
+                cost: agg.cost,
+            });
+            d = match d.succ_opt() {
+                Some(next) => next,
+                None => break,
+            };
+        }
+    } else {
+        // 按月聚合：起点月到当前月，逐月合并该月的按天聚合
+        let mut year = start.year();
+        let mut month = start.month();
+        loop {
+            let mut agg = DayAgg::default();
+            let start_key = format!("{year:04}-{month:02}-01");
+            let end_key = format!("{year:04}-{month:02}-31");
+            merge_day_into(&mut agg, &start_key, &end_key, conn)?;
+            points.push(ChartPoint {
+                label: format!("{year:04}-{month:02}"),
+                prompt_tokens: agg.prompt_tokens,
+                completion_tokens: agg.completion_tokens,
+                cost: agg.cost,
+            });
+            if year == today.year() && month == today.month() {
+                break;
+            }
+            month += 1;
+            if month > 12 {
+                month = 1;
+                year += 1;
+            }
+            // 防御：极端数据（未来时间戳）下避免无限循环
+            if points.len() > 600 {
+                break;
+            }
+        }
+    }
+    Ok(points)
 }
 
 /// 查询明细行（ts 区间，旧在前），供实时聚合用。
@@ -975,6 +1049,23 @@ mod tests {
             assert!(p.get("completion_tokens").is_some());
             assert!(p.get("cost").is_some());
         }
+    }
+
+    /// 「全部」范围趋势图与终身汇总口径一致：覆盖到最早一条明细，而非仅最近 24 小时。
+    #[test]
+    fn chart_all_covers_earliest_record() {
+        let conn = temp_conn();
+        // 一条 3 天前的明细：All 应把它纳入（按天出桶），不能退化成 24 小时窗口
+        let three_days_ago = super::super::state::now_millis() - 3 * 24 * 60 * 60 * 1000;
+        record_usage(&conn, &entry(three_days_ago, "m", "/v1/chat/completions", "ok", 100, 50, 0)).unwrap();
+        let chart = get_chart(&conn, Period::All).unwrap();
+        // 起点为记录当天 → 至少 4 个天桶，且总 token 数等于明细之和
+        assert!(chart.len() >= 4, "All 应覆盖到最早记录，实际桶数 {}", chart.len());
+        let total: u64 = chart.iter().map(|p| p.prompt_tokens + p.completion_tokens).sum();
+        assert_eq!(total, 150, "All 趋势图应包含最早明细的 token");
+        // 无数据时返回空数组而非固定 24 桶
+        let empty = temp_conn();
+        assert!(get_chart(&empty, Period::All).unwrap().is_empty());
     }
 
     /// 最近请求明细按时间倒序返回且 token 数正确。
