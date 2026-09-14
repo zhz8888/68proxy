@@ -204,6 +204,10 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
             let _ = crate::auth_login_cancel(app()?);
             Ok(Value::Null)
         }
+        "auth_login_open_browser" => Ok(to_value(crate::auth_login_open_browser(
+            s("url"),
+            b("private"),
+        ))?),
 
         // ── 账户使用规则 ──
         "account_routing_get" => Ok(crate::account_routing_get(app()?)),

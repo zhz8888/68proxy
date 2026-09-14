@@ -316,6 +316,9 @@
     "loginWaiting": "已启动授权回调服务器（127.0.0.1 随机端口），等待你在浏览器中完成授权…",
     "openBrowserAuth": "打开浏览器授权",
     "openBrowserFailed": "打开浏览器失败：{{p0}}",
+    "privateModeLabel": "隐私模式",
+    "privateModeHint": "以无痕窗口打开授权页，避免浏览器中已登录的账号干扰本次登录。",
+    "privateModeUnavailable": "当前没有支持隐私模式的浏览器，已用普通窗口打开。",
     "loginSuccess": "Command Code 账户登录成功",
     "loginSuccessMessage": "登录成功，账户已添加。",
     "loginDenied": "授权被拒绝，你可以关闭弹窗后重试。",
@@ -428,6 +431,7 @@
     "generate": "随机生成"
   },
   "errors": {
+    "browser_open_failed": "打开浏览器失败：{{p0}}",
     "settings_store_uninitialized": "设置库未初始化",
     "account_key_prefix": "Command Code 账户 Key 必须以 user_ 开头",
     "account_key_empty": "账户 key 不能为空",

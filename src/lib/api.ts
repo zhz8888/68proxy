@@ -123,6 +123,12 @@ export interface AuthLoginPoll {
   error?: string;
 }
 
+/** 打开浏览器授权页的结果：实际使用的浏览器与是否真正进入隐私模式。 */
+export interface OpenBrowserOutcome {
+  browser: "chrome" | "edge" | "firefox" | "safari" | "default";
+  private: boolean;
+}
+
 /** 用量分组行（按模型/按端点），含请求数、各 token 列与估算成本。 */
 export interface UsageGroupRow {
   key: string;
@@ -320,10 +326,12 @@ export const api = {
   accountRename: (userId: string, userName: string) =>
     invoke<void>("account_rename", { userId, userName }),
   accountRemove: (index: number) => invoke<void>("account_remove", { index }),
-  // 浏览器授权登录：启动（返回授权 URL）/ 轮询结果 / 取消
+  // 浏览器授权登录：启动（返回授权 URL）/ 轮询结果 / 取消 / 打开授权页（支持隐私模式）
   authLoginStart: () => invoke<{ url: string; port: number }>("auth_login_start"),
   authLoginPoll: () => invoke<AuthLoginPoll>("auth_login_poll"),
   authLoginCancel: () => invoke<void>("auth_login_cancel"),
+  authLoginOpenBrowser: (url: string, privateMode: boolean) =>
+    invoke<OpenBrowserOutcome>("auth_login_open_browser", { url, private: privateMode }),
   // 模型列表：force 为 true 时忽略缓存强制向上游拉取；fallback 表示是否使用兜底列表
   modelsGet: (force = false) =>
     invoke<{ data: ModelInfo[]; fallback: boolean }>("models_get", { force }),

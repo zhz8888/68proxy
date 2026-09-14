@@ -3,6 +3,8 @@
 //! 日志/请求事件转发与窗口生命周期钩子的装配。
 
 mod credentials;
+/// 浏览器打开的平台适配：隐私模式打开授权页（详见模块文档）。
+mod browser;
 /// 后端国际化：错误码生成与日志文案语言选择（详见模块文档）。
 mod i18n;
 mod proxy;
@@ -311,6 +313,13 @@ fn auth_login_cancel(app: AppHandle) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
     proxy::auth_login::cancel_auth_login(&ctx.proxy_state);
     Ok(())
+}
+
+/// 打开浏览器授权页：`private` 为 true 时优先以隐私模式打开（避免与浏览器中
+/// 已登录账号冲突）。返回实际使用的浏览器与是否真正进入隐私模式。
+#[tauri::command]
+fn auth_login_open_browser(url: String, private: bool) -> Result<browser::OpenBrowserOutcome, String> {
+    browser::open_auth_browser(&url, private)
 }
 
 /// 获取可用模型列表。`force` 为 true 时先清空缓存再向上游拉取；
@@ -960,6 +969,7 @@ pub fn run() {
             auth_login_start,
             auth_login_poll,
             auth_login_cancel,
+            auth_login_open_browser,
             models_get,
             models_catalog,
             models_catalog_update,

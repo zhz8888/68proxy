@@ -115,6 +115,8 @@ export function AccountsView() {
   const [loginUrl, setLoginUrl] = useState("");
   const [loginStatus, setLoginStatus] = useState<"idle" | "pending" | "success" | "denied" | "failed">("idle");
   const [loginError, setLoginError] = useState("");
+  // 是否以隐私模式打开授权页（避免与浏览器中已登录的账号冲突）
+  const [loginPrivate, setLoginPrivate] = useState(false);
   // 账户改名状态（renameId 为正在改名的 userId）
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -268,6 +270,7 @@ export function AccountsView() {
     setLoginStatus("idle");
     setLoginError("");
     setLoginUrl("");
+    setLoginPrivate(false);
     try {
       const { url } = await api.authLoginStart();
       setLoginUrl(url);
@@ -278,13 +281,23 @@ export function AccountsView() {
     }
   }
 
-  /** 在系统浏览器中打开授权 URL。 */
+  /** 在浏览器中打开授权 URL（可选用隐私模式）。 */
   async function openAuthBrowser() {
     if (!loginUrl) return;
     try {
-      await openExternal(loginUrl);
-    } catch (e) {
-      toast.error(t("accounts.openBrowserFailed", { p0: errText(e) }));
+      // 桌面端走后端命令：隐私模式优先用 Chrome/Edge 的无痕窗口，避免与
+      // 浏览器中已登录账号冲突；浏览器调试环境（dev bridge）无此命令，
+      // 回退到普通打开
+      const out = await api.authLoginOpenBrowser(loginUrl, loginPrivate);
+      if (loginPrivate && !out.private) {
+        toast.warning(t("accounts.privateModeUnavailable"));
+      }
+    } catch {
+      try {
+        await openExternal(loginUrl);
+      } catch (e) {
+        toast.error(t("accounts.openBrowserFailed", { p0: errText(e) }));
+      }
     }
   }
 
@@ -643,6 +656,13 @@ export function AccountsView() {
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
                 <p className="text-center text-sm text-muted-foreground">
                   {t("accounts.loginWaiting")}
+                </p>
+                <label className="flex items-center gap-2 text-sm">
+                  <Switch checked={loginPrivate} onCheckedChange={setLoginPrivate} />
+                  {t("accounts.privateModeLabel")}
+                </label>
+                <p className="max-w-xs text-center text-2xs text-muted-foreground">
+                  {t("accounts.privateModeHint")}
                 </p>
                 <Button onClick={openAuthBrowser}>
                   <ExternalLink />

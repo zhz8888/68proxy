@@ -316,6 +316,9 @@
     "loginWaiting": "The authorization callback server has started (127.0.0.1 random port); waiting for you to finish authorization in the browser…",
     "openBrowserAuth": "Open browser authorization",
     "openBrowserFailed": "Failed to open the browser: {{p0}}",
+    "privateModeLabel": "Private mode",
+    "privateModeHint": "Opens the authorization page in an incognito window so accounts already logged in in your browser won't interfere.",
+    "privateModeUnavailable": "No browser with private mode is available; opened in a normal window instead.",
     "loginSuccess": "Command Code account logged in successfully",
     "loginSuccessMessage": "Login succeeded; the account has been added.",
     "loginDenied": "Authorization was denied; close the dialog and try again.",
@@ -428,6 +431,7 @@
     "generate": "Generate"
   },
   "errors": {
+    "browser_open_failed": "Failed to open the browser: {{p0}}",
     "settings_store_uninitialized": "Settings store is not initialized",
     "account_key_prefix": "The Command Code account key must start with user_",
     "account_key_empty": "Account key cannot be empty",
