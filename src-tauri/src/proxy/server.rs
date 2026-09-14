@@ -670,8 +670,10 @@ async fn chat_completions(
     };
     record_start(&st, &ctx);
 
-    let empty_placeholder = st.config.read().unwrap().empty_system_placeholder;
-    let cc_body = convert::build_cc_request(&req, empty_placeholder);
+    let cfg = st.config.read().unwrap().clone();
+    let empty_placeholder = cfg.empty_system_placeholder;
+    let profile = super::fingerprint::default_device_profile(&cfg.device_project_dir);
+    let cc_body = convert::build_cc_request(&req, empty_placeholder, &profile, &cfg.cli_mode);
     cc_client::ensure_initialized(&st, &api_key, &user_id).await;
     let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &user_id, &headers, prompt_cache_key).await {
         Ok(r) => r,
@@ -694,7 +696,6 @@ async fn chat_completions(
             .chars()
             .take(500)
             .collect::<String>();
-        log::error(&format!("Command Code API error: {status} — {}", summarize_upstream_error(&text)));
         // 上游明确报额度耗尽：即时失效该账户的路由绑定，下一次请求改走其他账户
         if super::quota::looks_exhausted_error(status, &text) {
             log::warn(i18n::pick(
@@ -704,6 +705,16 @@ async fn chat_completions(
             super::quota::mark_exhausted(&st, &user_id);
         }
         let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
+        let code = mapped_body
+            .pointer("/error/code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // 先映射再记日志，能记到上游 code（USAGE_EXCEEDED 等）
+        log::error(&format!(
+            "Command Code API error: {status} — {} (code: {})",
+            summarize_upstream_error(&text),
+            code
+        ));
         let retry_after = mapped_body.get("retry_after").and_then(|v| v.as_u64());
         finish_request(&st, &ctx, "error");
         return json_response(mapped_status, mapped_body, retry_after);
@@ -765,8 +776,10 @@ async fn messages(
     record_start(&st, &ctx);
 
     let openai_req = convert::convert_anthropic_to_openai(&req);
-    let empty_placeholder = st.config.read().unwrap().empty_system_placeholder;
-    let cc_body = convert::build_cc_request(&openai_req, empty_placeholder);
+    let cfg = st.config.read().unwrap().clone();
+    let empty_placeholder = cfg.empty_system_placeholder;
+    let profile = super::fingerprint::default_device_profile(&cfg.device_project_dir);
+    let cc_body = convert::build_cc_request(&openai_req, empty_placeholder, &profile, &cfg.cli_mode);
     cc_client::ensure_initialized(&st, &api_key, &user_id).await;
     let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &user_id, &headers, None).await {
         Ok(r) => r,
@@ -789,7 +802,17 @@ async fn messages(
             .chars()
             .take(500)
             .collect::<String>();
-        log::error(&format!("Command Code API error (Anthropic): {status} — {}", summarize_upstream_error(&text)));
+        let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
+        let code = mapped_body
+            .pointer("/error/code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // 先映射再记日志，能记到上游 code；Anthropic 错误体保持形状不泄漏 code
+        log::error(&format!(
+            "Command Code API error (Anthropic): {status} — {} (code: {})",
+            summarize_upstream_error(&text),
+            code
+        ));
         // 上游明确报额度耗尽：即时失效该账户的路由绑定（与 OpenAI 路径一致）
         if super::quota::looks_exhausted_error(status, &text) {
             log::warn(i18n::pick(
@@ -798,7 +821,6 @@ async fn messages(
             ));
             super::quota::mark_exhausted(&st, &user_id);
         }
-        let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
         let err_type = mapped_body
             .pointer("/error/type")
             .and_then(|v| v.as_str())
@@ -883,8 +905,10 @@ async fn responses(
     record_start(&st, &ctx);
 
     let openai_req = convert::convert_responses_to_openai(&req);
-    let empty_placeholder = st.config.read().unwrap().empty_system_placeholder;
-    let cc_body = convert::build_cc_request(&openai_req, empty_placeholder);
+    let cfg = st.config.read().unwrap().clone();
+    let empty_placeholder = cfg.empty_system_placeholder;
+    let profile = super::fingerprint::default_device_profile(&cfg.device_project_dir);
+    let cc_body = convert::build_cc_request(&openai_req, empty_placeholder, &profile, &cfg.cli_mode);
     cc_client::ensure_initialized(&st, &api_key, &user_id).await;
     let upstream = match cc_client::forward_to_cc(&st, &cc_body, &api_key, &user_id, &headers, prompt_cache_key).await {
         Ok(r) => r,
@@ -907,7 +931,17 @@ async fn responses(
             .chars()
             .take(500)
             .collect::<String>();
-        log::error(&format!("Command Code API error (Responses): {status} — {}", summarize_upstream_error(&text)));
+        let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
+        let code = mapped_body
+            .pointer("/error/code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // 先映射再记日志，能记到上游 code
+        log::error(&format!(
+            "Command Code API error (Responses): {status} — {} (code: {})",
+            summarize_upstream_error(&text),
+            code
+        ));
         // 上游明确报额度耗尽：即时失效该账户的路由绑定（三条协议入口保持一致）
         if super::quota::looks_exhausted_error(status, &text) {
             log::warn(i18n::pick(
@@ -916,7 +950,6 @@ async fn responses(
             ));
             super::quota::mark_exhausted(&st, &user_id);
         }
-        let (mapped_status, mapped_body) = errors::map_cc_error(status, &text);
         let retry_after = mapped_body.get("retry_after").and_then(|v| v.as_u64());
         finish_request(&st, &ctx, "error");
         return json_response(mapped_status, mapped_body, retry_after);

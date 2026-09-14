@@ -1032,9 +1032,6 @@ pub fn run() {
 
             let proxy_state = proxy::state::AppState::new(cfg.clone());
             *proxy_state.usage.lock().unwrap() = Some(usage_conn);
-            // 注入指纹持久化路径：同一 API Key 重启后复用同一设备指纹
-            proxy_state
-                .set_fingerprint_path(app.path().app_config_dir()?.join(proxy::fingerprint::STORE_FILE));
 
             // 开机自启跟随配置
             if cfg.autostart {

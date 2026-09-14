@@ -1,5 +1,6 @@
 use serde_json::{json, Map, Value};
 
+use super::fingerprint::DeviceProfile;
 use super::state::now_secs;
 
 /// 请求未指定 model 时使用的默认模型。
@@ -8,12 +9,27 @@ pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash";
 const MAX_TOKENS_CAP: u64 = 200_000;
 /// 请求未指定 max_tokens 时的默认值。
 const DEFAULT_MAX_TOKENS: u64 = 64_000;
-/// 写入 CLI 信封 config.environment 的伪装运行环境描述。
-const ENV_STRING: &str = "win32-x64, Node.js v24.16.0";
 
 /// 尽力解析 JSON 字符串，失败时返回空对象 `{}`（用于 tool_call 的 arguments）。
 fn try_parse_json(s: &str) -> Value {
     serde_json::from_str(s).unwrap_or_else(|_| json!({}))
+}
+
+/// CLI 发送前会重写部分工具名（resolveToolNameAlias / ow 表）。
+const TOOL_NAME_ALIASES: &[(&str, &str)] = &[
+    ("bash_output", "shell_output"),
+    ("task_output", "shell_output"),
+    ("tool_search", "search_tools"),
+    ("read_multiple_files", "read_file"),
+];
+
+/// 按 CLI 的别名表重写工具名；未收录的工具名原样透传。
+fn to_wire_tool_name(name: &str) -> String {
+    TOOL_NAME_ALIASES
+        .iter()
+        .find(|(from, _)| *from == name)
+        .map(|(_, to)| (*to).to_string())
+        .unwrap_or_else(|| name.to_string())
 }
 
 /// 取 JSON 值的字符串内容，非字符串或缺失时返回空串。
@@ -21,28 +37,25 @@ fn as_str_or_empty(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
 }
 
-/// 判断 Command Code 消息列表里是否已存在 cache_control 标记（用于避免重复注入）。
-fn has_cache_marker(cc_messages: &[Value]) -> bool {
-    cc_messages.iter().any(|m| {
-        m.get("content")
-            .and_then(|c| c.as_array())
-            .map(|parts| parts.iter().any(|p| p.get("cache_control").is_some()))
-            .unwrap_or(false)
-    })
-}
-
 /// OpenAI Chat Completions 请求 → Command Code 请求体（CLI 信封格式）。
 ///
-/// 主要转换：system/developer 消息提取为 params.system（为空且开关开启时发空格占位，
-/// 阻止上游注入默认提示词）；user/assistant/tool 消息转为 Command Code 的 content parts 结构
-/// （text/image/tool-call/tool-result）；assistant 的 reasoning_content 与 content 内
-/// reasoning part 回传为 `{type:"reasoning"}`；tools 扁平化为 `{type, name, description,
-/// input_schema}`；tool_choice 的 required 映射为 any；max_tokens 缺省 64000 并封顶
-/// 200000；stream 恒为 true（上游只支持流式）。
+/// 主要转换：system/developer 消息提取为 params.system 块数组（对齐 CLI 的 toWireSystem，
+/// 非末块补 \n、cache_control 逐块保留；为空且开关开启时发空格占位，阻止上游注入默认提示词）；
+/// user/assistant/tool 消息转为 Command Code 的 content parts 结构（text/image/tool-call/tool-result）；
+/// assistant 的 reasoning_content 与 content 内 reasoning part 回传为 `{type:"reasoning"}`；
+/// tools 恒下发（无工具时为空数组，对齐 CLI）且去 type、工具名按别名表重写；
+/// tool_choice 的 required 映射为 any；max_tokens 缺省 64000 并封顶 200000；stream 恒为 true。
 ///
 /// - `empty_system_placeholder`：无 system 时是否发 `" "` 占位，防止 Command Code 上游注入
-///   约 7.5K token 的默认提示词。
-pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> Value {
+///   约 7.5K token 的默认提示词；
+/// - `profile`：设备档案（workingDir / environment 与指纹同源，避免自相矛盾）；
+/// - `cli_mode`：信封 mode（agent | learning | …，独立于 lifecycle 的 cli_session_mode）。
+pub fn build_cc_request(
+    openai_req: &Value,
+    empty_system_placeholder: bool,
+    profile: &DeviceProfile,
+    cli_mode: &str,
+) -> Value {
     let model = openai_req
         .get("model")
         .and_then(|v| v.as_str())
@@ -54,28 +67,49 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
         .cloned()
         .unwrap_or_default();
 
-    // system/developer 消息提取为顶层 system（OpenAI 新规范用 developer 承载 system prompt）
+    // system/developer 消息提取为块数组：CLI 的 toWireSystem 形态（非末块补 \n，
+    // cache_control 逐块保留）。旧注释「数组会被上游拒绝」来自更早协议版本，
+    // 已被 command-code@1.53.1 源码推翻 —— 块数组是 CLI 原生形态。
     let is_system_role =
         |m: &&Value| matches!(m.get("role").and_then(|r| r.as_str()), Some("system") | Some("developer"));
     let system_msgs: Vec<&Value> = messages.iter().filter(is_system_role).collect();
-    // content 既可能是字符串，也可能是 content-parts 数组（[{"type":"text","text":...}]），
-    // 两种都要抽取，否则数组式 system 会被静默丢弃
-    let system_prompt = system_msgs
-        .iter()
-        .filter_map(|m| m.get("content"))
-        .map(|c| match c {
-            Value::String(s) => s.clone(),
-            Value::Array(parts) => parts
-                .iter()
-                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        })
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut system_blocks: Vec<Value> = Vec::new();
+    for m in &system_msgs {
+        match m.get("content") {
+            Some(Value::String(s)) if !s.is_empty() => {
+                system_blocks.push(json!({ "type": "text", "text": s }));
+            }
+            Some(Value::Array(parts)) => {
+                for part in parts {
+                    let text = part
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if text.is_empty() && part.get("cache_control").is_none() {
+                        continue;
+                    }
+                    let mut block = json!({ "type": "text", "text": text });
+                    if let Some(cc) = part.get("cache_control") {
+                        block["cache_control"] = cc.clone();
+                    }
+                    system_blocks.push(block);
+                }
+            }
+            Some(other) if !other.is_null() => {
+                system_blocks.push(json!({ "type": "text", "text": other.to_string() }));
+            }
+            _ => {}
+        }
+    }
+    // 非最后一块补 \n（CLI 的 toWireSystem 行为）
+    for i in 0..system_blocks.len().saturating_sub(1) {
+        if let Some(t) = system_blocks[i].get_mut("text") {
+            if let Some(s) = t.as_str() {
+                *t = json!(format!("{s}\n"));
+            }
+        }
+    }
     let chat_messages: Vec<&Value> = messages
         .iter()
         .filter(|m| !is_system_role(m))
@@ -99,7 +133,7 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
         }
     }
 
-    let mut cc_messages: Vec<Value> = chat_messages
+    let cc_messages: Vec<Value> = chat_messages
         .iter()
         .map(|msg| match msg.get("role").and_then(|r| r.as_str()) {
             Some("user") => {
@@ -115,7 +149,16 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
                                         .pointer("/image_url/url")
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("");
-                                    json!({ "type": "image", "image": url })
+                                    // CC CLI 真实格式: { type: "image", image: "data:<mime>;base64,...", mimeType: "<mime>" }
+                                    let mut image_part = json!({ "type": "image", "image": url });
+                                    if let Some(media_type) = url
+                                        .strip_prefix("data:")
+                                        .and_then(|rest| rest.split(';').next())
+                                        .filter(|m| !m.is_empty())
+                                    {
+                                        image_part["mimeType"] = json!(media_type);
+                                    }
+                                    image_part
                                 } else {
                                     part.clone()
                                 }
@@ -191,7 +234,14 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
                 };
                 let output = match msg.get("content") {
                     Some(Value::String(s)) => s.clone(),
-                    Some(v) => serde_json::to_string(v).unwrap_or_default(),
+                    // CLI 的 toWireToolOutput：只取文本块，用 '\n' 拼接（不 JSON 序列化）
+                    Some(Value::Array(arr)) => arr
+                        .iter()
+                        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    Some(v) => v.to_string(),
                     None => String::new(),
                 };
                 json!({
@@ -208,24 +258,21 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
         })
         .collect();
 
-    // prompt_cache_key：在首个 user 消息的最后一个 text 块上注入 cache_control，
-    // 让上游把该块之前的内容作为 prompt cache 命中（OpenAI 风格缓存标记）。
-    // 消息中已有任何 cache_control 标记时跳过注入，避免重复标记。
+    // prompt_cache_key：缓存按前缀计算，system 正是最前的那段前缀，故把断点落在
+    // system 最后一块（块数组是 CLI 的原生形态，对应 systemSections[].cache）。
+    // 客户端已在任意消息块 / system 块上打过断点就保留；否则若给了 OpenAI 系的
+    // prompt_cache_key，在 system 末块补 ephemeral 断点。
+    let has_cache_marker = system_blocks.iter().any(|b| b.get("cache_control").is_some())
+        || cc_messages.iter().any(|m| {
+            m.get("content")
+                .and_then(|c| c.as_array())
+                .map(|parts| parts.iter().any(|p| p.get("cache_control").is_some()))
+                .unwrap_or(false)
+        });
     if let Some(cache_key) = openai_req.get("prompt_cache_key").and_then(|v| v.as_str()) {
-        if !cache_key.is_empty() && !has_cache_marker(&cc_messages) {
-            if let Some(first_user) = cc_messages
-                .iter_mut()
-                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-            {
-                if let Some(content) = first_user.get_mut("content").and_then(|c| c.as_array_mut()) {
-                    if let Some(last_text) = content
-                        .iter_mut()
-                        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
-                        .last()
-                    {
-                        last_text["cache_control"] = json!({ "type": "ephemeral" });
-                    }
-                }
+        if !cache_key.is_empty() && !has_cache_marker {
+            if let Some(last) = system_blocks.last_mut() {
+                last["cache_control"] = json!({ "type": "ephemeral" });
             }
         }
     }
@@ -238,11 +285,10 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
 
     let mut body = json!({
         "config": {
-            "workingDir": std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
+            // 伪造的项目目录（不再发宿主真实 cwd）；environment 用伪装的平台词，与指纹保持自洽
+            "workingDir": profile.project_dir,
             "date": chrono::Utc::now().format("%Y-%m-%d").to_string(),
-            "environment": ENV_STRING,
+            "environment": profile.platform,
             "structure": [],
             "isGitRepo": false,
             "currentBranch": "",
@@ -252,8 +298,10 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
         },
         "memory": Value::Null,
         "taste": Value::Null,
-        "skills": "",
+        "skills": Value::Null, // CLI 发 null，不是空串
         "permissionMode": "standard",
+        // 信封 mode（独立于 lifecycle metadata 的 cli_session_mode）
+        "mode": cli_mode,
         "params": {
             "model": model,
             "messages": cc_messages,
@@ -267,13 +315,13 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
         .and_then(|p| p.as_object_mut())
         .expect("params is object");
 
-    if !system_prompt.is_empty() {
-        params.insert("system".into(), json!(system_prompt));
+    if !system_blocks.is_empty() {
+        params.insert("system".into(), Value::Array(system_blocks));
     } else if empty_system_placeholder {
         // 上游在 params.system 缺省时会注入自身约 7.5K token 的默认提示词
         // （进入默认上下文/前缀路径），既产生大量 cached tokens 又污染对话。
         // 发一个空格占位即可绕过。
-        params.insert("system".into(), json!(" "));
+        params.insert("system".into(), json!([{ "type": "text", "text": " " }]));
     }
     if let Some(t) = openai_req.get("temperature") {
         params.insert("temperature".into(), t.clone());
@@ -281,22 +329,24 @@ pub fn build_cc_request(openai_req: &Value, empty_system_placeholder: bool) -> V
     if let Some(r) = openai_req.get("reasoning_effort") {
         params.insert("reasoning_effort".into(), r.clone());
     }
-    if let Some(tools) = openai_req.get("tools").and_then(|v| v.as_array()) {
-        if !tools.is_empty() {
-            let mapped: Vec<Value> = tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "type": t.get("type").and_then(|v| v.as_str()).unwrap_or("function"),
-                        "name": t.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or(""),
-                        "description": t.pointer("/function/description").and_then(|v| v.as_str()).unwrap_or(""),
-                        "input_schema": t.pointer("/function/parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
-                    })
-                })
-                .collect();
-            params.insert("tools".into(), Value::Array(mapped));
-        }
-    }
+    // CLI 总是下发 tools（没有工具时是空数组）—— 空数组与缺键在 wire 上可观测，这里对齐。
+    // CLI 的 toWireTools：只有 name / description / input_schema，没有 type 字段。
+    let tools = openai_req
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mapped: Vec<Value> = tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": to_wire_tool_name(t.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("")),
+                "description": t.pointer("/function/description").and_then(|v| v.as_str()).unwrap_or(""),
+                "input_schema": t.pointer("/function/parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
+            })
+        })
+        .collect();
+    params.insert("tools".into(), Value::Array(mapped));
     if let Some(tc) = openai_req.get("tool_choice") {
         // OpenAI 语义 → Command Code 语义：required 对应 any；指定函数对应 tool + name
         let mapped = match tc {
@@ -446,7 +496,7 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
                                 .iter()
                                 .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
                                 .collect::<Vec<_>>()
-                                .join(""),
+                                .join("\n"),
                             Some(v) => serde_json::to_string(v).unwrap_or_default(),
                             None => String::new(),
                         };
@@ -456,6 +506,10 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
                             "content": output,
                         }));
                     }
+                    // OpenAI 规范里 input 数组的联合类型第一个成员是 EasyInputMessage，它的
+                    // required 只有 role 与 content —— type 是可选的（SDK 示例普遍写作
+                    // { role: 'user', content: 'hi' }）。type 缺失但有 role 时按 message
+                    // 处理（落进下面的默认分支靠 role 兜底），否则这类 item 会被静默丢弃。
                     _ => {
                         let role = match item.get("role").and_then(|v| v.as_str()).unwrap_or("user") {
                             "assistant" => "assistant",
@@ -667,16 +721,32 @@ fn anthropic_image_to_url(block: &Value) -> Option<String> {
 pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
     // 1. system
     let mut system_prompt = String::new();
+    let mut system_blocks: Option<Vec<Value>> = None;
     if let Some(sys) = anthropic_req.get("system") {
         match sys {
             Value::String(s) => system_prompt = s.clone(),
             Value::Array(arr) => {
-                system_prompt = arr
+                // 保留 cache_control：build_cc_request 需要块数组才能把断点下发
+                // （CLI 的 params.system 就是块数组）
+                let blocks: Vec<Value> = arr
                     .iter()
                     .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                    .map(|b| {
+                        let mut blk = json!({ "type": "text", "text": b.get("text").and_then(|t| t.as_str()).unwrap_or("") });
+                        if let Some(cc) = b.get("cache_control") {
+                            blk["cache_control"] = cc.clone();
+                        }
+                        blk
+                    })
+                    .collect();
+                if !blocks.is_empty() {
+                    system_blocks = Some(blocks.clone());
+                    system_prompt = blocks
+                        .iter()
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                }
             }
             _ => {}
         }
@@ -686,7 +756,10 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
     let mut tool_name_from_id: Map<String, Value> = Map::new();
     let mut openai_messages: Vec<Value> = Vec::new();
     if !system_prompt.is_empty() {
-        openai_messages.push(json!({ "role": "system", "content": system_prompt }));
+        openai_messages.push(json!({
+            "role": "system",
+            "content": system_blocks.unwrap_or_else(|| vec![json!({ "type": "text", "text": system_prompt })]),
+        }));
     }
 
     let messages = anthropic_req
@@ -701,6 +774,9 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                 let mut text_content = String::new();
                 let mut thinking_content = String::new();
                 let mut tool_calls: Vec<Value> = Vec::new();
+                // 多块 text 保留为块数组（含 cache_control），与 CLI 的 toWireMessages 一致
+                let mut text_parts: Vec<Value> = Vec::new();
+                let mut text_has_cache = false;
                 let blocks = msg
                     .get("content")
                     .and_then(|c| c.as_array())
@@ -717,6 +793,15 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                             if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
                                 text_content.push_str(t);
                             }
+                            let mut part = json!({
+                                "type": "text",
+                                "text": block.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                            });
+                            if block.get("cache_control").is_some() {
+                                part["cache_control"] = block["cache_control"].clone();
+                                text_has_cache = true;
+                            }
+                            text_parts.push(part);
                         }
                         // Anthropic 的 thinking 块承载思考内容，转成 reasoning_content
                         // 交给 build_cc_request 回传，否则 Command Code 会因缺少 reasoning 而拒绝
@@ -741,9 +826,17 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                         _ => {}
                     }
                 }
+                // 多块 text / 带断点用块数组（保留 cache_control）；单块纯文本沿用字符串形态
+                let assistant_content = if text_parts.len() > 1 || text_has_cache {
+                    Value::Array(text_parts)
+                } else if text_content.is_empty() {
+                    Value::Null
+                } else {
+                    json!(text_content)
+                };
                 let mut assistant_msg = json!({
                     "role": "assistant",
-                    "content": if text_content.is_empty() { Value::Null } else { json!(text_content) },
+                    "content": assistant_content,
                 });
                 if !thinking_content.is_empty() {
                     assistant_msg["reasoning_content"] = json!(thinking_content);
@@ -755,7 +848,9 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
             }
             Some("user") => {
                 let mut text_content = String::new();
-                let mut image_parts: Vec<Value> = Vec::new();
+                // parts 保持原始顺序（text / image_url），与 CLI 的 toWireMessages 一致
+                let mut parts: Vec<Value> = Vec::new();
+                let mut text_has_cache = false;
                 let mut tool_results: Vec<Value> = Vec::new();
                 match msg.get("content") {
                     Some(Value::String(s)) => text_content = s.clone(),
@@ -766,11 +861,20 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                                     if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
                                         text_content.push_str(t);
                                     }
+                                    let mut part = json!({
+                                        "type": "text",
+                                        "text": block.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                                    });
+                                    if block.get("cache_control").is_some() {
+                                        part["cache_control"] = block["cache_control"].clone();
+                                        text_has_cache = true;
+                                    }
+                                    parts.push(part);
                                 }
                                 // Anthropic 图片块（base64 / url）转 OpenAI image_url：
                                 // 不转换的话客户端粘贴的截图会被静默丢弃，模型只能看到文本
                                 Some("image") => match anthropic_image_to_url(block) {
-                                    Some(url) => image_parts
+                                    Some(url) => parts
                                         .push(json!({ "type": "image_url", "image_url": { "url": url } })),
                                     None => super::log::warn(crate::i18n::pick(
                                         "Anthropic 图片块缺少 source/media_type/data，已忽略",
@@ -792,28 +896,27 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                     }
                     _ => {}
                 }
-                // 有图片时用 content 数组（text + image_url）；纯文本沿用字符串形态
-                if image_parts.is_empty() {
-                    if !text_content.is_empty() {
-                        openai_messages.push(json!({ "role": "user", "content": text_content }));
-                    }
-                } else {
-                    let mut parts: Vec<Value> = Vec::new();
-                    if !text_content.is_empty() {
-                        parts.push(json!({ "type": "text", "text": text_content }));
-                    }
-                    parts.extend(image_parts);
-                    openai_messages.push(json!({ "role": "user", "content": parts }));
+                // 注意：content 为字符串时 parts 为空，必须用 textContent 判空（否则整条消息会丢）
+                if !parts.is_empty() || !text_content.is_empty() {
+                    // 单块纯文本仍用字符串（线格不变）；多块 / 带断点 / 含图片时用块数组（CLI 的形态）
+                    let single_text = parts.len() <= 1
+                        && (parts.is_empty() || parts[0].get("type").and_then(|t| t.as_str()) == Some("text"))
+                        && !text_has_cache;
+                    openai_messages.push(json!({
+                        "role": "user",
+                        "content": if single_text { json!(text_content) } else { Value::Array(parts.clone()) },
+                    }));
                 }
                 for tr in &tool_results {
                     let tool_use_id = as_str_or_empty(tr.get("tool_use_id").unwrap_or(&Value::Null));
                     let content = match tr.get("content") {
                         Some(Value::String(s)) => s.clone(),
+                        // 对齐 CLI：tool_result 的文本块用 '\n' 拼接（旧版为 join("")）
                         Some(Value::Array(arr)) => arr
                             .iter()
                             .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
                             .collect::<Vec<_>>()
-                            .join(""),
+                            .join("\n"),
                         other => other.map(|v| v.to_string()).unwrap_or_default(),
                     };
                     openai_messages.push(json!({

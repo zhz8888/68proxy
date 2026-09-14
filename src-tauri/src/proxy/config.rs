@@ -178,6 +178,17 @@ pub struct Config {
     pub proxy_username: String,
     /// 自定义代理认证密码（可选，仅 custom 模式生效）。
     pub proxy_password: String,
+    /// 信封 mode（/alpha/generate 请求体的顶层 mode 字段）。
+    /// 服务端枚举（真机 400 报出）：agent | learning | custom-agent | custom-agent-create |
+    /// title-gen | tool-desc | compact | vision；默认 agent。
+    pub cli_mode: String,
+    /// lifecycle metadata 的 mode —— 注意这是另一个枚举：interactive | non-interactive。
+    pub cli_session_mode: String,
+    /// 指纹盐：改这个值 = 让所有账户换一台设备（哈希阶段仍用 CLI 固定盐，见 fingerprint.rs）。
+    pub fingerprint_salt: String,
+    /// 伪造的项目目录（留空则用内置的 C:\Users\dev\projects\app）；
+    /// 与 x-project-slug 同源，供多实例区分项目。
+    pub device_project_dir: String,
 }
 
 impl Default for Config {
@@ -215,6 +226,10 @@ impl Default for Config {
             proxy_port: 0,
             proxy_username: String::new(),
             proxy_password: String::new(),
+            cli_mode: "agent".into(),
+            cli_session_mode: "interactive".into(),
+            fingerprint_salt: String::new(),
+            device_project_dir: String::new(),
         }
     }
 }
@@ -376,6 +391,18 @@ impl Config {
         }
         if let Ok(v) = std::env::var("CC_PREFERRED_ACCOUNT_ID") {
             self.preferred_account_id = v;
+        }
+        if let Ok(v) = std::env::var("CC_CLI_MODE") {
+            self.cli_mode = v;
+        }
+        if let Ok(v) = std::env::var("CC_CLI_SESSION_MODE") {
+            self.cli_session_mode = v;
+        }
+        if let Ok(v) = std::env::var("CC_FINGERPRINT_SALT") {
+            self.fingerprint_salt = v;
+        }
+        if let Ok(v) = std::env::var("CC_DEVICE_PROJECT_DIR") {
+            self.device_project_dir = v;
         }
     }
 

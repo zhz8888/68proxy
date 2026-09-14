@@ -7,6 +7,10 @@ use serde_json::{json, Value};
 ///   非 JSON 时截取前 200 字符）；
 /// - 返回：（映射后的下游状态码, 标准错误 JSON 体）。429（含上游 402 额度耗尽）会附带
 ///   `retry_after: 30` 提示客户端退避。
+///
+/// 上游错误体的机器可读 `code`（如 `USAGE_EXCEEDED` / `BAD_REQUEST`）会透出到
+/// OpenAI 错误体（`error.code`），供下游 SDK 与运维判定；Anthropic / Responses 路径
+/// 不直接使用本函数返回体、自行重包装，故不会泄漏 code。
 pub fn map_cc_error(cc_status: u16, cc_body: &str) -> (u16, Value) {
     let mapped = match cc_status {
         400 => (400, "invalid_request_error"),
@@ -23,6 +27,9 @@ pub fn map_cc_error(cc_status: u16, cc_body: &str) -> (u16, Value) {
     };
 
     let mut message = format!("Command Code API error ({cc_status})");
+    // 上游错误体：{"success":false,"error":{"code":"BAD_REQUEST"|"USAGE_EXCEEDED",...}}
+    // code 是上游的机器可读错误分类，透出来便于下游 SDK 与运维判定。
+    let mut code: Option<String> = None;
     if !cc_body.is_empty() {
         if let Ok(parsed) = serde_json::from_str::<Value>(cc_body) {
             if let Some(m) = parsed
@@ -32,25 +39,26 @@ pub fn map_cc_error(cc_status: u16, cc_body: &str) -> (u16, Value) {
             {
                 message = m.to_string();
             }
+            code = parsed
+                .pointer("/error/code")
+                .and_then(|v| v.as_str())
+                .or_else(|| parsed.get("code").and_then(|v| v.as_str()))
+                .map(str::to_string);
         } else {
             message = cc_body.chars().take(200).collect();
         }
     }
 
-    if cc_status == 429 {
-        return (
-            429,
-            json!({
-                "error": { "message": message, "type": "rate_limit_error" },
-                "retry_after": 30,
-            }),
-        );
+    let mut err_obj = json!({ "message": message, "type": mapped.1 });
+    if let Some(c) = code {
+        err_obj["code"] = json!(c);
     }
-
-    (
-        mapped.0,
-        json!({ "error": { "message": message, "type": mapped.1 } }),
-    )
+    let retry_after = if cc_status == 429 { Some(json!(30)) } else { None };
+    let mut body = json!({ "error": err_obj });
+    if let Some(ra) = retry_after {
+        body["retry_after"] = ra;
+    }
+    (mapped.0, body)
 }
 
 /// 构造 OpenAI 风格错误响应（`{"error": {message, type}}`）。
@@ -143,5 +151,25 @@ mod tests {
         assert_eq!(b["retry_after"], json!(9));
         let (_, b) = anthropic_error(500, "upstream_error", "boom", None);
         assert!(b.get("retry_after").is_none());
+    }
+
+    /// 上游 error.code（USAGE_EXCEEDED 等）透出到 OpenAI 错误体；无 code 时不出现该字段。
+    #[test]
+    fn error_code_passthrough() {
+        let (s, b) = map_cc_error(400, r#"{"success":false,"error":{"code":"USAGE_EXCEEDED","message":"credits"}}"#);
+        assert_eq!(s, 400);
+        assert_eq!(b["error"]["code"], "USAGE_EXCEEDED");
+        assert_eq!(b["error"]["message"], "credits");
+        // 顶层 code 也接受（部分上游版本放在 error 外层）
+        let (_, b) = map_cc_error(500, r#"{"message":"boom","code":"BAD_REQUEST"}"#);
+        assert_eq!(b["error"]["code"], "BAD_REQUEST");
+        // 无 code 时不出现该字段
+        let (_, b) = map_cc_error(500, r#"{"message":"plain"}"#);
+        assert!(b["error"].get("code").is_none());
+        // 429 带 code 时同时保留 retry_after 与 code
+        let (s, b) = map_cc_error(429, r#"{"error":{"code":"RATE_LIMITED"}}"#);
+        assert_eq!(s, 429);
+        assert_eq!(b["error"]["code"], "RATE_LIMITED");
+        assert_eq!(b["retry_after"], json!(30));
     }
 }

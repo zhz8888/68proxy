@@ -24,6 +24,12 @@ use super::state::AppState;
 /// 集成测试固定使用的本地转发 Key（与 start_proxy_impl 注入的设置库一致）。
 const TEST_LOCAL_KEY: &str = "sk-test-local-key-123";
 
+/// 测试辅助：用默认设备档案与默认 cli_mode 调 build_cc_request（转换逻辑测试不关心信封伪装）。
+fn build_cc(req: &Value, placeholder: bool) -> Value {
+    let profile = fingerprint::default_device_profile("");
+    convert::build_cc_request(req, placeholder, &profile, "agent")
+}
+
 // ── 单元测试：请求转换 ────────────────────────────────
 
 /// 验证基础 OpenAI 请求转换出的 Command Code 信封：model/system 提取、user 消息转 text parts、
@@ -39,13 +45,16 @@ fn build_cc_request_basic_envelope() {
         "max_tokens": 1000,
         "stream": true,
     });
-    let cc = convert::build_cc_request(&req, true);
+    let cc = build_cc(&req, true);
     assert_eq!(cc["params"]["model"], "deepseek/deepseek-v4-flash");
-    assert_eq!(cc["params"]["system"], "你是助手");
+    // system 对齐 CLI 的 toWireSystem：块数组形态
+    assert_eq!(cc["params"]["system"][0]["text"], "你是助手");
     assert_eq!(cc["params"]["messages"][0]["role"], "user");
     assert_eq!(cc["params"]["messages"][0]["content"][0]["type"], "text");
     assert_eq!(cc["params"]["max_tokens"], 1000);
     assert_eq!(cc["permissionMode"], "standard");
+    // CLI 总是下发 tools（无工具时是空数组）
+    assert_eq!(cc["params"]["tools"], json!([]));
     assert!(cc["config"]["date"].is_string());
 }
 
@@ -63,8 +72,10 @@ fn build_cc_request_developer_role_merged_into_system() {
             { "role": "user", "content": "你好" },
         ],
     });
-    let cc = convert::build_cc_request(&req, true);
-    assert_eq!(cc["params"]["system"], "系统指令\n补充说明");
+    let cc = build_cc(&req, true);
+    // system 块数组：developer + system 两块，非末块补 \n
+    assert_eq!(cc["params"]["system"][0]["text"], "系统指令\n");
+    assert_eq!(cc["params"]["system"][1]["text"], "补充说明");
     let msgs = cc["params"]["messages"].as_array().unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0]["role"], "user");
@@ -96,7 +107,7 @@ fn build_cc_request_image_and_tools() {
         "tools": [{ "type": "function", "function": { "name": "get_weather", "description": "天气", "parameters": { "type": "object" } } }],
         "tool_choice": "required",
     });
-    let cc = convert::build_cc_request(&req, true);
+    let cc = build_cc(&req, true);
     let user_content = &cc["params"]["messages"][0]["content"];
     assert_eq!(user_content[0]["type"], "text");
     assert_eq!(user_content[1]["type"], "image");
@@ -112,6 +123,38 @@ fn build_cc_request_image_and_tools() {
     assert_eq!(cc["params"]["tool_choice"]["type"], "any");
     assert_eq!(cc["params"]["tools"][0]["name"], "get_weather");
     assert_eq!(cc["params"]["tools"][0]["input_schema"]["type"], "object");
+    // CLI 的 toWireTools：无 type 字段（旧版带 type 已废弃）
+    assert!(cc["params"]["tools"][0].get("type").is_none());
+}
+
+/// 验证工具名别名映射（CLI 的 ow 表）与 tool 输出文本块 \n 拼接。
+#[test]
+fn build_cc_request_tool_alias_and_output_join() {
+    let req = json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "messages": [
+            { "role": "user", "content": "查一下" },
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "bash_output", "arguments": "{}" } }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    { "type": "text", "text": "第一行" },
+                    { "type": "text", "text": "第二行" },
+                ],
+            },
+        ],
+        "tools": [{ "type": "function", "function": { "name": "bash_output" } }],
+    });
+    let cc = build_cc(&req, true);
+    // 别名映射：bash_output → shell_output
+    assert_eq!(cc["params"]["tools"][0]["name"], "shell_output");
+    // tool 输出：文本块用 \n 拼接（CLI 的 toWireToolOutput）
+    assert_eq!(cc["params"]["messages"][2]["content"][0]["output"]["value"], "第一行\n第二行");
 }
 
 /// 验证无 system 时 params.system 发空格占位（开关开启），关闭时缺省字段。
@@ -121,11 +164,11 @@ fn build_cc_request_empty_system_placeholder() {
         "model": "deepseek/deepseek-v4-flash",
         "messages": [{ "role": "user", "content": "你好" }],
     });
-    // 开关开启：无 system 时发空格占位，阻止上游注入默认提示词
-    let cc = convert::build_cc_request(&req, true);
-    assert_eq!(cc["params"]["system"], " ");
+    // 开关开启：无 system 时发空格占位（块数组形态），阻止上游注入默认提示词
+    let cc = build_cc(&req, true);
+    assert_eq!(cc["params"]["system"][0]["text"], " ");
     // 开关关闭：不写 system 字段
-    let cc2 = convert::build_cc_request(&req, false);
+    let cc2 = build_cc(&req, false);
     assert!(cc2["params"].get("system").is_none());
 }
 
@@ -145,7 +188,7 @@ fn build_cc_request_assistant_reasoning() {
             },
         ],
     });
-    let cc = convert::build_cc_request(&req, true);
+    let cc = build_cc(&req, true);
     let parts = cc["params"]["messages"][1]["content"].as_array().unwrap();
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[0]["type"], "reasoning");
@@ -162,7 +205,7 @@ fn build_cc_request_assistant_reasoning() {
             { "role": "assistant", "content": [ { "type": "reasoning", "text": "思考中" }, { "type": "text", "text": "答复" } ] },
         ],
     });
-    let cc2 = convert::build_cc_request(&req2, true);
+    let cc2 = build_cc(&req2, true);
     let parts2 = cc2["params"]["messages"][1]["content"].as_array().unwrap();
     assert_eq!(parts2[0]["type"], "reasoning");
     assert_eq!(parts2[0]["text"], "思考中");
@@ -184,31 +227,35 @@ fn build_cc_request_prompt_cache_key() {
             ] },
         ],
     });
-    let cc = convert::build_cc_request(&req, true);
+    let cc = build_cc(&req, true);
+    // 缓存按前缀计算，system 是最前那段前缀：断点落在 system 末块（对齐 CLI 的 systemSections[].cache）
+    let system = cc["params"]["system"].as_array().unwrap();
+    assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+    // user 消息不被打断点
     let content = cc["params"]["messages"][0]["content"].as_array().unwrap();
-    // 最后一个 text 块获得 cache_control
-    assert!(content[0].get("cache_control").is_none());
-    assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
+    assert!(content.iter().all(|p| p.get("cache_control").is_none()));
 
     // 已有 cache_control 时不重复注入
     let req2 = json!({
         "model": "m",
         "prompt_cache_key": "cache-abc-123456",
         "messages": [
+            { "role": "system", "content": "sys" },
             { "role": "user", "content": [
                 { "type": "text", "text": "x", "cache_control": { "type": "ephemeral" } },
             ] },
         ],
     });
-    let cc2 = convert::build_cc_request(&req2, true);
-    let parts2 = cc2["params"]["messages"][0]["content"].as_array().unwrap();
-    assert_eq!(parts2.iter().filter(|p| p.get("cache_control").is_some()).count(), 1);
+    let cc2 = build_cc(&req2, true);
+    let system2 = cc2["params"]["system"].as_array().unwrap();
+    assert!(system2.iter().all(|b| b.get("cache_control").is_none()), "已有断点时不再注入");
 }
 
 /// 验证 fingerprint 序列化为 camelCase（字段名与上游期望的格式一致）。
 #[test]
 fn fingerprint_camelcase_serialization() {
-    let fp = fingerprint::generate();
+    let profile = fingerprint::default_device_profile("");
+    let fp = fingerprint::generate("user_abc", "", &profile);
     let v = serde_json::to_value(&fp).unwrap();
     assert!(v["components"]["machineIdHash"].is_string());
     assert!(v["components"]["macHashes"].is_array());
@@ -635,7 +682,8 @@ fn responses_translator_sequence_number() {
 /// collector_version=1、MAC 哈希数量在 2-5 之间。
 #[test]
 fn fingerprint_shape() {
-    let fp = fingerprint::generate();
+    let profile = fingerprint::default_device_profile("");
+    let fp = fingerprint::generate("user_abc", "", &profile);
     assert_eq!(fp.thumbmark.len(), 64);
     assert_eq!(fp.components.platform, "win32");
     assert_eq!(fp.components.collector_version, 1);
@@ -643,76 +691,55 @@ fn fingerprint_shape() {
     assert!((2..=5).contains(&n));
 }
 
-/// 验证伪造项目 slug 的格式：不含盘符前缀、仅小写字母数字与连字符、不以连字符开头或结尾。
+/// 验证伪造项目 slug 的格式：不含盘符前缀、仅小写字母数字与连字符、不以连字符开头或结尾，
+/// 且与 DEVICE_PROFILE.projectDir 同源（slug = slugify(workingDir)）。
 #[test]
 fn project_slug_format() {
-    let slug = cc_client::fake_project_slug("a3f2c001-0000-0000-0000-000000000000");
+    let profile = fingerprint::default_device_profile("");
+    let slug = cc_client::slugify_project_path(&profile.project_dir);
+    assert_eq!(slug, "users-dev-projects-app");
     assert!(!slug.starts_with("c:"));
     assert!(slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
     assert!(slug.chars().all(|c| !c.is_uppercase()));
     assert!(!slug.starts_with('-') && !slug.ends_with('-'));
 }
 
-/// 验证指纹持久化：key_id 稳定且不泄露明文 Key；remember 写入后 load_store 能原样读回
-/// 同一份指纹（thumbmark 与 components 全部字段），保证同一 Key 跨重启设备身份不变。
+/// 验证指纹确定性派生：同一 key + salt 恒得同一台设备，不同 key / 不同 salt 换设备；
+/// 不再需要持久化（跨重启天然一致）。
 #[test]
-fn fingerprint_persist_roundtrip() {
-    // 同一 Key 的 id 稳定，不同 Key 的 id 不同；id 为 64 位 hex 且不含明文 Key
-    let id1 = fingerprint::key_id("user_abc123");
-    assert_eq!(id1, fingerprint::key_id("user_abc123"));
-    assert_ne!(id1, fingerprint::key_id("user_xyz789"));
-    assert_eq!(id1.len(), 64);
-    assert!(!id1.contains("user_abc123"));
+fn fingerprint_deterministic_derivation() {
+    let profile = fingerprint::default_device_profile("");
+    let a1 = fingerprint::generate("user_abc123", "", &profile);
+    let a2 = fingerprint::generate("user_abc123", "", &profile);
+    assert_eq!(a1.thumbmark, a2.thumbmark);
+    assert_eq!(a1.components.machine_id_hash, a2.components.machine_id_hash);
+    assert_eq!(a1.components.mac_hashes, a2.components.mac_hashes);
+    assert_eq!(a1.components.platform, a2.components.platform);
+    assert_eq!(a1.components.mem_gib, a2.components.mem_gib);
+    assert_eq!(a1.components.timezone, a2.components.timezone);
+    assert_eq!(a1.components.collector_version, a2.components.collector_version);
 
-    let path = std::env::temp_dir().join(format!("cc-fp-test-{}.json", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    assert!(fingerprint::load_store(&path).is_empty());
-
-    let fp = fingerprint::generate();
-    fingerprint::remember(&path, &id1, &fp).unwrap();
-    let store = fingerprint::load_store(&path);
-    let got = store.get(&id1).expect("指纹应已持久化");
-    assert_eq!(got.thumbmark, fp.thumbmark);
-    assert_eq!(got.components.machine_id_hash, fp.components.machine_id_hash);
-    assert_eq!(got.components.mac_hashes, fp.components.mac_hashes);
-    assert_eq!(got.components.platform, fp.components.platform);
-    assert_eq!(got.components.mem_gib, fp.components.mem_gib);
-    assert_eq!(got.components.timezone, fp.components.timezone);
-    assert_eq!(got.components.collector_version, fp.components.collector_version);
-
-    // 再次 remember 另一 Key 时不应覆盖已存在的条目
-    let id2 = fingerprint::key_id("user_other");
-    fingerprint::remember(&path, &id2, &fingerprint::generate()).unwrap();
-    let store = fingerprint::load_store(&path);
-    assert_eq!(store.len(), 2);
-    assert_eq!(store.get(&id1).unwrap().thumbmark, fp.thumbmark);
-
-    let _ = std::fs::remove_file(&path);
+    // 不同 key 换设备；同一 key 换 salt 也换设备
+    let b = fingerprint::generate("user_xyz789", "", &profile);
+    assert_ne!(a1.thumbmark, b.thumbmark);
+    let c = fingerprint::generate("user_abc123", "salt-v2", &profile);
+    assert_ne!(a1.thumbmark, c.thumbmark);
 }
 
-/// 验证同一 Key 的指纹状态跨 AppState 实例稳定：首个实例生成并写盘，第二个实例
-/// （模拟重启，内存已清空）从磁盘恢复出完全相同的指纹。
+/// 验证同一 key 的指纹状态跨 AppState 实例稳定（确定性派生，不依赖磁盘）。
 #[test]
 fn fingerprint_survives_restart() {
     use super::cc_client;
-    let path = std::env::temp_dir().join(format!("cc-fp-restart-{}.json", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-
     let key = "user_persist_test";
 
     let state1 = AppState::new(Config::default());
-    state1.set_fingerprint_path(path.clone());
     let fp1 = cc_client::key_fingerprint_for_test(&state1, key);
-    assert!(path.exists(), "首次生成后应写盘");
 
-    // 新实例：内存为空，应从磁盘恢复同一份指纹
+    // 新实例：内存为空，仍派生出完全相同的指纹
     let state2 = AppState::new(Config::default());
-    state2.set_fingerprint_path(path.clone());
     let fp2 = cc_client::key_fingerprint_for_test(&state2, key);
     assert_eq!(fp1.thumbmark, fp2.thumbmark);
     assert_eq!(fp1.components.machine_id_hash, fp2.components.machine_id_hash);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ── 集成测试：mock 上游 ───────────────────────────────
@@ -1068,8 +1095,8 @@ async fn empty_system_placeholder_and_zdr_header() {
     assert_eq!(res.status(), 200);
 
     let cap = captured.lock().unwrap();
-    // 无 system 时 params.system 为空格占位
-    assert_eq!(cap["body"]["params"]["system"], " ");
+    // 无 system 时 params.system 为空格占位（块数组形态）
+    assert_eq!(cap["body"]["params"]["system"][0]["text"], " ");
     // ZDR 模式开启时 generate 请求携带 x-cmd-zdr: 1
     assert_eq!(cap["zdr"], "1");
     drop(cap);
@@ -1484,7 +1511,7 @@ fn anthropic_top_p_and_stop_forwarded_to_params() {
         "messages": [{ "role": "user", "content": "hi" }]
     });
     let openai = convert::convert_anthropic_to_openai(&req);
-    let body = convert::build_cc_request(&openai, false);
+    let body = build_cc(&openai, false);
     assert_eq!(body["params"]["top_p"], 0.7);
     assert_eq!(body["params"]["stop"][0], "END");
 }
@@ -1522,7 +1549,7 @@ fn build_cc_request_tool_roundtrip() {
             { "role": "tool", "tool_call_id": "call_9", "content": "晴 25 度" }
         ]
     });
-    let cc = super::convert::build_cc_request(&req, true);
+    let cc = build_cc(&req, true);
     let msgs = cc["params"]["messages"].as_array().unwrap();
     // assistant: tool-call part；tool: tool-result part
     let assistant = &msgs[1];
@@ -1547,7 +1574,7 @@ fn build_cc_request_tool_fallback_name_and_object_content() {
               "content": { "temperature": 25 } }
         ]
     });
-    let cc = super::convert::build_cc_request(&req, false);
+    let cc = build_cc(&req, false);
     let msgs = cc["params"]["messages"].as_array().unwrap();
     let result = &msgs[0]["content"][0];
     assert_eq!(result["toolName"], "fallback_tool");
@@ -1566,7 +1593,7 @@ fn build_cc_request_image_parts() {
             ]}
         ]
     });
-    let cc = super::convert::build_cc_request(&req, false);
+    let cc = build_cc(&req, false);
     let parts = cc["params"]["messages"][0]["content"].as_array().unwrap();
     assert_eq!(parts[0]["type"], "text");
     assert_eq!(parts[1]["type"], "image");
@@ -1590,7 +1617,7 @@ fn build_cc_request_tool_choice_mapping() {
     ] {
         let mut req = base.clone();
         req["tool_choice"] = choice;
-        let cc = super::convert::build_cc_request(&req, false);
+        let cc = build_cc(&req, false);
         assert_eq!(cc["params"]["tool_choice"]["type"], expect_type);
         if !expect_name.is_null() {
             assert_eq!(cc["params"]["tool_choice"]["name"], expect_name);
@@ -2085,19 +2112,12 @@ async fn ensure_initialized_tolerates_upstream_error() {
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
 
-/// 指纹持久化路径不可写时：生成仍成功（仅内存），不 panic。
+/// 指纹确定性派生：无需任何持久化设施，直接生成有效指纹（thumbmark 非空），不 panic。
 #[tokio::test]
-async fn fingerprint_persist_failure_keeps_memory_only() {
+async fn fingerprint_derivation_without_persistence() {
     let state = plain_state("http://127.0.0.1:1");
-    let dir = std::env::temp_dir().join(format!("fp-fail-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let blocker = dir.join("b");
-    std::fs::write(&blocker, "x").unwrap();
-    state.set_fingerprint_path(blocker.join("store.json"));
     let fp = super::cc_client::key_fingerprint_for_test(&state, "user_1");
     assert!(!fp.thumbmark.is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Provider 模型接口返回坏 JSON / 空 data：回退内置表而非 panic。
@@ -2150,7 +2170,11 @@ fn convert_anthropic_system_thinking_and_tools() {
     let openai = super::convert::convert_anthropic_to_openai(&req);
     let msgs = openai["messages"].as_array().unwrap();
     assert_eq!(msgs[0]["role"], "system");
-    assert_eq!(msgs[0]["content"], "sys-a\nsys-b");
+    // system 数组块保留为块数组（build_cc_request 据此把断点原样下发）
+    let sys_blocks = msgs[0]["content"].as_array().unwrap();
+    assert_eq!(sys_blocks.len(), 2, "image 块被过滤，仅 text 块保留");
+    assert_eq!(sys_blocks[0]["text"], "sys-a");
+    assert_eq!(sys_blocks[1]["text"], "sys-b");
     // assistant：thinking → reasoning_content，tool_use → tool_calls
     let assistant = &msgs[2];
     assert_eq!(assistant["role"], "assistant");
@@ -2220,13 +2244,15 @@ fn build_cc_request_array_system_and_cache_marker() {
             { "role": "user", "content": [ { "type": "text", "text": "u1", "cache_control": { "type": "ephemeral" } } ] }
         ]
     });
-    let cc = super::convert::build_cc_request(&req, false);
-    assert_eq!(cc["params"]["system"], "sys1");
+    let cc = build_cc(&req, false);
+    // system 数组抽取 text 成块数组；非 text 块（image_url）被过滤
+    let system = cc["params"]["system"].as_array().unwrap();
+    assert_eq!(system.len(), 1);
+    assert_eq!(system[0]["text"], "sys1");
     let user_parts = cc["params"]["messages"][0]["content"].as_array().unwrap();
-    // 已有 cache_control：不再注入第二处标记
+    // 已有 cache_control：system 不再注入第二处标记
     assert!(user_parts[0].get("cache_control").is_some());
-    let marked: Vec<_> = user_parts.iter().filter(|p| p.get("cache_control").is_some()).collect();
-    assert_eq!(marked.len(), 1);
+    assert!(system.iter().all(|b| b.get("cache_control").is_none()));
 }
 
 // ── 版本刷新（注入 URL）与坏数据库文件 ─────────────────────

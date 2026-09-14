@@ -17,37 +17,32 @@ pub fn generate_traceparent() -> String {
     format!("00-{trace}-{parent}-01")
 }
 
-/// 从 sessionId 构造假工作目录 slug，与真实 CLI 规则一致。
+/// CLI 的 slug 规则：对**完整工作目录**做 slugify（@sindresorhus/slugify），空则 "root"，
+/// 无随机后缀；同一个 slug 也是 CLI 本地会话目录名。slug 与 config.workingDir 同源：
+/// `slug = slugify(workingDir)`。
 ///
-/// 取 sessionId 前 4 位十六进制数从名称池选词，拼成伪装的 Windows 项目路径
-/// `C:\Users\dev\projects\{name}-{hex4}`，再按 CLI 规则去除盘符、
-/// 非字母数字转 `-` 并全部小写。
-pub fn fake_project_slug(session_id: &str) -> String {
-    const NAMES: &[&str] = &[
-        "app", "api", "backend", "bot", "cli", "core", "data", "frontend", "lib", "plugin",
-        "proxy", "server", "service", "tool", "web", "worker",
-    ];
-    let hex4 = session_id.get(..4).unwrap_or("0000");
-    let idx = u16::from_str_radix(hex4, 16).unwrap_or(0) as usize % NAMES.len();
-    let name = NAMES[idx];
-    let path = format!(r"C:\Users\dev\projects\{name}-{hex4}").to_lowercase();
-    let stripped = path.strip_prefix("c:").unwrap_or(&path);
-    let mut slug = String::new();
+/// 与 DEVICE_PROFILE.projectDir 配合：伪装项目目录恒为伪造值，slug 随项目目录自洽，
+/// 不再随会话变化（旧版 fake_project_slug 由 sessionId 派生的行为已废弃）。
+pub fn slugify_project_path(p: &str) -> String {
+    let mut out = String::new();
     let mut last_dash = false;
-    for ch in stripped.chars() {
+    // 去掉盘符前缀（CLI 的 slugify 对完整路径先剥掉 "C:" 这类盘符，大小写不敏感）
+    let lower = p.to_lowercase();
+    let p = lower.strip_prefix("c:").unwrap_or(&lower);
+    for ch in p.chars() {
         if ch.is_ascii_alphanumeric() {
-            slug.push(ch);
+            out.push(ch.to_ascii_lowercase());
             last_dash = false;
         } else if !last_dash {
-            slug.push('-');
+            out.push('-');
             last_dash = true;
         }
     }
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() {
-        "cc-proxy".into()
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        "root".to_string()
     } else {
-        slug
+        out
     }
 }
 
@@ -57,6 +52,18 @@ pub fn fake_project_slug(session_id: &str) -> String {
 /// 任意填写，故必须过滤，否则 HeaderValue 解析失败。
 fn is_header_safe(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+}
+
+/// 会话 ID 是否为合法 UUID（v4 形状）：CLI 的 toWireThreadId 只有合法 UUID 才放进
+/// 信封 threadId 字段，否则整键省略。
+fn is_uuid(s: &str) -> bool {
+    let lens = [8usize, 4, 4, 4, 12];
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip(lens.iter())
+            .all(|(p, l)| p.len() == *l && p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// 解析本次请求应使用的会话 ID。
@@ -114,41 +121,24 @@ fn ensure_session(state: &AppState, user_id: &str) -> String {
     session_id
 }
 
-/// 取该账户（按 userId 标识）的伪装状态；首次访问时优先从磁盘恢复指纹
-/// （同一 userId 跨重启复用同一设备身份，换 key 也延续），无记录或读取失败时
-/// 新生成并写盘。未注入路径则仅存内存。
+/// 取该账户（按 userId 标识）的伪装状态；指纹由 apiKey 确定性派生
+/// （同一 userId 跨重启/换进程恒为同一台设备，无需磁盘持久化）。
 fn get_or_create_key_state(state: &AppState, user_id: &str) -> KeyState {
     let mut states = state.key_states.lock().unwrap();
     if let Some(s) = states.get(user_id) {
         return s.clone();
     }
-    let path = state.fingerprint_path.lock().unwrap().clone();
-    let id = fingerprint::key_id(user_id);
-    let fingerprint = match path
-        .as_deref()
-        .and_then(|p| fingerprint::load_store(p).remove(&id))
-    {
-        Some(fp) => {
-            log::info(crate::i18n::pick("已从磁盘恢复账户指纹", "Fingerprint restored for user"));
-            fp
-        }
-        None => {
-            let fp = fingerprint::generate();
-            if let Some(p) = path.as_deref() {
-                if let Err(e) = fingerprint::remember(p, &id, &fp) {
-                    log::warn(&format!(
-                        "{}: {e}",
-                        crate::i18n::pick(
-                            "指纹持久化失败，本次仅存内存",
-                            "Failed to persist the fingerprint; kept in memory only"
-                        )
-                    ));
-                }
-            }
-            log::info(crate::i18n::pick("已为账户生成新指纹", "Fingerprint generated for user"));
-            fp
-        }
-    };
+    let cfg = state.config.read().unwrap().clone();
+    // 指纹由该账户的 apiKey 确定性派生；cc_accounts 里找不到（如测试构造）时
+    // 回退用 userId 作为派生源，保证同一账户在同一配置下稳定
+    let key = cfg
+        .cc_accounts
+        .iter()
+        .find(|a| a.user_id == user_id)
+        .map(|a| a.key.as_str())
+        .unwrap_or(user_id);
+    let profile = fingerprint::default_device_profile(&cfg.device_project_dir);
+    let fingerprint = fingerprint::generate(key, &cfg.fingerprint_salt, &profile);
     let ks = KeyState {
         fingerprint,
         next_init_at: 0,
@@ -191,13 +181,16 @@ pub async fn ensure_initialized(state: &AppState, api_key: &str, user_id: &str) 
     let lc_url = format!("{}/alpha/lifecycle-events", cfg.api_base);
     let fp_body = serde_json::to_value(&fingerprint).unwrap_or_else(|_| json!({}));
     let version = cc_version(state);
+    let profile = fingerprint::default_device_profile(&cfg.device_project_dir);
+    // lifecycle metadata 的 mode 是独立枚举（interactive | non-interactive），
+    // 与信封 mode（agent | learning | ...）不是同一个值，分开配置（cli_session_mode）
     let lc_body = json!({
         "eventType": "cli_session_exists",
         "metadata": {
             "sessionId": format!("sess_{}", uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string()),
             "cliVersion": version,
-            "mode": "interactive",
-            "os": "win32-x64",
+            "mode": cfg.cli_session_mode,
+            "os": format!("{}-{}", profile.platform, profile.arch),
         },
     });
 
@@ -273,7 +266,8 @@ fn base_headers(state: &AppState, api_key: &str) -> reqwest::header::HeaderMap {
 
 /// 转发到 Command Code API /alpha/generate。
 ///
-/// - `body`：已由 convert 模块构造好的 CLI 信封请求体；
+/// - `body`：已由 convert 模块构造好的 CLI 信封请求体（session_id 为合法 UUID 时
+///   会补入 threadId 字段，对齐 CLI 的 toWireThreadId）；
 /// - `api_key`：上游账户 key（构造 Bearer 与伪造头）；
 /// - `user_id`：账户唯一标识（会话键控，换 key 时会话延续）；
 /// - `incoming_headers`：下游客户端请求头，用于透传会话 ID 与 zdr 开关；
@@ -290,7 +284,16 @@ pub async fn forward_to_cc(
     let cfg = state.config.read().unwrap().clone();
     let url = format!("{}/alpha/generate", cfg.api_base);
     let session_id = get_session_id(state, incoming_headers, user_id, prompt_cache_key);
-    let slug = fake_project_slug(&session_id);
+    // 与 DEVICE_PROFILE.projectDir 同源：slug = slugify(workingDir)，不再随会话变化
+    let profile = fingerprint::default_device_profile(&cfg.device_project_dir);
+    let slug = slugify_project_path(&profile.project_dir);
+
+    // CLI 的 toWireThreadId：只有合法 UUID 才放进信封，否则整个键省略。
+    // session_id 可能来自下游头 / prompt_cache_key（非 UUID），此时不注入。
+    let mut wire_body = body.clone();
+    if is_uuid(&session_id) {
+        wire_body["threadId"] = json!(session_id);
+    }
 
     // 在公共头基础上补齐 CLI 会话/项目/链路追踪等伪装头
     let mut headers = base_headers(state, api_key);
@@ -311,7 +314,7 @@ pub async fn forward_to_cc(
         .client()
         .post(&url)
         .headers(headers)
-        .json(body)
+        .json(&wire_body)
         .send()
         .await
 }
@@ -443,18 +446,18 @@ pub async fn fetch_models(state: &AppState) -> (Vec<ModelInfo>, bool) {
 mod tests {
     use super::*;
 
-    /// 伪造项目 slug：取 sessionId 前 4 位 hex 选词拼名；无法成词时回退 cc-proxy。
+    /// 项目 slug 对齐 CLI 规则：slugify(workingDir)，空路径回退 root。
     #[test]
-    fn fake_project_slug_format() {
-        let slug = fake_project_slug("abcd1234-xxxx");
-        assert!(slug.starts_with("users-dev-projects-"), "清洗后的路径 slug: {slug}");
-        assert!(slug.contains("abcd"));
-        // 短 id 回退 0000 也不 panic
-        let slug2 = fake_project_slug("zz");
-        assert!(!slug2.is_empty());
-        // 非 hex 的前 4 位回退 0000 选词，slug 仍非空（清洗回退分支为防御性代码）
-        let slug3 = fake_project_slug("****-****");
-        assert!(slug3.starts_with("users-dev-projects-"));
+    fn slugify_project_path_format() {
+        // 默认伪造项目目录 → users-dev-projects-app（盘符 c: 被剥除）
+        let profile = super::fingerprint::default_device_profile("");
+        let slug = slugify_project_path(&profile.project_dir);
+        assert_eq!(slug, "users-dev-projects-app");
+        // 自定义项目目录随其内容 slugify（盘符剥除），且空路径回退 root
+        assert_eq!(slugify_project_path("C:\\Users\\me\\proj"), "users-me-proj");
+        assert_eq!(slugify_project_path(""), "root");
+        // 连续分隔符归一为单个连字符
+        assert_eq!(slugify_project_path("a//b__c"), "a-b-c");
     }
 
     /// 会话 ID 解析优先级：下游头 ≥8 采信 → prompt_cache_key 可见 ASCII 采信 → 本地会话。

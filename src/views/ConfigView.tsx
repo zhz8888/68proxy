@@ -69,6 +69,10 @@ const DEFAULTS: Config = {
   proxy_port: 0,
   proxy_username: "",
   proxy_password: "",
+  cli_mode: "agent",
+  cli_session_mode: "interactive",
+  fingerprint_salt: "",
+  device_project_dir: "",
 };
 
 /** 主题选项：值与 i18n key、图标（文案在组件内按当前语言取）。 */

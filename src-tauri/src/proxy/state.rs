@@ -142,8 +142,6 @@ pub struct AppState {
     pub shutdown: Mutex<Option<oneshot::Sender<()>>>,
     /// token 用量统计数据库连接（setup 阶段初始化；代理层经此记录/查询）。
     pub usage: Mutex<Option<rusqlite::Connection>>,
-    /// 指纹持久化文件路径（setup 阶段注入；None 时指纹仅存内存）。
-    pub fingerprint_path: Mutex<Option<std::path::PathBuf>>,
     /// 浏览器授权登录会话（进行中或已完成；None 表示无进行中登录）。
     pub auth_login: Mutex<Option<AuthLoginSession>>,
     /// 进行中 loopback 回调服务器的优雅停机信号（新一轮登录时用于关停旧实例）。
@@ -181,7 +179,6 @@ impl AppState {
             client: RwLock::new(client),
             shutdown: Mutex::new(None),
             usage: Mutex::new(None),
-            fingerprint_path: Mutex::new(None),
             auth_login: Mutex::new(None),
             auth_login_shutdown: Mutex::new(None),
         })
@@ -197,11 +194,6 @@ impl AppState {
         let client = build_client(config)?;
         *self.client.write().unwrap() = client;
         Ok(())
-    }
-
-    /// 注入指纹持久化文件路径（应用启动时调用一次；不注入则指纹仅存内存）。
-    pub fn set_fingerprint_path(&self, path: std::path::PathBuf) {
-        *self.fingerprint_path.lock().unwrap() = Some(path);
     }
 
     /// 查询代理服务是否正在运行。
@@ -444,17 +436,6 @@ mod tests {
             stream: true,
         });
         assert_eq!(st.prune_usage(30).unwrap(), 0);
-    }
-
-    /// 指纹持久化路径注入后可读回。
-    #[test]
-    fn set_fingerprint_path_roundtrip() {
-        let st = AppState::new(Config::default());
-        st.set_fingerprint_path(std::path::PathBuf::from("/tmp/fp-test.json"));
-        assert_eq!(
-            st.fingerprint_path.lock().unwrap().as_deref(),
-            Some(std::path::Path::new("/tmp/fp-test.json"))
-        );
     }
 
     /// 会话与预请求的常量配置。

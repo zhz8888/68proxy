@@ -52,6 +52,14 @@ export interface Config {
   proxy_username: string;
   /** 自定义代理认证密码（可选，仅 custom 模式生效）。 */
   proxy_password: string;
+  /** 信封 mode（/alpha/generate 的 mode 字段；agent | learning | …）。 */
+  cli_mode: string;
+  /** lifecycle metadata 的 mode（interactive | non-interactive，独立于 cli_mode）。 */
+  cli_session_mode: string;
+  /** 指纹盐：改值让所有账户换一台设备（成批换身份用）。 */
+  fingerprint_salt: string;
+  /** 伪造的项目目录（与 x-project-slug 同源；留空用内置默认）。 */
+  device_project_dir: string;
 }
 
 /** 代理运行状态：是否运行、监听地址、OpenAI/Anthropic 接入 URL、上游版本与运行时长。 */
