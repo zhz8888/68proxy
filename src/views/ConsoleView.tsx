@@ -13,6 +13,7 @@ import { api, onRequest, onStatus, type ProxyStatus, type RequestInfo } from "@/
 import { DEFAULT_PORT } from "@/lib/constants";
 import { formatUptime } from "@/lib/format";
 import { errText } from "@/lib/messages";
+import { useVisiblePolling } from "@/lib/useVisiblePolling";
 import { cn } from "@/lib/utils";
 
 /** 控制台视图：展示代理运行状态、监听端口与代理地址，并提供启动/停止/重启及健康检查操作。 */
@@ -37,8 +38,19 @@ export function ConsoleView() {
   useEffect(() => {
     mounted.current = true;
     refreshStatus();
-    // 初始拉取最近 20 条请求记录
-    api.requestsGet(20).then((r) => mounted.current && setRequests(r)).catch(() => {});
+    // 初始拉取最近 20 条请求记录：与订阅事件合并去重而非整体替换，
+    // 否则快照返回前推入的实时事件会被覆盖丢弃（本视图不重新拉取，丢了就不再出现）
+    api
+      .requestsGet(20)
+      .then((snapshot) =>
+        mounted.current &&
+        setRequests((prev) => {
+          const byId = new Map(prev.map((x) => [x.id, x]));
+          for (const r of snapshot) byId.set(r.id, r);
+          return [...byId.values()].sort((a, b) => b.started_at - a.started_at).slice(0, 30);
+        }),
+      )
+      .catch(() => {});
     // 订阅后端推送的代理状态变化
     const offStatus = onStatus((s) => setStatus(s));
     // 订阅请求事件：新记录插到列表头部并按 id 去重，最多保留 30 条
@@ -48,16 +60,17 @@ export function ConsoleView() {
         return next.slice(0, 30);
       }),
     );
-    // 事件推送之外的兜底轮询：每 3 秒主动刷新一次状态
-    const timer = setInterval(refreshStatus, 3000);
+    // 事件推送之外的兜底轮询见下方 useVisiblePolling
     return () => {
-      // 卸载：停止异步回写、清除轮询并取消事件订阅
+      // 卸载：停止异步回写并取消事件订阅
       mounted.current = false;
-      clearInterval(timer);
       offStatus.then((f) => f());
       offRequest.then((f) => f());
     };
   }, [refreshStatus]);
+
+  // 状态兜底轮询：窗口隐藏时暂停，重新可见时立即刷一次
+  useVisiblePolling(refreshStatus, 3000);
 
   /** 执行启动/停止/重启操作，执行期间通过 busy 禁用按钮并反馈结果。 */
   async function run(action: "start" | "stop" | "restart") {

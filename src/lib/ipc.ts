@@ -12,8 +12,16 @@ import { listen as tauriListen, type UnlistenFn, type Event } from "@tauri-apps/
 
 import { translate } from "@/i18n";
 
-/** 桥接服务基址（与后端默认端口一致；可用 VITE_BRIDGE_PORT 覆写）。 */
-const BRIDGE_BASE = `http://127.0.0.1:${import.meta.env.VITE_BRIDGE_PORT ?? "1431"}`;
+/** 桥接服务基址（与后端默认端口一致；可用 CC_DEV_BRIDGE_PORT 覆写）。
+ *
+ *  端口变量必须与后端 `dev_bridge::start` 读取的 `CC_DEV_BRIDGE_PORT` 同名，
+ *  否则改了后端端口前端仍打旧端口，所有命令与事件都会失败。该变量由
+ *  vite.config.ts 的 define 透传，未设置时为空字符串。 */
+const BRIDGE_PORT = (import.meta.env.VITE_CC_DEV_BRIDGE_PORT as string | undefined) || "1431";
+const BRIDGE_BASE = `http://127.0.0.1:${BRIDGE_PORT}`;
+
+/** 可选桥接令牌（后端设置 CC_DEV_BRIDGE_TOKEN 时需同步设置此处）。 */
+const BRIDGE_TOKEN = (import.meta.env.VITE_CC_DEV_BRIDGE_TOKEN as string | undefined) || "";
 
 /** 是否运行在 Tauri 窗口中（false 表示浏览器直连开发页面）。 */
 export const IN_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -25,14 +33,25 @@ export async function invoke<T>(cmd: string, args: Record<string, unknown> = {})
   try {
     res = await fetch(`${BRIDGE_BASE}/rpc`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(BRIDGE_TOKEN ? { Authorization: `Bearer ${BRIDGE_TOKEN}` } : {}),
+      },
       body: JSON.stringify({ cmd, args }),
     });
   } catch {
     // 网络层失败通常是后端未运行或桥接被生产构建排除
     throw new Error(translate("errors.bridge_unreachable", { p0: BRIDGE_BASE }));
   }
-  const body = (await res.json()) as { ok: boolean; data?: T; error?: string };
+  // fetch 对 4xx/5xx 是 resolve，需先判状态码：否则端口被其它服务占用时
+  // 会抛未本地化的 JSON 解析异常，而非可读的桥接不可达提示
+  if (!res.ok) {
+    throw new Error(translate("errors.bridge_unreachable", { p0: BRIDGE_BASE }));
+  }
+  const body = (await res.json().catch(() => null)) as
+    | { ok: boolean; data?: T; error?: string }
+    | null;
+  if (!body) throw new Error(translate("errors.command_failed"));
   if (!body.ok) throw new Error(body.error ?? translate("errors.command_failed"));
   return body.data as T;
 }
@@ -86,7 +105,11 @@ function ensureBridgeStream() {
   };
   void (async () => {
     try {
-      const res = await fetch(`${BRIDGE_BASE}/events`, { signal: controller.signal });
+      const res = await fetch(`${BRIDGE_BASE}/events`, {
+        signal: controller.signal,
+        headers: BRIDGE_TOKEN ? { Authorization: `Bearer ${BRIDGE_TOKEN}` } : {},
+      });
+      if (!res.ok) throw new Error(translate("errors.bridge_unreachable", { p0: BRIDGE_BASE }));
       if (!res.body) throw new Error(translate("errors.event_stream_unavailable"));
       // 连接建立成功：复位退避
       bridgeBackoffMs = 1000;

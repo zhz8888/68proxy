@@ -224,6 +224,7 @@
     "tieredTitle": "按输入规模分档计费",
     "timeOfDayWindows": "忙时窗口 {{p0}}，其余时间按闲时价",
     "timeWeekdays": "周一至周五",
+    "timeWeekdaysPrev": "周日至周四",
     "caps": {
       "vision": "视觉",
       "reasoning": "思考"
@@ -466,6 +467,7 @@
     "kill_failed": "结束进程失败: {{p0}}",
     "platform_unsupported": "当前平台暂不支持结束进程",
     "client_build_failed": "构建请求客户端失败: {{p0}}",
+    "proxy_build_failed": "构建代理客户端失败: {{p0}}",
     "verify_timeout": "验证请求超时，请检查网络",
     "verify_failed": "验证请求失败: {{p0}}",
     "whoami_parse_failed": "解析 whoami 响应失败: {{p0}}",

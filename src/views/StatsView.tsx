@@ -30,6 +30,7 @@ import { translate } from "@/i18n";
 import { api, onStats, type AccountQuota, type UsageChartPoint, type UsageGroupRow, type UsagePeriod, type UsageStats } from "@/lib/api";
 import { formatCost, formatTokens } from "@/lib/format";
 import { errText } from "@/lib/messages";
+import { useVisiblePolling } from "@/lib/useVisiblePolling";
 import { cn } from "@/lib/utils";
 import { LimitWindowRow, MeterBar } from "@/components/QuotaDetail";
 
@@ -196,13 +197,14 @@ export function StatsView() {
         refresh(period);
       }, 1000);
     });
-    const timer = setInterval(() => refresh(period), 3000);
     return () => {
       off.then((f) => f());
       if (debounce) clearTimeout(debounce);
-      clearInterval(timer);
     };
   }, [period, refresh, refreshQuota]);
+
+  // 兜底轮询（重量级 SQL 聚合）：窗口隐藏时暂停，重新可见时立即刷一次
+  useVisiblePolling(() => refresh(period), 3000);
 
   /** 清空统计：确认后调用后端并刷新。 */
   async function clearAll() {

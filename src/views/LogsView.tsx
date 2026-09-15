@@ -134,9 +134,14 @@ export function LogsView() {
           <Button
             variant="destructive-ghost"
             size="sm"
-            onClick={() => {
-              api.logsClear();
-              setLogs([]);
+            onClick={async () => {
+              // 后端确认成功后再清空本地，避免失败时「界面已空、后端仍在」的不一致
+              try {
+                await api.logsClear();
+                setLogs([]);
+              } catch (e) {
+                toast.error(errText(e));
+              }
             }}
           >
             <Eraser />

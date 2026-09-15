@@ -29,6 +29,7 @@ import { DEFAULT_PORT } from "@/lib/constants";
 import { errText } from "@/lib/messages";
 import { appVersion, appWindow } from "@/lib/platform";
 import { applyTheme, watchSystemTheme } from "@/lib/theme";
+import { useVisiblePolling } from "@/lib/useVisiblePolling";
 import { cn } from "@/lib/utils";
 import { AboutView } from "@/views/AboutView";
 import { AccountsView } from "@/views/AccountsView";
@@ -102,21 +103,22 @@ function App() {
     // 系统明暗变化：仅在「跟随系统」模式下重新应用
     // （当前模式由 theme.ts 模块级记录，配置页改动主题后此处无需同步）
     const unwatchTheme = watchSystemTheme();
-    // 挂载时拉取一次代理状态，并订阅后端推送；同时以 3 秒间隔轮询兜底
+    // 挂载时拉取一次代理状态，并订阅后端推送；3 秒兜底轮询在窗口隐藏时自动暂停
     api.proxyStatus().then(setStatus).catch(() => {});
     const off = onStatus(setStatus);
-    const timer = setInterval(() => {
-      api.proxyStatus().then(setStatus).catch(() => {});
-    }, 3000);
     appWindow.isMaximized().then(setMaximized).catch(() => {});
-    // 卸载时清除轮询定时器并取消事件订阅，避免泄漏
+    // 卸载时取消事件订阅（轮询由 useVisiblePolling 自行清理），避免泄漏
     return () => {
       mounted = false;
-      clearInterval(timer);
       off.then((f) => f());
       unwatchTheme();
     };
   }, []);
+
+  // 状态兜底轮询：窗口隐藏时暂停，重新可见时立即刷一次
+  useVisiblePolling(() => {
+    api.proxyStatus().then(setStatus).catch(() => {});
+  }, 3000);
 
   /** 启动或停止本地代理：运行中则停止，否则启动，期间禁用按钮防重复点击。 */
   async function toggle() {

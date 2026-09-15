@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -18,12 +18,18 @@ export function UrlRow({
 }) {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
+  // 复位定时器句柄：重复点击时先清旧定时器，避免提示被提前清掉
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /** 复制地址到剪贴板，并短暂显示“已复制”图标。 */
   async function handleCopy() {
     if (await copyText(url)) {
       setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
+      if (timer.current !== null) clearTimeout(timer.current);
+      timer.current = setTimeout(() => {
+        setCopied(false);
+        timer.current = null;
+      }, 1600);
     }
   }
 

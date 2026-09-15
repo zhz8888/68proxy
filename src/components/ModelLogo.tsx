@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { ModelIcon, Poolside, ProviderIcon, modelMappings } from "@lobehub/icons";
 import { Bot } from "lucide-react";
 import { translate } from "@/i18n";
@@ -29,16 +30,29 @@ export function providerForModel(id: string): string | null {
   return null;
 }
 
+/** 预先编译 @lobehub/icons 的模型关键字正则。
+ *
+ *  映射表约 100 组关键字，原先在渲染路径里对每个模型逐个 new RegExp 编译；
+ *  模型列表（搜索框每次击键、Relay 每次推送）都会重渲染全部行，开销可观。*/
+const LOBE_KEYWORD_RES: RegExp[][] = modelMappings.map((item) =>
+  item.keywords.map((keyword) => new RegExp(keyword, "i")),
+);
+
+/** hasLobeMapping 的结果缓存：同一模型 ID 的判定在整个进程内恒定。 */
+const lobeMappingCache = new Map<string, boolean>();
+
 /** 与 @lobehub/icons ModelIcon 内部相同的映射判断：是否有对应模型/品牌图标 */
 function hasLobeMapping(model: string): boolean {
+  const cached = lobeMappingCache.get(model);
+  if (cached !== undefined) return cached;
   const m = model.toLowerCase();
-  return modelMappings.some((item) =>
-    item.keywords.some((keyword) => new RegExp(keyword, "i").test(m)),
-  );
+  const hit = LOBE_KEYWORD_RES.some((res) => res.some((re) => re.test(m)));
+  lobeMappingCache.set(model, hit);
+  return hit;
 }
 
 /** 模型品牌图标：依次尝试 Poolside 专属图标、lobehub 模型图标、供应商标志，均不匹配时回退为通用机器人图标。 */
-export function ModelLogo({
+export const ModelLogo = memo(function ModelLogo({
   model,
   size = 20,
   className,
@@ -73,7 +87,7 @@ export function ModelLogo({
       )}
     </span>
   );
-}
+});
 
 /** 供应商品牌图标（按供应商标识渲染，不做起模型级匹配）。 */
 export function ProviderLogo({

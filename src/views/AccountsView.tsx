@@ -43,6 +43,7 @@ import {
 } from "@/lib/api";
 import { openExternal } from "@/lib/platform";
 import { formatCost } from "@/lib/format";
+import { cancelLoginPolling, loginSnapshot, subscribeLogin, startLoginPolling } from "@/lib/authLogin";
 import { errText } from "@/lib/messages";
 import { cn } from "@/lib/utils";
 import { translate } from "@/i18n";
@@ -127,6 +128,8 @@ export function AccountsView() {
   const [detailError, setDetailError] = useState("");
   // 详情请求序号：用于丢弃乱序到达的过期响应（见 openAccountDetail）
   const detailReqSeq = useRef(0);
+  // 登录成功后的延时句柄：卸载时需清理，避免卸载后 setState
+  const successTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 账户使用规则（策略 + 优先消耗账户）
   const [routing, setRouting] = useState<AccountRouting>({
     strategy: "round_robin",
@@ -184,6 +187,11 @@ export function AccountsView() {
       .catch((e) => setLoadError(String(e)));
     reloadQuotas();
     api.accountRoutingGet().then(setRouting).catch(() => {});
+    // 若登录仍在进行（模块级轮询还在跑），重新打开弹窗继续等待结果
+    const snap = loginSnapshot();
+    if (snap.status === "pending" || snap.status === "success") {
+      setLoginOpen(true);
+    }
   }, []);
 
   /** 校验并新增一个 Command Code 账户 Key（必须以 user_ 开头）。 */
@@ -275,6 +283,8 @@ export function AccountsView() {
       const { url } = await api.authLoginStart();
       setLoginUrl(url);
       setLoginStatus("pending");
+      // 轮询提到模块级，切走视图也不会丢已授权的账户
+      startLoginPolling();
     } catch (e) {
       setLoginError(String(e));
       setLoginStatus("failed");
@@ -304,45 +314,48 @@ export function AccountsView() {
   /** 关闭登录弹窗并取消进行中的登录。 */
   async function closeLoginDialog() {
     setLoginOpen(false);
-    try {
-      await api.authLoginCancel();
-    } catch {
-      /* 忽略取消失败 */
-    }
+    await cancelLoginPolling();
   }
 
-  // 弹窗打开且状态为 pending 时轮询登录结果
+  // 订阅模块级登录轮询：轮询本身与视图生命周期解耦（切走视图也不会丢已授权的账户），
+  // 这里只负责把状态映射到弹窗与列表刷新。
+  // 用 ref 持有最新回调，使订阅只需建立一次，不随每次渲染重建。
+  const loginHandler = useRef<(snap: import("@/lib/api").AuthLoginPoll) => void>(() => {});
+  loginHandler.current = (snap) => {
+    if (snap.status === "pending" || snap.status === "idle") {
+      setLoginStatus(snap.status);
+      return;
+    }
+    if (snap.status === "success") {
+      setLoginStatus("success");
+      // 成功后自动关弹窗并刷新列表；句柄存 ref，卸载时清理，避免卸载后 setState
+      successTimer.current = setTimeout(() => {
+        setLoginOpen(false);
+        setAccounts([]);
+        api.accountList().then((a) => setAccounts(a.accounts)).catch(() => {});
+        reloadQuotas();
+        toast.success(t("accounts.loginSuccess"));
+      }, 600);
+      return;
+    }
+    if (snap.status === "denied") {
+      setLoginStatus("denied");
+      return;
+    }
+    // 统一存为 err: 前缀的消息码，渲染时用 errText 翻译；无码时回退通用失败文案
+    setLoginError(`err:${snap.error || "auth_callback_params_missing"}`);
+    setLoginStatus("failed");
+  };
   useEffect(() => {
-    if (!loginOpen || loginStatus !== "pending") return;
-    const timer = setInterval(async () => {
-      try {
-        const r = await api.authLoginPoll();
-        if (r.status === "success") {
-          setLoginStatus("success");
-          clearInterval(timer);
-          // 成功后自动关弹窗并刷新列表
-          setTimeout(() => {
-            setLoginOpen(false);
-            setAccounts([]);
-            api.accountList().then((a) => setAccounts(a.accounts)).catch(() => {});
-            reloadQuotas();
-            toast.success(t("accounts.loginSuccess"));
-          }, 600);
-        } else if (r.status === "denied") {
-          setLoginStatus("denied");
-          clearInterval(timer);
-        } else if (r.status === "failed") {
-          // 统一存为 err: 前缀的消息码，渲染时用 errText 翻译；无码时回退通用失败文案
-          setLoginError(`err:${r.error || "auth_callback_params_missing"}`);
-          setLoginStatus("failed");
-          clearInterval(timer);
-        }
-      } catch {
-        /* 轮询失败则下一轮再试 */
+    const off = subscribeLogin((snap) => loginHandler.current(snap));
+    return () => {
+      off();
+      if (successTimer.current !== null) {
+        clearTimeout(successTimer.current);
+        successTimer.current = null;
       }
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [loginOpen, loginStatus]);
+    };
+  }, []);
 
   return (
     <div className="space-y-4 pb-8">
@@ -443,7 +456,7 @@ export function AccountsView() {
                 const q = quotaFor(quotas, a, i);
                 const planName = q?.plan_name ? q.plan_name : null;
                 return (
-                  <li key={a.index} className="space-y-2 rounded-md border px-3 py-2">
+                  <li key={a.userId || a.index} className="space-y-2 rounded-md border px-3 py-2">
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex min-w-0 flex-col gap-0.5">
                         <div className="flex items-center gap-2">

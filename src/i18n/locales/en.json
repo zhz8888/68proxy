@@ -224,6 +224,7 @@
     "tieredTitle": "Tiered pricing by input size",
     "timeOfDayWindows": "Peak hours {{p0}}, off-peak rates apply otherwise",
     "timeWeekdays": "Mon–Fri",
+    "timeWeekdaysPrev": "Sun–Thu",
     "caps": {
       "vision": "Vision",
       "reasoning": "Reasoning"
@@ -466,6 +467,7 @@
     "kill_failed": "Failed to kill process: {{p0}}",
     "platform_unsupported": "Killing processes is not supported on this platform",
     "client_build_failed": "Failed to build the HTTP client: {{p0}}",
+    "proxy_build_failed": "Failed to build the proxy client: {{p0}}",
     "verify_timeout": "Verification request timed out; check your network",
     "verify_failed": "Verification request failed: {{p0}}",
     "whoami_parse_failed": "Failed to parse the whoami response: {{p0}}",

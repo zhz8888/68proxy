@@ -19,6 +19,17 @@ export default defineConfig(() => ({
     },
   },
 
+  // 把桥接端口/令牌透传给前端：后端读 CC_DEV_BRIDGE_PORT / CC_DEV_BRIDGE_TOKEN，
+  // 前端只能读到 VITE_ 前缀的变量，若两处各写各的，改了后端端口前端就会失联。
+  define: {
+    "import.meta.env.VITE_CC_DEV_BRIDGE_PORT": JSON.stringify(
+      process.env.CC_DEV_BRIDGE_PORT ?? "",
+    ),
+    "import.meta.env.VITE_CC_DEV_BRIDGE_TOKEN": JSON.stringify(
+      process.env.CC_DEV_BRIDGE_TOKEN ?? "",
+    ),
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   clearScreen: false,
   server: {

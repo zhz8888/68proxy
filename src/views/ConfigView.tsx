@@ -164,6 +164,11 @@ export function ConfigView() {
   const [refreshInput, setRefreshInput] = useState(
     String(DEFAULTS.model_refresh_interval_secs),
   );
+  // 用量保留天数以字符串保存（同端口输入模式）：清空输入期间不同步到配置，
+  // 否则 Number("") 得 0 会被解释为「永久保留」并立即落库
+  const [retentionInput, setRetentionInput] = useState(
+    String(DEFAULTS.usage_retention_days),
+  );
   // 是否已完成一次成功的加载：用于跳过一次「加载后立即自动保存」
   const skipNextAutosave = useRef(true);
   // 本地转发 Key（sk-）的凭据状态
@@ -185,6 +190,7 @@ export function ConfigView() {
         setPortInput(String(c.port));
         setProxyPortInput(c.proxy_port > 0 ? String(c.proxy_port) : "");
         setRefreshInput(String(c.model_refresh_interval_secs));
+        setRetentionInput(String(c.usage_retention_days));
         setLocalKey(k);
         setLoaded(true);
       })
@@ -229,6 +235,16 @@ export function ConfigView() {
     const n = Number(raw);
     if (raw.trim() !== "" && Number.isInteger(n) && n >= 1) {
       update("model_refresh_interval_secs", n);
+    }
+  }
+
+  /** 更新用量保留天数输入：仅在非负整数时同步到配置。
+   *  清空输入时 Number("") === 0 会被后端解释为「永久保留」，必须靠字符串中间态挡住。 */
+  function updateRetentionDays(raw: string) {
+    setRetentionInput(raw);
+    const n = Number(raw);
+    if (raw.trim() !== "" && Number.isInteger(n) && n >= 0) {
+      update("usage_retention_days", n);
     }
   }
 
@@ -577,8 +593,8 @@ export function ConfigView() {
               <Input
                 type="number"
                 min={0}
-                value={cfg.usage_retention_days}
-                onChange={(e) => update("usage_retention_days", Number(e.target.value))}
+                value={retentionInput}
+                onChange={(e) => updateRetentionDays(e.target.value)}
               />
             </Field>
           </Section>

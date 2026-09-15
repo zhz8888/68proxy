@@ -38,18 +38,21 @@ export async function copyText(text: string): Promise<boolean> {
     await navigator.clipboard.writeText(text);
     return true;
   } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
     try {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
       ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-      return true;
+      // execCommand 失败时返回 false 而不抛异常，必须透传其返回值，
+      // 否则会亮出「已复制」而剪贴板实际为空
+      return document.execCommand("copy");
     } catch {
       return false;
+    } finally {
+      // 保证异常路径也不残留不可见的 textarea 节点
+      ta.remove();
     }
   }
 }
@@ -57,7 +60,11 @@ export async function copyText(text: string): Promise<boolean> {
 /** 将较大的整数格式化为紧凑文本（1.2K / 1.3M / 987），用于图表坐标与摘要卡。 */
 export function formatCompactNumber(n: number): string {
   if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n % 1000 === 0 ? 0 : 1)}K`;
+  if (n < 1_000_000) {
+    // 先四舍五入再判断是否进位：否则 999_999 会得到 "1000.0K" 而非 "1.0M"
+    const k = Number((n / 1000).toFixed(n % 1000 === 0 ? 0 : 1));
+    return k >= 1000 ? `${(n / 1_000_000).toFixed(1)}M` : `${k}K`;
+  }
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
@@ -69,6 +76,8 @@ export function formatTokens(n: number): string {
 /** 将美元成本格式化为 $ 前缀的紧凑文本（$0.1234 / $12.34 / $1.2K）。 */
 export function formatCost(cost: number): string {
   if (cost === 0) return "$0";
+  // 极小但非零的成本不能显示成 $0.0000（与真正的 $0 无法区分）
+  if (cost < 0.0001) return "<$0.0001";
   if (cost < 0.01) return `$${cost.toFixed(4)}`;
   if (cost < 1000) return `$${cost.toFixed(2)}`;
   return `$${formatCompactNumber(cost)}`;
@@ -85,7 +94,11 @@ export function formatPrice(v: number): string {
 /** 将 token 规模格式化为紧凑的 K/M 后缀文本（272K / 1M）。 */
 export function formatContextTokens(n: number): string {
   if (n >= 1_000_000) return `${Number((n / 1_000_000).toFixed(1))}M`;
-  if (n >= 1000) return `${Number((n / 1000).toFixed(0))}K`;
+  if (n >= 1000) {
+    // 与 formatCompactNumber 同理：先取整再判进位，避免 999_999 显示成 "1000K"
+    const k = Number((n / 1000).toFixed(0));
+    return k >= 1000 ? `${Number((n / 1_000_000).toFixed(1))}M` : `${k}K`;
+  }
   return String(n);
 }
 
@@ -127,13 +140,22 @@ export function formatPeakWindows(tod: {
   for (const [s, e] of ranges) {
     const start = s * 60 + offMin;
     const end = e * 60 + offMin;
-    if (start !== end && ((start % 1440) + 1440) % 1440 >= ((end % 1440) + 1440) % 1440) {
-      // 窗口跨过本地午夜：拆成两段，保持 [start, end) 语义清晰
-      segs.push(`${formatWindowMinutes(start)}–24`, `00–${formatWindowMinutes(end)}`);
+    const startW = ((start % 1440) + 1440) % 1440;
+    const endW = ((end % 1440) + 1440) % 1440;
+    if (start !== end && startW >= endW) {
+      // 窗口跨过本地午夜：拆成两段，保持 [start, end) 语义清晰。
+      // end 恰落在本地 0 点时第二段为零长度，需省略，否则输出无意义的「00–00」。
+      segs.push(`${formatWindowMinutes(start)}–24`);
+      if (endW !== 0) segs.push(`00–${formatWindowMinutes(end)}`);
     } else {
       segs.push(`${formatWindowMinutes(start)}–${formatWindowMinutes(end)}`);
     }
   }
-  const weekdays = tod.weekdaysOnly ? `${translate("models.timeWeekdays")} ` : "";
+  // 星期范围是 UTC 语义（见 pricing.json 的 weekdaysOnly）。换算到本地时区后，
+  // 西半球偏移（offMin < 0）会把整段窗口前移一天，例如 UTC Mon 01:00 在当地是
+  // 周日 21:00，此时「周一至周五」与本地日历冲突，改用平移一天的说法。
+  let weekdaysKey = "models.timeWeekdays";
+  if (tod.weekdaysOnly && offMin < 0) weekdaysKey = "models.timeWeekdaysPrev";
+  const weekdays = tod.weekdaysOnly ? `${translate(weekdaysKey)} ` : "";
   return `${weekdays}${segs.join(" & ")} ${formatUtcOffset(offMin)}`;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ModelLogo } from "@/components/ModelLogo";
@@ -7,19 +7,27 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { api, onStats, type UsageRecentRow } from "@/lib/api";
 import { formatLogTime, formatTokens } from "@/lib/format";
 import { lampForStatus } from "@/lib/status";
+import { useVisiblePolling } from "@/lib/useVisiblePolling";
 import { cn } from "@/lib/utils";
 
 /** 最近请求卡片：展示最近成功计费请求的 token 用量，随统计事件实时刷新。 */
 export function RecentRequestsCard({ limit = 20 }: { limit?: number }) {
   const { t } = useTranslation();
   const [rows, setRows] = useState<UsageRecentRow[]>([]);
+  const mounted = useRef(true);
+
+  /** 拉取一次最近请求；组件已卸载时丢弃结果。 */
+  const refresh = useCallback(() => {
+    api
+      .statsRecent(limit)
+      .then((r) => mounted.current && setRows(r))
+      .catch(() => {});
+  }, [limit]);
 
   useEffect(() => {
-    let mounted = true;
-    /** 拉取一次最近请求；组件已卸载时丢弃结果。 */
-    const refresh = () => api.statsRecent(limit).then((r) => mounted && setRows(r)).catch(() => {});
+    mounted.current = true;
     refresh();
-    // 订阅后端用量事件（节流合并到 1 秒），并以 3 秒轮询兜底
+    // 订阅后端用量事件（节流合并到 1 秒）；兜底轮询见下方 useVisiblePolling
     let debounce: ReturnType<typeof setTimeout> | null = null;
     const off = onStats(() => {
       if (debounce) return;
@@ -28,14 +36,15 @@ export function RecentRequestsCard({ limit = 20 }: { limit?: number }) {
         refresh();
       }, 1000);
     });
-    const timer = setInterval(refresh, 3000);
     return () => {
-      mounted = false;
+      mounted.current = false;
       off.then((f) => f());
       if (debounce) clearTimeout(debounce);
-      clearInterval(timer);
     };
-  }, [limit]);
+  }, [refresh]);
+
+  // 兜底轮询：窗口隐藏时暂停，重新可见时立即刷一次
+  useVisiblePolling(refresh, 3000);
 
   return (
     <Card>
@@ -50,9 +59,9 @@ export function RecentRequestsCard({ limit = 20 }: { limit?: number }) {
           </p>
         ) : (
           <div className="space-y-1">
-            {rows.map((r, i) => (
+            {rows.map((r) => (
               <div
-                key={i}
+                key={`${r.ts}-${r.model}-${r.endpoint}`}
                 className="flex items-center gap-3 rounded-md border border-border/70 bg-secondary/30 px-3 py-2"
               >
                 <ModelLogo model={r.model} size={16} className="!p-0.5" />

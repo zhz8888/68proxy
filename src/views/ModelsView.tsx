@@ -270,7 +270,8 @@ export function ModelsView() {
   async function copy(id: string) {
     if (await copyText(id)) {
       setCopiedId(id);
-      setTimeout(() => setCopiedId(""), 1400);
+      // 带身份判断：连续复制 A→B 时，A 的旧定时器不应提前清掉 B 的提示
+      setTimeout(() => setCopiedId((cur) => (cur === id ? "" : cur)), 1400);
     }
   }
 

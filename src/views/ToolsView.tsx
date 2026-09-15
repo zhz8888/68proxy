@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { Check, ChevronDown, Copy, ListFilter, Plug, Sparkles } from "lucide-react";
@@ -75,6 +75,9 @@ export function ToolsView() {
   const [toolName, setToolName] = useState("");
   const [copied, setCopied] = useState(false);
   const [removeCopied, setRemoveCopied] = useState(false);
+  // 两个“已复制”提示的复位定时器句柄（重复点击时需先清旧定时器）
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const removeCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   // draftMode/draftSelected 是弹窗中的临时选择，点“确定”后才应用到 mode/selected
   const [draftMode, setDraftMode] = useState<ModelMode>("upstream");
@@ -118,7 +121,12 @@ export function ToolsView() {
   async function copyPrompt() {
     if (await copyText(prompt)) {
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      // 清掉上一次的复位定时器，避免频繁点击时提示被旧定时器提前清掉
+      if (copyTimer.current !== null) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => {
+        setCopied(false);
+        copyTimer.current = null;
+      }, 1500);
     }
   }
 
@@ -126,7 +134,11 @@ export function ToolsView() {
   async function copyRemovePrompt() {
     if (await copyText(removePrompt)) {
       setRemoveCopied(true);
-      setTimeout(() => setRemoveCopied(false), 1500);
+      if (removeCopyTimer.current !== null) clearTimeout(removeCopyTimer.current);
+      removeCopyTimer.current = setTimeout(() => {
+        setRemoveCopied(false);
+        removeCopyTimer.current = null;
+      }, 1500);
     }
   }
 
