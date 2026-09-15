@@ -96,7 +96,9 @@ pub fn build_cc_request(
                     system_blocks.push(block);
                 }
             }
-            Some(other) if !other.is_null() => {
+            // 空字符串已在上面的 String 分支被跳过；此处仅兜非字符串类型
+            // （否则 Value::String("") 会被 to_string 序列化成两个字面引号的文本块）
+            Some(other) if !other.is_null() && !other.is_string() => {
                 system_blocks.push(json!({ "type": "text", "text": other.to_string() }));
             }
             _ => {}
@@ -896,17 +898,9 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                     }
                     _ => {}
                 }
-                // 注意：content 为字符串时 parts 为空，必须用 textContent 判空（否则整条消息会丢）
-                if !parts.is_empty() || !text_content.is_empty() {
-                    // 单块纯文本仍用字符串（线格不变）；多块 / 带断点 / 含图片时用块数组（CLI 的形态）
-                    let single_text = parts.len() <= 1
-                        && (parts.is_empty() || parts[0].get("type").and_then(|t| t.as_str()) == Some("text"))
-                        && !text_has_cache;
-                    openai_messages.push(json!({
-                        "role": "user",
-                        "content": if single_text { json!(text_content) } else { Value::Array(parts.clone()) },
-                    }));
-                }
+                // 先推入 tool_result 对应的 tool 消息，再推入该回合的文本/图片：
+                // OpenAI 语义要求 role:"tool" 紧随带 tool_calls 的 assistant 消息之后，
+                // 若先推 user 文本会把工具结果与其发起消息隔开。
                 for tr in &tool_results {
                     let tool_use_id = as_str_or_empty(tr.get("tool_use_id").unwrap_or(&Value::Null));
                     let content = match tr.get("content") {
@@ -924,6 +918,17 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                         "tool_call_id": tool_use_id,
                         "name": tool_name_from_id.get(&tool_use_id).and_then(|v| v.as_str()).unwrap_or(""),
                         "content": content,
+                    }));
+                }
+                // 注意：content 为字符串时 parts 为空，必须用 textContent 判空（否则整条消息会丢）
+                if !parts.is_empty() || !text_content.is_empty() {
+                    // 单块纯文本仍用字符串（线格不变）；多块 / 带断点 / 含图片时用块数组（CLI 的形态）
+                    let single_text = parts.len() <= 1
+                        && (parts.is_empty() || parts[0].get("type").and_then(|t| t.as_str()) == Some("text"))
+                        && !text_has_cache;
+                    openai_messages.push(json!({
+                        "role": "user",
+                        "content": if single_text { json!(text_content) } else { Value::Array(parts.clone()) },
                     }));
                 }
             }

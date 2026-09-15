@@ -15,7 +15,7 @@ use futures_util::stream::{self, StreamExt};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io;
@@ -342,7 +342,12 @@ fn sse_response(
                         pending = Some(protocol_error_frame(protocol, &msg, None));
                         ended = true;
                     }
-                    Some(None) | None => return None,
+                    Some(None) | None => {
+                        // 生产者未发 Done 就退出（下游断连、后台任务结束）：补登记结束状态，
+                        // 否则该请求会永久停留在 streaming，前端出现永不结束的幽灵行。
+                        finish_request(&st, &ctx, "disconnect");
+                        return None;
+                    }
                 }
             }
         },
@@ -423,6 +428,8 @@ struct ReqTokens {
     cached: AtomicU64,
     /// 最后收到的上游事件类型。
     last_event: Mutex<String>,
+    /// 是否已登记结束：收尾可能被首帧循环与响应尾流多处触发，用一次性标记保证幂等。
+    finished: AtomicBool,
 }
 
 /// 单次请求的上下文：贯穿 handler → 流式任务 → 结束回填的生命周期数据。
@@ -470,7 +477,13 @@ fn record_start(st: &AppState, ctx: &ReqCtx) {
 }
 
 /// 请求结束时按 id 回填队列中对应条目的状态/耗时/token，并把最终摘要推送给前端。
+///
+/// 幂等：首帧循环消费 `Done` 与响应尾流收到通道关闭都会触发收尾，用一次性标记
+/// 保证只登记第一次的结果，避免后到的 disconnect 覆盖已写入的 ok。
 fn finish_request(st: &AppState, ctx: &ReqCtx, status: &str) {
+    if ctx.tokens.finished.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let elapsed = now_millis().saturating_sub(ctx.started_at);
     let input_tokens = ctx.tokens.input.load(Ordering::Relaxed);
     let output_tokens = ctx.tokens.output.load(Ordering::Relaxed);
@@ -861,7 +874,13 @@ async fn responses(
             )
         }
     };
-    let session_key = route_session_key(&headers, None);
+    // 先取 prompt_cache_key（Codex 用它标识会话且通常不带 x-session-id），再据此选账户，
+    // 否则同一会话每轮都会重新选账户，破坏账户粘滞并降低上游前缀缓存命中率。
+    let prompt_cache_key = req
+        .get("prompt_cache_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let session_key = route_session_key(&headers, prompt_cache_key);
     let (api_key, user_id) = match api_key_or_401(&st, &headers, session_key.as_deref()).await {
         Ok(k) => k,
         Err((status, msg)) => {
@@ -889,10 +908,6 @@ async fn responses(
             None,
         );
     }
-    let prompt_cache_key = req
-        .get("prompt_cache_key")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
     let response_id = format!("resp_{}", &uuid::Uuid::new_v4().to_string()[..12]);
     let ctx = ReqCtx {
         id: response_id.clone(),
@@ -1014,7 +1029,11 @@ async fn handle_stream(
                             || s.contains("\"reasoning_content\"")
                             || s.contains("\"tool_calls\"")
                     }
-                    Protocol::Anthropic => s.contains("\"text_delta\"") || s.contains("\"tool_use\""),
+                    Protocol::Anthropic => {
+                        s.contains("\"text_delta\"")
+                            || s.contains("\"thinking_delta\"")
+                            || s.contains("\"tool_use\"")
+                    }
                     Protocol::Responses => {
                         s.contains("response.output_item.added")
                             || s.contains("response.output_text.delta")
@@ -1028,7 +1047,10 @@ async fn handle_stream(
                 prefix.push(s);
             }
             Some(Frame::Done) => {
+                // 上游在首个内容帧之前正常收尾（例如整段输出都是被 prefix 缓存的思考帧）：
+                // 该 Done 已被这里消费，尾流不会再收到，必须就地登记结束。
                 reset_timeouts(&st);
+                finish_request(&st, &ctx, "ok");
                 return sse_response(prefix, rx, protocol, st, ctx);
             }
             Some(Frame::ZeroOutput) => {

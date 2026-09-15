@@ -362,9 +362,10 @@ fn anthropic_to_openai_conversion() {
     assert_eq!(openai["messages"][1]["role"], "user");
     assert_eq!(openai["messages"][2]["role"], "assistant");
     assert_eq!(openai["messages"][2]["tool_calls"][0]["function"]["name"], "t1");
-    assert_eq!(openai["messages"][3]["role"], "user");
-    assert_eq!(openai["messages"][4]["role"], "tool");
-    assert_eq!(openai["messages"][4]["tool_call_id"], "tu_1");
+    // tool 消息须紧随 assistant(tool_calls)，同回合的文本随后
+    assert_eq!(openai["messages"][3]["role"], "tool");
+    assert_eq!(openai["messages"][3]["tool_call_id"], "tu_1");
+    assert_eq!(openai["messages"][4]["role"], "user");
     assert_eq!(openai["tool_choice"], "required");
     assert_eq!(openai["reasoning_effort"], "high");
     assert_eq!(openai["tools"][0]["function"]["parameters"]["type"], "object");

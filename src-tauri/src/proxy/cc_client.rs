@@ -252,13 +252,17 @@ fn base_headers(state: &AppState, api_key: &str) -> reqwest::header::HeaderMap {
         "application/json".parse().unwrap(),
     );
     headers.insert("x-cli-environment", "production".parse().unwrap());
+    // api_key 来自用户配置 / 账户库，cc_version 来自 npm registry：都可能是带控制字符的
+    // 非法头值，用 try_from 兜底而非 parse().unwrap()（release 下 panic=abort 会整进程退出）
     headers.insert(
         reqwest::header::AUTHORIZATION,
-        format!("Bearer {api_key}").parse().unwrap(),
+        reqwest::header::HeaderValue::try_from(format!("Bearer {api_key}"))
+            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("Bearer")),
     );
     headers.insert(
         "x-command-code-version",
-        cc_version(state).parse().unwrap(),
+        reqwest::header::HeaderValue::try_from(cc_version(state))
+            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("0.0.0")),
     );
     headers.insert("User-Agent", "cli".parse().unwrap());
     headers
