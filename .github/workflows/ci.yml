@@ -54,6 +54,18 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      # CI 构建产物版本号用提交短哈希（semver 预发布格式），避免写死的 1.0.0
+      # 混入测试包；tauri.conf.json 的 version 引用 package.json，构建后应用内
+      # getVersion() 即返回 0.0.0-<sha>（侧栏显示 v0.0.0-<sha>）。
+      # 不能用纯哈希：Tauri CLI 要求 version 为合法 semver 字符串。
+      - name: Sync app version from commit SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          npm pkg set version="0.0.0-${SHORT_SHA}"
+          echo "CI 构建版本：$(node -p "require('./package.json').version")"
+
       - name: Frontend typecheck
         run: pnpm build
 
