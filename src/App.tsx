@@ -133,7 +133,7 @@ function App() {
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="flex h-screen overflow-hidden bg-background text-foreground">
+      <div className="flex h-screen overflow-hidden rounded-[10px] bg-background text-foreground">
         {/* 左侧导航栏 */}
         <aside className="flex w-52 shrink-0 flex-col border-r border-border bg-card/50">
           <div

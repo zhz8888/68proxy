@@ -11,6 +11,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "68Proxy",
@@ -19,7 +20,8 @@
         "minWidth": 980,
         "minHeight": 640,
         "center": true,
-        "decorations": false
+        "decorations": false,
+        "transparent": true
       }
     ],
     "security": {

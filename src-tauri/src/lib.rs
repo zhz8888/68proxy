@@ -5,6 +5,9 @@
 mod credentials;
 /// 浏览器打开的平台适配：隐私模式打开授权页（详见模块文档）。
 mod browser;
+/// macOS 原生窗口适配：无边框窗口四角圆角（详见模块文档）。
+#[cfg(target_os = "macos")]
+mod macos;
 /// 后端国际化：错误码生成与日志文案语言选择（详见模块文档）。
 mod i18n;
 mod proxy;
@@ -1095,6 +1098,14 @@ pub fn run() {
             dev_bridge::start(app.handle().clone());
 
             build_tray(app.handle())?;
+
+            // macOS：无边框窗口四角设圆角（仅 macOS 编译，其它平台无操作）
+            #[cfg(target_os = "macos")]
+            if let Some(w) = app.get_webview_window("main") {
+                if let Ok(ptr) = w.ns_window() {
+                    macos::apply_rounded_corners(ptr);
+                }
+            }
 
             // 启动时隐藏窗口
             if !cfg.show_window_on_start {
