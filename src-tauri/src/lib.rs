@@ -694,6 +694,8 @@ fn status_value(app: &AppHandle) -> Value {
     let cfg = ctx.proxy_state.config.read().unwrap().clone();
     let started = *ctx.proxy_state.started_at.lock().unwrap();
     let uptime = started.map(|s| (proxy::state::now_millis().saturating_sub(s)) / 1000);
+    // 最近一次启动失败原因（成功启动后清空）；未运行且带此字段时前端状态栏提示
+    let start_error = ctx.proxy_state.last_start_error.lock().unwrap().clone();
     json!({
         "running": running,
         "port": cfg.port,
@@ -702,6 +704,7 @@ fn status_value(app: &AppHandle) -> Value {
         "anthropic_url": format!("http://127.0.0.1:{}", cfg.port),
         "cc_version": proxy::cc_client::cc_version(&ctx.proxy_state),
         "uptime_secs": uptime.unwrap_or(0),
+        "error": start_error,
     })
 }
 
@@ -716,7 +719,31 @@ fn emit_status(app: &AppHandle) {
 
 /// 启动代理的内部实现：校验配置与 API Key、绑定监听端口、在后台任务中运行服务，
 /// 并等待运行标志置位后广播状态事件，返回最终代理状态 JSON。已运行时直接返回当前状态。
+///
+/// 失败时（端口被占用、缺少 Key/账户、启动超时等）统一写入日志、记录到
+/// `last_start_error`（供状态栏提示）并广播状态事件；成功启动则清空错误记录。
 async fn start_proxy_inner(app: &AppHandle) -> Result<Value, String> {
+    match start_proxy_inner_impl(app).await {
+        Ok(v) => {
+            let ctx = app.state::<AppCtx>();
+            ctx.proxy_state.clear_start_error();
+            Ok(v)
+        }
+        Err(e) => {
+            let ctx = app.state::<AppCtx>();
+            ctx.proxy_state.set_start_error(e.clone());
+            proxy::log::error(&format!(
+                "{}: {e}",
+                i18n::pick("代理启动失败", "Failed to start proxy")
+            ));
+            emit_status(app);
+            Err(e)
+        }
+    }
+}
+
+/// 启动代理的核心逻辑（不含失败处理，由 `start_proxy_inner` 包装）。
+async fn start_proxy_inner_impl(app: &AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
     if ctx.proxy_state.is_running() {
         return Ok(status_value(app));

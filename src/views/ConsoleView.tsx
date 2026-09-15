@@ -136,6 +136,14 @@ export function ConsoleView() {
               </span>
             )}
           </CardContent>
+          {/* 自动启动/启动失败提示：未运行且最近一次启动带失败原因时展示（如端口被占用） */}
+          {!running && status?.error && (
+            <CardContent className="border-t border-destructive/30 bg-destructive/5 px-3 py-2 pt-2">
+              <p className="text-xs leading-5 text-destructive">
+                {t("console.startFailed", { p0: errText(status.error) })}
+              </p>
+            </CardContent>
+          )}
         </Card>
 
         <Card className="min-w-0">

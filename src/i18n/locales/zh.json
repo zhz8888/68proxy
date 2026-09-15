@@ -95,6 +95,7 @@
     "statusStreaming": "转发中",
     "statusRunning": "运行中",
     "statusStopped": "已停止",
+    "startFailed": "代理启动失败：{{p0}}",
     "uptime": "已运行 {{p0}}",
     "portTitle": "监听端口",
     "upstreamVersionTitle": "上游版本",

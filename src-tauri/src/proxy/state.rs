@@ -146,6 +146,8 @@ pub struct AppState {
     pub auth_login: Mutex<Option<AuthLoginSession>>,
     /// 进行中 loopback 回调服务器的优雅停机信号（新一轮登录时用于关停旧实例）。
     pub auth_login_shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    /// 最近一次启动代理的失败原因（成功启动后清空；供状态栏展示自动启动失败提示）。
+    pub last_start_error: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -181,6 +183,7 @@ impl AppState {
             usage: Mutex::new(None),
             auth_login: Mutex::new(None),
             auth_login_shutdown: Mutex::new(None),
+            last_start_error: Mutex::new(None),
         })
     }
 
@@ -214,6 +217,16 @@ impl AppState {
         if let Some(tx) = self.shutdown.lock().unwrap().take() {
             let _ = tx.send(());
         }
+    }
+
+    /// 记录最近一次启动代理的失败原因（供状态栏提示；成功启动时清空）。
+    pub fn set_start_error(&self, err: String) {
+        *self.last_start_error.lock().unwrap() = Some(err);
+    }
+
+    /// 清空启动失败原因（启动成功后调用）。
+    pub fn clear_start_error(&self) {
+        *self.last_start_error.lock().unwrap() = None;
     }
 
     /// 记录一条请求摘要到队列头部，超出 500 条时丢弃最旧记录。

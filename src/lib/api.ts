@@ -71,6 +71,8 @@ export interface ProxyStatus {
   anthropic_url: string;
   cc_version: string;
   uptime_secs: number;
+  /** 最近一次启动代理的失败原因（成功启动后为空；未运行时由状态栏提示）。 */
+  error?: string;
 }
 
 /** 一条代理日志：seq 为自增序号，ts 为毫秒时间戳。 */

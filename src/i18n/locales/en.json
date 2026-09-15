@@ -95,6 +95,7 @@
     "statusStreaming": "Forwarding",
     "statusRunning": "Running",
     "statusStopped": "Stopped",
+    "startFailed": "Proxy failed to start: {{p0}}",
     "uptime": "Up {{p0}}",
     "portTitle": "Listening port",
     "upstreamVersionTitle": "Upstream version",
