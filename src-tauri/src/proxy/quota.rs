@@ -369,6 +369,13 @@ fn parse_org_limits(whoami: &Value) -> Vec<OrgLimit> {
         .collect()
 }
 
+/// 把上游的 ISO 8601 时间字符串解析为 Unix 毫秒（供天数计算与展示）；无法解析返回 None。
+fn iso_to_millis(s: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp_millis().max(0) as u64)
+}
+
 /// 拉取单个账户的额度快照。
 pub async fn fetch_account_quota(
     state: &AppState,
@@ -386,10 +393,12 @@ pub async fn fetch_account_quota(
             return AccountQuota::failed(user_name.into(), masked_key.into(), "whoami_failed".into())
         }
     };
+    // 组织 ID 只取 whoami.org.id；个人账户 org 为 null 时保持 None（不带 orgId 参数）。
+    // 不能用 user.id 兜底：上游 billing 端点对非本组织的 orgId 返回 403，
+    // 个人账户会把 userId 误当 orgId 拼进 URL 导致订阅/额度全部拉取失败。
     let org_id = whoami
         .pointer("/org/id")
         .and_then(|x| x.as_str())
-        .or_else(|| whoami.pointer("/user/id").and_then(|x| x.as_str()))
         .map(|s| s.to_string());
     let query = org_id.as_deref().map(|o| format!("?orgId={o}")).unwrap_or_default();
 
@@ -417,8 +426,12 @@ pub async fn fetch_account_quota(
         .and_then(|s| s.as_str())
         .filter(|_| matches!(status.as_deref(), Some("active") | Some("trialing") | Some("past_due")))
         .map(|s| s.to_string());
-    let period_start = sub_data.and_then(|d| d.get("currentPeriodStart")).and_then(|x| x.as_u64());
-    let period_end = sub_data.and_then(|d| d.get("currentPeriodEnd")).and_then(|x| x.as_u64());
+    // 周期起止：上游返回 ISO 8601 字符串（如 2026-09-14T18:52:47.000Z），
+    // 解析为 Unix 毫秒供展示与天数计算；since 参数则保留原始 ISO 字符串。
+    let period_start_iso = sub_data.and_then(|d| d.get("currentPeriodStart")).and_then(|x| x.as_str()).map(str::to_string);
+    let period_end_iso = sub_data.and_then(|d| d.get("currentPeriodEnd")).and_then(|x| x.as_str()).map(str::to_string);
+    let period_start = period_start_iso.as_deref().and_then(iso_to_millis);
+    let period_end = period_end_iso.as_deref().and_then(iso_to_millis);
 
     // 额度响应：完整 body（兼容顶层 `{credits, windowLimits}` 与 `data` 包裹两种包法）
     let credits_body = credits.as_ref().and_then(|v| {
@@ -444,9 +457,13 @@ pub async fn fetch_account_quota(
             .map(|s| s.to_string())
     });
 
-    // ③ 用量汇总：since 取订阅周期起点（与 CLI 一致）
-    let since_q = period_start
-        .map(|s| format!("&since={s}"))
+    // ③ 用量汇总：since 取订阅周期起点（与 CLI 一致，传原始 ISO 字符串，
+    // 上游要求 ISO 8601 datetime，传毫秒会返回 400 Validation error）。
+    // 前缀按 query 是否为空区分：query 为空时用 ?，否则用 &，
+    // 否则 org=null 时 URL 会变成 .../summary&since=...（缺 ?）导致 404。
+    let since_q = period_start_iso
+        .as_deref()
+        .map(|s| format!("{}since={s}", if query.is_empty() { "?" } else { "&" }))
         .unwrap_or_default();
     let summary = get_json(
         state,

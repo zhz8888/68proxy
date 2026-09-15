@@ -1671,8 +1671,13 @@ async fn spawn_billing_mock(counter: Arc<std::sync::atomic::AtomicUsize>) -> Str
         "data": {
             "status": "active",
             "planId": "individual-pro",
-            "currentPeriodStart": super::state::now_millis() - 5 * 86_400_000u64,
-            "currentPeriodEnd": super::state::now_millis() + 25 * 86_400_000u64,
+            // 上游返回 ISO 8601 字符串（真实响应格式，非毫秒）
+            "currentPeriodStart": chrono::DateTime::from_timestamp_millis(
+                (super::state::now_millis() - 5 * 86_400_000u64) as i64
+            ).unwrap().to_rfc3339(),
+            "currentPeriodEnd": chrono::DateTime::from_timestamp_millis(
+                (super::state::now_millis() + 25 * 86_400_000u64) as i64
+            ).unwrap().to_rfc3339(),
         }
     }));
     let credits = Json(json!({
@@ -1746,8 +1751,12 @@ async fn quota_fetch_go_subscription() {
         "data": {
             "status": "active",
             "planId": "individual-go",
-            "currentPeriodStart": super::state::now_millis() - 86_400_000u64,
-            "currentPeriodEnd": super::state::now_millis() + 29 * 86_400_000u64,
+            "currentPeriodStart": chrono::DateTime::from_timestamp_millis(
+                (super::state::now_millis() - 86_400_000u64) as i64
+            ).unwrap().to_rfc3339(),
+            "currentPeriodEnd": chrono::DateTime::from_timestamp_millis(
+                (super::state::now_millis() + 29 * 86_400_000u64) as i64
+            ).unwrap().to_rfc3339(),
         }
     }));
     // windowLimits 与 credits 平级（真实结构，CLI 读 e.credits?.windowLimits）
@@ -1782,6 +1791,71 @@ async fn quota_fetch_go_subscription() {
     assert_eq!((five.used, five.cap), (3.0, 50.0));
     let weekly = q.weekly.unwrap();
     assert_eq!((weekly.used, weekly.cap), (20.0, 200.0));
+}
+
+/// 个人账户（whoami.org=null）：不应把 userId 当 orgId 拼进 billing 请求，
+/// 否则上游 403 导致订阅/额度全空（回归：org_id 只取 org.id，null 时不带参数）。
+/// 同时验证 usage/summary 的 since 传 ISO 字符串（上游要求，毫秒会 400）。
+#[tokio::test]
+async fn quota_fetch_personal_account_no_org() {
+    use axum::Json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let whoami = Json(json!({
+        "success": true,
+        "user": { "id": "5a96ff2d-74e4-4ef9-8108-4f55f3559767", "userName": "zhz8888" },
+        "org": null
+    }));
+    let subs = Json(json!({
+        "success": true,
+        "data": {
+            "status": "active",
+            "planId": "individual-go",
+            "currentPeriodStart": "2026-09-14T18:52:47.000Z",
+            "currentPeriodEnd": "2026-10-14T18:52:47.000Z",
+        }
+    }));
+    let credits = Json(json!({
+        "credits": { "monthlyCredits": 10, "purchasedCredits": 0, "freeCredits": 0 },
+        "windowLimits": { "limited": true, "fiveHour": { "used": 0, "cap": 3 }, "weekly": { "used": 0, "cap": 6 } }
+    }));
+    let summary = Json(json!({ "totalCost": 1.25 }));
+    // 记录 summary 请求 URL，断言 since 为 ISO 字符串且不带 orgId
+    let summary_url = Arc::new(std::sync::Mutex::new(String::new()));
+    let sum_url = summary_url.clone();
+    let router = Router::new()
+        .route("/alpha/whoami", axum::routing::get(move || { let v = whoami.0.clone(); async move { Json(v) } }))
+        .route("/alpha/billing/subscriptions", axum::routing::get(move || { let v = subs.0.clone(); async move { Json(v) } }))
+        .route("/alpha/billing/credits", axum::routing::get(move || { let v = credits.0.clone(); async move { Json(v) } }))
+        .route("/alpha/usage/summary", axum::routing::get(move |req: axum::extract::Request| {
+            let v = summary.0.clone();
+            let url = sum_url.clone();
+            async move {
+                *url.lock().unwrap() = req.uri().to_string();
+                Json(v)
+            }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+
+    let state = plain_state(&format!("http://{addr}"));
+    let q = super::quota::fetch_account_quota(&state, "zhz8888", "user_…", "user_k").await;
+    assert_eq!(q.error, None);
+    assert_eq!(q.plan_id.as_deref(), Some("individual-go"));
+    assert_eq!(q.plan_name, "Go");
+    assert_eq!(q.status.as_deref(), Some("active"));
+    assert!(q.has_billing);
+    assert_eq!(q.monthly_remaining, 10.0);
+    assert_eq!(q.total_pool, 10.0);
+    assert_eq!(q.total_spent, 1.25);
+    // period 解析为毫秒且天数可算
+    let end = q.period_end.expect("period_end 应解析成功");
+    assert!(end > super::state::now_millis());
+    assert!(q.days_left.is_some());
+    // summary 请求：不带 orgId，since 是 ISO 字符串
+    let got_url = summary_url.lock().unwrap().clone();
+    assert!(!got_url.contains("orgId="), "个人账户不应带 orgId: {got_url}");
+    assert!(got_url.contains("since=2026-09-14T18:52:47.000Z"), "since 应为 ISO 字符串: {got_url}");
 }
 
 /// 订阅接口异常但 credits 带 planId 时：plan 从 credits 兜底，窗口限额仍可解析。

@@ -367,12 +367,12 @@ pub(crate) async fn get_json(state: &AppState, url: &str, api_key: &str) -> Opti
 pub async fn fetch_plan_context(state: &AppState, api_key: &str) -> PlanContext {
     let base = state.config.read().unwrap().api_base.clone();
 
-    // whoami：取组织 ID（CLI 用 org.id；兼容 user.id）
+    // whoami：取组织 ID（CLI 用 org.id）。个人账户 org 为 null 时保持 None，
+    // 不带 orgId 参数；不能用 user.id 兜底（上游对非本组织 orgId 返回 403）。
     let whoami = get_json(state, &format!("{base}/alpha/whoami"), api_key).await;
     let org_id = whoami.as_ref().and_then(|v| {
         v.pointer("/org/id")
             .and_then(|x| x.as_str())
-            .or_else(|| v.pointer("/user/id").and_then(|x| x.as_str()))
             .map(|s| s.to_string())
     });
     let query = org_id.as_deref().map(|o| format!("?orgId={o}")).unwrap_or_default();
