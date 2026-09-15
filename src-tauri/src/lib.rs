@@ -403,6 +403,17 @@ fn theme_get(app: AppHandle) -> Value {
     json!({ "theme": ctx.proxy_state.config.read().unwrap().theme })
 }
 
+/// 读取应用版本号：开发模式（`tauri dev`）返回 `dev`，生产构建返回 package.json
+/// 中的版本（随发版 tag 联动）。避免开发服务器显示硬编码的 1.0.0。
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    if tauri::is_dev() {
+        "dev".into()
+    } else {
+        app.package_info().version.to_string()
+    }
+}
+
 /// 保存界面主题并持久化（settings 表 + 内存状态）；非法值报错。
 ///
 /// 主题即时生效（前端切换 `<html>` 的 dark 类），此命令只负责持久化，无需重启。
@@ -982,6 +993,7 @@ pub fn run() {
             account_routing_get,
             account_routing_set,
             account_bindings_clear,
+            app_version,
             theme_get,
             theme_set,
             language_get,

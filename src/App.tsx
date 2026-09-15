@@ -65,6 +65,17 @@ const NAV: Array<{ id: View; labelKey: string; icon: LucideIcon }> = [
   { id: "about", labelKey: "nav.about", icon: Info },
 ];
 
+/** 侧栏版本号展示：dev 模式与 CI 短哈希构建显示纯标识（无 v 前缀），正式版保留 v 前缀。 */
+function displayVersion(version: string): string {
+  if (version === "dev") return version;
+  // CI 构建版本为 0.0.0-<短哈希>（Tauri 要求 semver），显示层只取短哈希
+  const ciPrefix = "0.0.0-";
+  if (version.startsWith(ciPrefix)) {
+    return version.slice(ciPrefix.length) || version;
+  }
+  return `v${version}`;
+}
+
 /** 应用主框架：左侧导航栏 + 顶部状态栏 + 按当前视图切换的内容区。 */
 function App() {
   const { t } = useTranslation();
@@ -173,11 +184,12 @@ function App() {
               Develop by 6ix8ight
               <br />
               Fork by zhz8888
-              {/* 版本号独占一行；浏览器调试环境无版本信息时整行省略，避免留下空行 */}
+              {/* 版本号独占一行；浏览器调试环境无版本信息时整行省略，避免留下空行。
+                  dev 模式显示 dev、CI 短哈希构建显示纯短哈希（均无 v 前缀），正式版保留 v 前缀。 */}
               {version && (
                 <>
                   <br />
-                  {`v${version}`}
+                  {displayVersion(version)}
                 </>
               )}
             </p>

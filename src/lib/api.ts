@@ -359,6 +359,8 @@ export const api = {
     invoke<void>("account_routing_set", { strategy, preferredAccountId }),
   // 清除会话→账户绑定（手动切换账户后强制所有会话重选）
   accountBindingsClear: () => invoke<{ cleared: number }>("account_bindings_clear"),
+  // 应用版本号：开发模式（tauri dev）返回 dev，生产构建返回发版版本
+  appVersion: () => invoke<string>("app_version"),
   // 界面主题：读取 / 保存（system / dark / light）
   themeGet: () => invoke<{ theme: ThemeMode }>("theme_get"),
   themeSet: (theme: ThemeMode) => invoke<void>("theme_set", { theme }),

@@ -230,6 +230,9 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
         }
         "plan_status" => Ok(to_value(crate::plan_status(app()?, b("force")).await?)?),
 
+        // ── 应用信息 ──
+        "app_version" => Ok(to_value(crate::app_version(app()?))?),
+
         // ── 主题 ──
         "theme_get" => Ok(crate::theme_get(app()?)),
         "theme_set" => {

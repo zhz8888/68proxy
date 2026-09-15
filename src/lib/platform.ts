@@ -5,10 +5,10 @@
 // 文件对话框不可用——但调用它们不能导致白屏或未捕获异常，故此处逐个降级。
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { getVersion } from "@tauri-apps/api/app";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
+import { api } from "@/lib/api";
 import { IN_TAURI } from "@/lib/ipc";
 import { translate } from "@/i18n";
 
@@ -35,10 +35,11 @@ export const appWindow = {
   },
 };
 
-/** 读取应用版本；浏览器调试环境下无此信息，返回空串由界面自行省略。 */
+/** 读取应用版本：开发模式（tauri dev）为 dev，生产构建为发版版本；
+ *  浏览器调试环境下无此信息，返回空串由界面自行省略。 */
 export async function appVersion(): Promise<string> {
   if (!IN_TAURI) return "";
-  return getVersion().catch(() => "");
+  return api.appVersion().catch(() => "");
 }
 
 /**
