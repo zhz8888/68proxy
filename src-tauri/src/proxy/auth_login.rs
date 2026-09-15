@@ -205,8 +205,10 @@ pub async fn start_auth_login(state: &Arc<AppState>) -> Result<String, String> {
         state: state.clone(),
         expected_state: state_token.clone(),
     });
+    // `/callback` 同时接受 GET（旧式 query 回传）与 POST（上游标准回传：表单或
+    // JSON 体，见 callback_post_handler），对齐 CLI 的 createAuthServer 行为。
     let router = Router::new()
-        .route("/callback", get(callback_handler))
+        .route("/callback", get(callback_handler).post(callback_post_handler))
         .route("/callback/complete", get(complete_handler))
         .with_state(ctx);
 
@@ -238,6 +240,90 @@ async fn callback_handler(
     State(ctx): State<Arc<CallbackCtx>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    process_callback(ctx, params)
+}
+
+/// 处理 POST 回调：上游完成授权后以 POST 回传凭据（对齐 CLI `createAuthServer`）。
+///
+/// 同时接受 `application/x-www-form-urlencoded` 与 `application/json` 两种请求体
+/// （CLI 对两种 content-type 分别走 `handleBrowserCallback` / `handleLegacyJsonCallback`）。
+/// 表单/JSON 均解析为参数 map 后交给共享的 `process_callback`。
+async fn callback_post_handler(
+    State(ctx): State<Arc<CallbackCtx>>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    let params = match callback_content_type(&headers).as_deref() {
+        Some("application/json") => match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(v) => match v {
+                serde_json::Value::Object(map) => map
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let val = match v {
+                            serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        };
+                        (k, val)
+                    })
+                    .collect(),
+                _ => {
+                    let mut session = ctx.state.auth_login.lock().unwrap();
+                    if let Some(s) = session.as_mut() {
+                        if s.state == ctx.expected_state {
+                            s.result =
+                                Some(LoginResult::Failed("auth_callback_params_missing".into()));
+                        }
+                    }
+                    drop(session);
+                    return Redirect::to("/callback/complete").into_response();
+                }
+            },
+            Err(_) => {
+                let mut session = ctx.state.auth_login.lock().unwrap();
+                if let Some(s) = session.as_mut() {
+                    if s.state == ctx.expected_state {
+                        s.result =
+                            Some(LoginResult::Failed("auth_callback_params_missing".into()));
+                    }
+                }
+                drop(session);
+                return Redirect::to("/callback/complete").into_response();
+            }
+        },
+        // 表单或未声明类型：按 URL 编码表单解析（上游默认行为）
+        _ => match serde_urlencoded::from_str::<HashMap<String, String>>(&body) {
+            Ok(m) => m,
+            Err(_) => {
+                let mut session = ctx.state.auth_login.lock().unwrap();
+                if let Some(s) = session.as_mut() {
+                    if s.state == ctx.expected_state {
+                        s.result =
+                            Some(LoginResult::Failed("auth_callback_params_missing".into()));
+                    }
+                }
+                drop(session);
+                return Redirect::to("/callback/complete").into_response();
+            }
+        },
+    };
+    process_callback(ctx, params)
+}
+
+/// 取请求的 Content-Type（小写，去参数）。
+fn callback_content_type(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+}
+
+/// 回调核心处理：校验 state、按 error / 凭据分写结果并 303 跳收尾页。
+///
+/// 参数 map 由 GET query 或 POST 体解析而来；state 防 CSRF 校验对所有入口一视同仁。
+fn process_callback(
+    ctx: Arc<CallbackCtx>,
+    params: HashMap<String, String>,
+) -> axum::response::Response {
     let st = ctx.state.clone();
     let expected_state = ctx.expected_state.clone();
     let param_state = params.get("state").cloned().unwrap_or_default();
@@ -478,6 +564,81 @@ mod flow_tests {
         ))
         .await;
         assert_eq!(poll_auth_login(&st)["status"], "success");
+        cancel_auth_login(&st);
+    }
+
+    /// POST 表单回调（上游标准回传，对齐 CLI createAuthServer）：凭据进 body。
+    #[tokio::test]
+    async fn login_success_post_form() {
+        let _serial = SERIAL.lock().await;
+        let (st, port, token) = started().await;
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let res = client
+            .post(format!("http://127.0.0.1:{port}/callback"))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!(
+                "state={token}&apiKey=user_post&userId=id_post&userName=Post&keyName=cli-browser"
+            ))
+            .send()
+            .await
+            .unwrap();
+        // 成功回调 303 跳收尾页
+        assert_eq!(res.status(), 303);
+        let poll = poll_auth_login(&st);
+        assert_eq!(poll["status"], "success");
+        assert_eq!(poll["account"]["key"], "user_post");
+        assert_eq!(poll["account"]["userId"], "id_post");
+        let page = cb_get(format!("http://127.0.0.1:{port}/callback/complete"))
+            .await
+            .text()
+            .await
+            .unwrap();
+        assert!(page.contains("授权成功"));
+        cancel_auth_login(&st);
+    }
+
+    /// POST JSON 回调（对齐 CLI handleLegacyJsonCallback）：凭据进 JSON 体。
+    #[tokio::test]
+    async fn login_success_post_json() {
+        let _serial = SERIAL.lock().await;
+        let (st, port, token) = started().await;
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let res = client
+            .post(format!("http://127.0.0.1:{port}/callback"))
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "state": token,
+                "apiKey": "user_json",
+                "userId": "id_json",
+                "userName": "Json",
+                "keyName": "cli-browser",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 303);
+        let poll = poll_auth_login(&st);
+        assert_eq!(poll["status"], "success");
+        assert_eq!(poll["account"]["key"], "user_json");
+        assert_eq!(poll["account"]["userId"], "id_json");
+        cancel_auth_login(&st);
+    }
+
+    /// POST 表单 error=access_denied 同样被识别为拒绝。
+    #[tokio::test]
+    async fn login_denied_post_form() {
+        let _serial = SERIAL.lock().await;
+        let (st, port, token) = started().await;
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let res = client
+            .post(format!("http://127.0.0.1:{port}/callback"))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!("state={token}&error=access_denied"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 303);
+        assert_eq!(poll_auth_login(&st)["status"], "denied");
         cancel_auth_login(&st);
     }
 
