@@ -123,6 +123,9 @@ pub struct AccountQuota {
     pub weekly: Option<LimitWindow>,
     /// 组织级消费限额。
     pub org_limits: Vec<OrgLimit>,
+    /// 是否已被标记耗尽（上游返回 402 时置位，供路由即时失效该账户）。
+    #[serde(default)]
+    pub exhausted: bool,
     /// 拉取失败原因码（成功为 null，码表见前端 `quota.error.*`）。
     pub error: Option<String>,
 }
@@ -151,6 +154,7 @@ impl AccountQuota {
             five_hour: None,
             weekly: None,
             org_limits: Vec::new(),
+            exhausted: false,
             error: Some(error),
         }
     }
@@ -170,6 +174,10 @@ pub fn window_exhausted(win: &Option<LimitWindow>) -> bool {
 /// 无需再看更宽的周期。所有额度信息都拿不到（拉取失败/无计费数据）时返回 false，
 /// 即「未知不限制」，避免因上游抖动而误判为耗尽、把请求全挤到个别账户。
 pub fn is_exhausted(q: &AccountQuota) -> bool {
+    // 上游返回 402 时的显式标记优先：它不依赖轮询快照里是否有可用窗口/额度数据
+    if q.exhausted {
+        return true;
+    }
     if q.error.is_some() {
         return false;
     }
@@ -193,6 +201,10 @@ pub fn is_exhausted(q: &AccountQuota) -> bool {
 /// 以最窄的可用窗口为基准（5 小时 → 周 → 月），取其剩余比例；这样余量百分比更贴近
 /// 近期可用空间，而不是被更宽周期的大额度摊平。无任何窗口信息时回退月配额余额比例。
 pub fn remaining_score(q: &AccountQuota) -> f64 {
+    // 已标记耗尽（上游 402）时余量评分为 0，避免被当成可用账户选走
+    if q.exhausted {
+        return 0.0;
+    }
     let ratio = |w: &Option<LimitWindow>| -> Option<f64> {
         match w {
             Some(w) if w.cap > 0.0 => Some(((w.cap - w.used) / w.cap).clamp(0.0, 1.0)),
@@ -255,10 +267,19 @@ pub async fn refresh_all_caches(state: &std::sync::Arc<AppState>, force: bool) {
             let name = if a.user_name.is_empty() { a.user_id.clone() } else { a.user_name.clone() };
             let masked = crate::credentials::mask_key(&a.key);
             let quota = fetch_account_quota(&st, &name, &masked, &a.key).await;
-            st.quota_cache
-                .lock()
-                .unwrap()
-                .insert(a.user_id.clone(), (quota, now_millis()));
+            // 上游 402 置位的耗尽标记跨刷新保留：只有在新的快照确实还有余额时才解除，
+            // 否则零额度账户会在 60 秒后被重新选中并再次收到 402。
+            let mut cache = st.quota_cache.lock().unwrap();
+            let keep_exhausted = cache
+                .get(&a.user_id)
+                .map(|(old, _)| old.exhausted)
+                .unwrap_or(false);
+            let mut quota = quota;
+            if keep_exhausted && quota.error.is_none() && quota.total_remaining <= 0.0 {
+                quota.exhausted = true;
+            }
+            cache.insert(a.user_id.clone(), (quota, now_millis()));
+            drop(cache);
             st.quota_inflight.lock().unwrap().remove(&a.user_id);
         }
     });
@@ -327,7 +348,10 @@ pub fn mark_exhausted(state: &AppState, user_id: &str) {
     {
         let mut cache = state.quota_cache.lock().unwrap();
         if let Some((q, _)) = cache.get_mut(user_id) {
-            // 把最窄的可用窗口推到上限，使 is_exhausted 判定为真；无可改窗口时置空池
+            // 显式标记：不依赖快照里存在可用窗口或非零额度池——无窗口且 total_pool==0 的
+            // 账户无法用「改写额度值」间接表达耗尽（旧的月配额判定要求 total_pool > 0）。
+            q.exhausted = true;
+            // 同步把额度值推到上限，使 UI 展示与路由判定一致
             match q.five_hour.as_mut() {
                 Some(w) if w.cap > 0.0 => w.used = w.cap,
                 _ => match q.weekly.as_mut() {
@@ -360,9 +384,10 @@ fn parse_org_limits(whoami: &Value) -> Vec<OrgLimit> {
                 .or_else(|| v.get("name"))
                 .and_then(|x| x.as_str())?
                 .to_string();
-            // pct 可能是 0-100 的百分数，也可能是 0-1 的比例
+            // pct 可能是 0-100 的百分数，也可能是 0-1 的比例。比例刻度下有效值恒 < 1
+            // （1.0 即 100%），故用开区间判断，避免把百分数 1（已用 1%）误当成 100%。
             let raw = v.get("pct").and_then(|x| x.as_f64()).unwrap_or(0.0);
-            let pct = if raw <= 1.0 { raw * 100.0 } else { raw };
+            let pct = if raw > 0.0 && raw < 1.0 { raw * 100.0 } else { raw };
             let reached = v.get("reached").and_then(|x| x.as_bool()).unwrap_or(pct >= 100.0);
             Some(OrgLimit { label, pct, reached })
         })
@@ -400,7 +425,16 @@ pub async fn fetch_account_quota(
         .pointer("/org/id")
         .and_then(|x| x.as_str())
         .map(|s| s.to_string());
-    let query = org_id.as_deref().map(|o| format!("?orgId={o}")).unwrap_or_default();
+    // 查询值一律百分号编码：orgId 可能含特殊字符，且 since 是 RFC 3339 时间串
+    // （带 `+08:00` 偏移时未编码的 `+` 会被服务端解码成空格，上游返回 400）。
+    let query = org_id
+        .as_deref()
+        .map(|o| {
+            serde_urlencoded::to_string([("orgId", o)])
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
 
     // ② 并发拉订阅与额度（URL 先绑定，避免临时值跨 await 被回收）
     let subs_url = format!("{base}/alpha/billing/subscriptions{query}");
@@ -463,7 +497,8 @@ pub async fn fetch_account_quota(
     // 否则 org=null 时 URL 会变成 .../summary&since=...（缺 ?）导致 404。
     let since_q = period_start_iso
         .as_deref()
-        .map(|s| format!("{}since={s}", if query.is_empty() { "?" } else { "&" }))
+        .and_then(|s| serde_urlencoded::to_string([("since", s)]).ok())
+        .map(|q| format!("{}{q}", if query.is_empty() { "?" } else { "&" }))
         .unwrap_or_default();
     let summary = get_json(
         state,
@@ -544,6 +579,7 @@ pub async fn fetch_account_quota(
         five_hour,
         weekly,
         org_limits: parse_org_limits(&whoami),
+        exhausted: false,
         error: None,
     }
 }
@@ -582,6 +618,15 @@ mod tests {
         assert!(!rows[1].reached);
     }
 
+    /// 百分数 1（已用 1%）不得被当成比例刻度换算成 100%。
+    #[test]
+    fn org_limits_pct_one_is_percent() {
+        let w = json!({ "orgLimits": [ { "label": "Daily", "pct": 1 } ] });
+        let rows = parse_org_limits(&w);
+        assert!((rows[0].pct - 1.0).abs() < 1e-9);
+        assert!(!rows[0].reached);
+    }
+
     /// 窗口解析：字段齐全时成功，缺 cap 视为无效。
     #[test]
     fn limit_window_from_json() {
@@ -616,6 +661,7 @@ mod tests {
             five_hour: five.map(win),
             weekly: weekly.map(win),
             org_limits: Vec::new(),
+            exhausted: false,
             error: None,
         }
     }

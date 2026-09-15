@@ -11,7 +11,7 @@
 //! 3. 否则要求模型分类在套餐允许集合内，且不在套餐屏蔽名单内。
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -27,8 +27,9 @@ const CAT_OSS: &str = "opensource";
 /// 套餐数据缓存有效期（5 分钟），避免每次进入模型页都请求上游。
 const CACHE_TTL_MS: u64 = 5 * 60 * 1000;
 
-/// 套餐数据缓存（进程级：内容为同一账户的套餐信息，无需按实例区分）。
-static CACHE: Mutex<Option<(PlanContext, u64)>> = Mutex::new(None);
+/// 套餐数据缓存（进程级，按 api_key 分槽：不同账户的套餐/额度各不相同）。
+static CACHE: LazyLock<Mutex<std::collections::HashMap<String, (PlanContext, u64)>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// 当前套餐上下文（对应 CLI `createBilling().get()` 的结果）。
 #[derive(Debug, Clone, Serialize)]
@@ -164,10 +165,17 @@ fn plan_display_name(plan_id: &str) -> String {
 ///
 /// 上游/CLI/定价文档三方的 ID 命名风格不同（`moonshotai/Kimi-K3` vs `kimi-k3`、
 /// `claude-haiku-4-5-20251001` vs `claude-haiku-4-5`），归一化后即可互通。
+///
+/// `provider:` 前缀恒在 `vendor/` 之前（如 `vercel-ai-gateway:meta/muse-spark-1.2`），
+/// 而模型名自带的 `:` 后缀标签在 `vendor/` 之后（如 `meituan/LongCat-2.0:free`）；
+/// 故有 `/` 时按最后一个 `/` 取模型名，无 `/` 时才按 `:` 剥 provider 前缀——
+/// 若一律 `rsplit(':')`，`LongCat-2.0:free` 会被压成 `free`，与分类表键失配。
 fn normalize(model_id: &str) -> String {
     let s = model_id.trim().to_lowercase();
-    let s = s.rsplit(':').next().unwrap_or(&s);
-    let s = s.rsplit('/').next().unwrap_or(s);
+    let s = match s.rfind('/') {
+        Some(i) => &s[i + 1..],
+        None => s.rsplit(':').next().unwrap_or(&s),
+    };
     // 剥离尾部 8 位日期（-20251001 或 @20251001）
     let bytes = s.as_bytes();
     if bytes.len() > 9 {
@@ -441,9 +449,13 @@ pub async fn fetch_plan_context(state: &AppState, api_key: &str) -> PlanContext 
 }
 
 /// 带缓存的套餐上下文获取：`force` 为真时强制刷新，否则 5 分钟内复用。
+///
+/// 缓存按 api_key 分槽：套餐/额度随账户不同，换账户（删除/重排/新增）后若沿用
+/// 旧槽会在 TTL 内给出另一个账户的准入结论。
 pub async fn plan_context(state: &AppState, api_key: Option<&str>, force: bool) -> PlanContext {
+    let key = api_key.unwrap_or("").to_string();
     if !force {
-        if let Some((cached, at)) = CACHE.lock().unwrap().as_ref() {
+        if let Some((cached, at)) = CACHE.lock().unwrap().get(&key) {
             if now_millis().saturating_sub(*at) < CACHE_TTL_MS {
                 return cached.clone();
             }
@@ -453,7 +465,10 @@ pub async fn plan_context(state: &AppState, api_key: Option<&str>, force: bool) 
         Some(k) => fetch_plan_context(state, k).await,
         None => PlanContext::unavailable("no_account"),
     };
-    *CACHE.lock().unwrap() = Some((ctx.clone(), now_millis()));
+    CACHE
+        .lock()
+        .unwrap()
+        .insert(key, (ctx.clone(), now_millis()));
     ctx
 }
 

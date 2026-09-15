@@ -1196,7 +1196,9 @@ async fn stream_openai(
         translator.cached_tokens,
         &last_event,
     );
-    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true);
+    // 以「是否真的产出了内容」判定成败：零输出会被下游以 429 错误帧收尾，不应计入统计
+    let produced = translator.produced_content();
+    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true, produced);
     if translator.produced_content() {
         let _ = send_frame(&tx, Frame::Sse(translator.done_event()), drain).await;
         let _ = send_frame(&tx, Frame::Done, drain).await;
@@ -1300,6 +1302,7 @@ async fn stream_anthropic(
         translator.cached_tokens,
         translator.cache_write_tokens.unwrap_or(0),
         true,
+        !translator.has_error,
     );
     let _ = send_frame(&tx, Frame::Done, drain).await;
 }
@@ -1389,7 +1392,7 @@ async fn stream_responses(
         translator.cached_tokens,
         &last_event,
     );
-    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true);
+    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true, !translator.has_error);
     let _ = send_frame(&tx, Frame::Done, drain).await;
 }
 // ── 行拆分工具 ────────────────────────────────────────
@@ -1434,10 +1437,13 @@ fn take_incomplete_tail(buffer: &mut Vec<u8>) -> Option<String> {
     Some(String::from_utf8_lossy(buffer).into_owned())
 }
 
-/// 记录一条成功的 token 用量到统计库（token 真实值出现点调用）。
+/// 记录一条 token 用量到统计库（token 真实值出现点调用）。
 ///
 /// 保存约定：输入/输出均为 0 的请求（如上游空响应）不记，
 /// 失败/超时/断连请求也不计入用量统计；成本由单价表实时估算。
+///
+/// `ok` 为调用点对本次请求成败的判定：上游报错、零输出等以错误帧收尾的场景必须传
+/// `false`，否则会把失败的请求计成正常消耗（与上面的保存约定相悖）。
 fn record_usage_entry(
     st: &AppState,
     model: &str,
@@ -1447,7 +1453,11 @@ fn record_usage_entry(
     cached: u64,
     cache_write: u64,
     stream: bool,
+    ok: bool,
 ) {
+    if !ok {
+        return;
+    }
     if prompt == 0 && completion == 0 {
         return;
     }
@@ -1550,14 +1560,9 @@ async fn handle_nonstream(
         input = 0;
         cached = 0;
     }
-    // 零输出判定：chat 端按 usage 回报值；Anthropic/Responses 按实际内容——
-    // 上游偶发不回 totalUsage 时，按 usage 判定会把有完整文本的响应误杀成 429。
-    let empty = match protocol {
-        Protocol::OpenAi => output == 0,
-        Protocol::Anthropic | Protocol::Responses => {
-            full_text.is_empty() && reasoning.is_empty() && tool_calls.is_empty()
-        }
-    };
+    // 零输出判定：三种协议一律按实际聚合内容判定——上游偶发不回 usage 时，
+    // 按 usage 判定会把已产出完整文本的响应误杀成 429 并丢弃正文。
+    let empty = full_text.is_empty() && reasoning.is_empty() && tool_calls.is_empty();
     if empty {
         finish_request(&st, &ctx, "error");
         return nonstream_error(
@@ -1579,6 +1584,7 @@ async fn handle_nonstream(
         cached,
         cache_write.unwrap_or(0),
         false,
+        true,
     );
     finish_request(&st, &ctx, "ok");
 
@@ -1697,7 +1703,14 @@ fn parse_ndjson_line(
     };
     *last_event = event_type.clone();
     match event_type.as_str() {
-        "text-start" | "reasoning-start" | "start" | "start-step" | "finish-step" => {}
+        "text-start" | "reasoning-start" | "start" | "start-step" => {}
+        "finish-step" => {
+            // 与流式翻译器一致：上游常在 finish-step 就给出 usage（键名为 usage），
+            // 若此处不读、finish 又恰好缺 totalUsage，会把已产出正文的响应误判为空响应。
+            if let Some(u) = event.get("usage").cloned() {
+                *usage = Some(u);
+            }
+        }
         "text-delta" => {
             full_text.push_str(event.get("text").and_then(|t| t.as_str()).unwrap_or(""));
         }
@@ -1726,7 +1739,8 @@ fn parse_ndjson_line(
         }
         "finish" => {
             *finish_reason = convert::map_finish_reason(event.get("finishReason").and_then(|v| v.as_str()).unwrap_or("stop"));
-            if let Some(u) = event.get("totalUsage").cloned() {
+            // 上游偶发不回 totalUsage，此时回退到 usage 键，并保留 finish-step 已记录的值
+            if let Some(u) = event.get("totalUsage").cloned().or_else(|| event.get("usage").cloned()) {
                 *usage = Some(u);
             }
         }

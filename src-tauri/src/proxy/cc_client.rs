@@ -374,7 +374,10 @@ pub async fn fetch_models(state: &AppState) -> (Vec<ModelInfo>, bool) {
     // 缓存非空且未过期时直接命中；用独立块提前释放读锁，避免后续写缓存时死锁
     {
         let cache = state.models.read().unwrap();
-        if !cache.models.is_empty() && now - cache.fetched_at < cfg.model_refresh_interval_secs * 1000 {
+        // 用饱和运算：系统时间回拨会让 now < fetched_at 下溢（debug 下 panic），
+        // 配置里的刷新间隔若被设得极大，乘法也会溢出。
+        let ttl = cfg.model_refresh_interval_secs.saturating_mul(1000);
+        if !cache.models.is_empty() && now.saturating_sub(cache.fetched_at) < ttl {
             return (cache.models.clone(), false);
         }
     }

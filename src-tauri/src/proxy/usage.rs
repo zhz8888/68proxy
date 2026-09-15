@@ -271,22 +271,28 @@ fn hour_label_of(ts: u64) -> String {
 
 /// 今天本地 0 点对应的 Unix 毫秒时间戳。
 ///
-/// DST 跳变时午夜可能是「不存在」或「有歧义」的时刻，`.single()` 会返回 None；
-/// 此时回退 `earliest()`（跳到最早的有效时刻），**不能**回退 0，
-/// 否则「今日」统计会退化为统计全部历史。
+/// DST 跳变时午夜可能是「不存在」的时刻，此时回退到当天第一个有效时刻
+/// （不存在的午夜之后紧邻的 1 点），**不能**回退 0 或「此刻」，否则「今日」统计
+/// 会退化为统计全部历史、或把当天已有明细全部排除（cutoff 变成 now）。
 fn local_midnight_millis() -> u64 {
     let n = chrono::Local::now();
-    let midnight = n
-        .date_naive()
+    let today = n.date_naive();
+    let midnight = today
         .and_hms_opt(0, 0, 0)
-        .unwrap_or_else(|| n.date_naive().and_hms_opt(0, 0, 1).unwrap());
+        .expect("00:00:00 is always a valid time");
     midnight
         .and_local_timezone(Local)
         .earliest()
+        .or_else(|| {
+            // 本地午夜不存在（DST 在 00:00 跳变）：取当天最早的有效时刻
+            today
+                .and_hms_opt(1, 0, 0)
+                .and_then(|t| t.and_local_timezone(Local).earliest())
+        })
         .map(|dt| dt.timestamp_millis() as u64)
         .unwrap_or_else(|| {
-            // 极端兜底：取当天 0 点前推 1 毫秒所在时刻，保证为「今日起点」量级
-            n.timestamp_millis().max(0) as u64
+            // 极端兜底：当天日期按 UTC 解释，保证仍是「今日起点」量级
+            midnight.and_utc().timestamp_millis() as u64
         })
 }
 

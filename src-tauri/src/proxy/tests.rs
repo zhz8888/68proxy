@@ -1853,10 +1853,35 @@ async fn quota_fetch_personal_account_no_org() {
     let end = q.period_end.expect("period_end 应解析成功");
     assert!(end > super::state::now_millis());
     assert!(q.days_left.is_some());
-    // summary 请求：不带 orgId，since 是 ISO 字符串
+    // summary 请求：不带 orgId，since 为百分号编码后的 ISO 字符串
+    // （`:` 编码为 %3A，避免 `+00:00` 这类带偏移的时间串被服务端解码成空格）
     let got_url = summary_url.lock().unwrap().clone();
     assert!(!got_url.contains("orgId="), "个人账户不应带 orgId: {got_url}");
-    assert!(got_url.contains("since=2026-09-14T18:52:47.000Z"), "since 应为 ISO 字符串: {got_url}");
+    assert!(got_url.contains("since="), "应带 since 参数: {got_url}");
+    let since_raw = got_url.split("since=").nth(1).expect("since 参数缺失");
+    let since_at = since_raw.find('&').map(|i| &since_raw[..i]).unwrap_or(since_raw);
+    let since = urlencoding_decode(since_at);
+    assert_eq!(since, "2026-09-14T18:52:47.000Z", "since 应为 ISO 字符串: {got_url}");
+}
+
+/// 最小百分号解码：仅用于断言 URL query 中的编码值。
+fn urlencoding_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(b) = u8::from_str_radix(hex, 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// 订阅接口异常但 credits 带 planId 时：plan 从 credits 兜底，窗口限额仍可解析。
@@ -1966,7 +1991,7 @@ async fn quota_mark_exhausted_updates_cache_and_bindings() {
         total_remaining: 9.0, total_pool: 10.0, total_spent: 0.0, usage_percent: 10.0,
         has_billing: true, days_left: None, period_start: None, period_end: None,
         five_hour: Some(super::quota::LimitWindow { used: 1.0, cap: 50.0, reset_at: None }),
-        weekly: None, org_limits: Vec::new(), error: None,
+        weekly: None, org_limits: Vec::new(), exhausted: false, error: None,
     };
     state.quota_cache.lock().unwrap().insert("a".into(), (q.clone(), super::state::now_millis()));
     state.account_bindings.lock().unwrap().insert(
@@ -1975,10 +2000,35 @@ async fn quota_mark_exhausted_updates_cache_and_bindings() {
     );
     super::quota::mark_exhausted(&state, "a");
     let cached = state.quota_cache.lock().unwrap().get("a").unwrap().0.clone();
+    assert!(cached.exhausted, "应置显式耗尽标记");
     assert!(super::quota::is_exhausted(&cached), "5h 窗口应被推满");
     assert!(state.account_bindings.lock().unwrap().is_empty(), "绑定应被清除");
     // 缓存无该账户时不 panic
     super::quota::mark_exhausted(&state, "ghost");
+}
+
+/// 标记耗尽对「无窗口限额且额度池为 0」的账户同样生效。
+///
+/// 旧实现靠改写额度值间接表达耗尽，而月配额判定要求 total_pool > 0，
+/// 这类账户（credits 三项皆 0 且无可识别套餐）的耗尽判定恒为假。
+#[tokio::test]
+async fn quota_mark_exhausted_without_windows_or_pool() {
+    use crate::proxy::quota::{remaining_score, AccountQuota};
+
+    let state = plain_state("http://127.0.0.1:1");
+    let q = AccountQuota {
+        user_name: "a".into(), masked_key: "user_…a".into(),
+        plan_id: None, plan_name: String::new(), status: None,
+        monthly_remaining: 0.0, purchased_remaining: 0.0, free_remaining: 0.0,
+        total_remaining: 0.0, total_pool: 0.0, total_spent: 0.0, usage_percent: 0.0,
+        has_billing: true, days_left: None, period_start: None, period_end: None,
+        five_hour: None, weekly: None, org_limits: Vec::new(), exhausted: false, error: None,
+    };
+    state.quota_cache.lock().unwrap().insert("a".into(), (q, super::state::now_millis()));
+    super::quota::mark_exhausted(&state, "a");
+    let cached = state.quota_cache.lock().unwrap().get("a").unwrap().0.clone();
+    assert!(super::quota::is_exhausted(&cached), "无窗口无池也应判为耗尽");
+    assert_eq!(remaining_score(&cached), 0.0, "耗尽账户余量评分应为 0");
 }
 
 /// 套餐上下文拉取：完整链路得到 plan/credits；上游不可达时降级为放行。

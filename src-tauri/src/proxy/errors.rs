@@ -53,7 +53,9 @@ pub fn map_cc_error(cc_status: u16, cc_body: &str) -> (u16, Value) {
     if let Some(c) = code {
         err_obj["code"] = json!(c);
     }
-    let retry_after = if cc_status == 429 { Some(json!(30)) } else { None };
+    // 按映射后的下游状态判断：上游 402（额度耗尽）会被映射成 429，
+    // 若只看原始 cc_status 就会漏掉这条最需要退避提示的路径。
+    let retry_after = if mapped.0 == 429 { Some(json!(30)) } else { None };
     let mut body = json!({ "error": err_obj });
     if let Some(ra) = retry_after {
         body["retry_after"] = ra;

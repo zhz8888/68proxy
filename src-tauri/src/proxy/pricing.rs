@@ -262,8 +262,10 @@ pub fn calculate_cost(
     ts_millis: u64,
 ) -> f64 {
     let p = price_for_at(model, prompt_tokens, ts_millis);
+    // cached 与 cache_write 都是 prompt 的子集：两者之和不得超过 prompt，
+    // 否则超出部分会被重复计费（1000 命中 + 1000 写入 会被按 2000 输入计价）。
     let cached = cached_tokens.min(prompt_tokens) as f64;
-    let cache_write = cache_write_tokens.min(prompt_tokens) as f64;
+    let cache_write = cache_write_tokens.min(prompt_tokens.saturating_sub(cached as u64)) as f64;
     let non_cached = (prompt_tokens as f64 - cached - cache_write).max(0.0);
     let mut cost = non_cached * p.input / 1e6;
     if cached > 0.0 {

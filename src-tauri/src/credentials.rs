@@ -555,6 +555,7 @@ mod tests {
             five_hour: five.map(win),
             weekly: weekly.map(win),
             org_limits: Vec::new(),
+            exhausted: false,
             error: None,
         };
         state.quota_cache.lock().unwrap().insert(user_id.to_string(), (q, crate::proxy::state::now_millis()));
