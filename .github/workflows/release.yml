@@ -56,7 +56,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 68proxy 现状：Windows x64 + macOS arm64
+          # 68Proxy 现状：Windows x64 + macOS arm64
           - os: windows-2022
           - os: macos-14
 
@@ -151,21 +151,21 @@ jobs:
           if ($null -eq $nsis) {
             throw 'No Windows NSIS installer found'
           }
-          $installerDest = "68proxy-$VERSION-Windows-x64-setup.exe"
+          $installerDest = "68Proxy-$VERSION-Windows-x64-setup.exe"
           Copy-Item $nsis.FullName (Join-Path release-assets $installerDest)
           Write-Host "Installer copied: $installerDest"
 
           # 2) 便携版 exe（Tauri 便携版由 exe + portable.ini 组成，打包为 zip）
-          $exePath = Join-Path $targetRoot '68proxy.exe'
+          $exePath = Join-Path $targetRoot '68Proxy.exe'
           if (-not (Test-Path $exePath)) {
             throw "Portable exe not found: $exePath"
           }
-          $portableDir = 'release-assets/68proxy-Portable'
+          $portableDir = 'release-assets/68Proxy-Portable'
           New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
           Copy-Item $exePath $portableDir
-          @('# 68proxy portable build marker', 'portable=true') | Set-Content -Path (Join-Path $portableDir 'portable.ini') -Encoding UTF8
+          @('# 68Proxy portable build marker', 'portable=true') | Set-Content -Path (Join-Path $portableDir 'portable.ini') -Encoding UTF8
           # 压缩包必须落在 release-assets/ 内，否则会被后续 path: release-assets/* 漏掉
-          $portableZip = "68proxy-$VERSION-Windows-x64-Portable.zip"
+          $portableZip = "68Proxy-$VERSION-Windows-x64-Portable.zip"
           $portableZipPath = Join-Path 'release-assets' $portableZip
           Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZipPath -Force
           Remove-Item -Recurse -Force $portableDir
@@ -193,7 +193,7 @@ jobs:
 
           DMG=$(find "$BUNDLE_DIR/dmg" -name "*.dmg" | head -1 || true)
           if [ -n "$DMG" ]; then
-            NEW_DMG="68proxy-${VERSION}-macOS-aarch64.dmg"
+            NEW_DMG="68Proxy-${VERSION}-macOS-aarch64.dmg"
             cp "$DMG" "release-assets/$NEW_DMG"
             echo "✅ DMG copied: $NEW_DMG"
           else
@@ -205,7 +205,7 @@ jobs:
           # 解压后可直接拖入「应用程序」；-k 生成 zip，--sequesterRsrc 保留扩展属性
           APP=$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name "*.app" | head -1 || true)
           if [ -n "$APP" ]; then
-            NEW_APP_ZIP="68proxy-${VERSION}-macOS-aarch64.app.zip"
+            NEW_APP_ZIP="68Proxy-${VERSION}-macOS-aarch64.app.zip"
             ditto -c -k --sequesterRsrc --keepParent "$APP" "release-assets/$NEW_APP_ZIP"
             echo "✅ app zip created: $NEW_APP_ZIP"
           else
@@ -279,7 +279,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.validate.outputs.tag }}
-          name: 68proxy ${{ needs.validate.outputs.tag }}
+          name: ${{ needs.validate.outputs.tag }}
           draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || true }}
           prerelease: false
           generate_release_notes: true

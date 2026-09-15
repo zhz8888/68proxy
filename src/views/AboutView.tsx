@@ -58,7 +58,7 @@ export function AboutView() {
       <Card>
         <CardContent className="pt-5">
           <p className="font-display text-xl font-semibold tracking-wide text-foreground">
-            68PROXY
+            68Proxy
           </p>
           <p className="text-sm leading-6 text-muted-foreground">{t("about.intro")}</p>
         </CardContent>

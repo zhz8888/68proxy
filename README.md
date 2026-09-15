@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="88%" alt="68PROXY — Command Code 协议转换网关">
+  <img src="./assets/readme/hero.svg" width="88%" alt="68Proxy — Command Code 协议转换网关">
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@
 
 > 本仓库为 [evanfu0110/68proxy](https://github.com/evanfu0110/68proxy) 的个人 fork，在原版基础上持续维护与增强。
 
-**68PROXY** 是一款开箱即用的本地**反向代理 + 协议转换网关**：作为客户端与 Command Code 之间的一层中转，它把请求改写成 CC CLI 信封格式并代理至上游，同时对外暴露 OpenAI Chat Completions / Responses 与 Anthropic Messages 兼容接口——让 Cursor、OpenCode、Cherry Studio、Codex CLI 以及自研工具无需任何 SDK 适配即可直接接入。支持多 CC 账户按轮询负载均衡，本地转发 Key（`sk-`）与 CC 账户 Key（`user_`）分离管理；界面内置中英文双语与明暗主题，一次配置、全局复用。
+**68Proxy** 是一款开箱即用的本地**反向代理 + 协议转换网关**：作为客户端与 Command Code 之间的一层中转，它把请求改写成 CC CLI 信封格式并代理至上游，同时对外暴露 OpenAI Chat Completions / Responses 与 Anthropic Messages 兼容接口——让 Cursor、OpenCode、Cherry Studio、Codex CLI 以及自研工具无需任何 SDK 适配即可直接接入。支持多 CC 账户按轮询负载均衡，本地转发 Key（`sk-`）与 CC 账户 Key（`user_`）分离管理；界面内置中英文双语与明暗主题，一次配置、全局复用。
 
 ---
 
@@ -167,17 +167,17 @@ pnpm tauri build --bundles dmg --target aarch64-apple-darwin
 
 | 平台 | 版本 | 文件 | 说明 |
 |------|------|------|------|
-| 🖥️ Windows | **安装版** | `target/release/bundle/nsis/68proxy_<version>_x64-setup.exe` | NSIS 安装程序，含桌面快捷方式、开始菜单、卸载入口，适合日常使用 |
-| 🖥️ Windows | **便携版** | `68proxy.exe` | 免安装，双击即用，适合移动/绿色使用 |
-| 🍎 macOS | **dmg 镜像** | `target/aarch64-apple-darwin/release/bundle/dmg/68proxy_<version>_aarch64.dmg` | Apple Silicon（arm64）dmg；未完成 Apple 公证，首次打开方式见下方说明 |
-| 🍎 macOS | **应用包 zip** | `target/aarch64-apple-darwin/release/bundle/macos/68proxy.app` | 打包为 `68proxy-<version>-macOS-aarch64.app.zip`，解压得到 `68proxy.app`，拖入「应用程序」即可；适合脚本分发或不便挂载磁盘映像的场景 |
+| 🖥️ Windows | **安装版** | `target/release/bundle/nsis/68Proxy_<version>_x64-setup.exe` | NSIS 安装程序，含桌面快捷方式、开始菜单、卸载入口，适合日常使用 |
+| 🖥️ Windows | **便携版** | `68Proxy.exe` | 免安装，双击即用，适合移动/绿色使用 |
+| 🍎 macOS | **dmg 镜像** | `target/aarch64-apple-darwin/release/bundle/dmg/68Proxy_<version>_aarch64.dmg` | Apple Silicon（arm64）dmg；未完成 Apple 公证，首次打开方式见下方说明 |
+| 🍎 macOS | **应用包 zip** | `target/aarch64-apple-darwin/release/bundle/macos/68Proxy.app` | 打包为 `68Proxy-<version>-macOS-aarch64.app.zip`，解压得到 `68Proxy.app`，拖入「应用程序」即可；适合脚本分发或不便挂载磁盘映像的场景 |
 
 > GitHub Releases 同时提供 Windows 两种版本与 macOS 的 dmg、应用包 zip；macOS 两个产物内容相同，按习惯二选一。
 
 > **macOS 首次打开说明**：应用未经 Apple 签名与公证，首次打开可能被 Gatekeeper 拦截。可在「访达 → 应用程序」中右键应用 →「打开」绕过，或在终端执行以下命令移除隔离属性：
 >
 > ```bash
-> sudo xattr -r -d com.apple.quarantine /Applications/68proxy.app
+> sudo xattr -r -d com.apple.quarantine /Applications/68Proxy.app
 > ```
 
 <p align="center">

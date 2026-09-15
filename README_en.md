@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="88%" alt="68PROXY — Command Code Protocol Gateway">
+  <img src="./assets/readme/hero.svg" width="88%" alt="68Proxy — Command Code Protocol Gateway">
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@
 
 > This repository is a personal fork of [evanfu0110/68proxy](https://github.com/evanfu0110/68proxy), actively maintained and enhanced on top of the original.
 
-**68PROXY** is a plug-and-play local **reverse proxy + protocol gateway**: a relay between your clients and Command Code that rewrites requests into the CC CLI envelope format and forwards them upstream, while exposing OpenAI / Anthropic compatible endpoints — so Cursor, OpenCode, Cherry Studio and your own tools can connect directly without any SDK adaptation. Multiple CC accounts are load-balanced in round-robin, local forwarding keys (`sk-`) and CC account keys (`user_`) are managed separately, and the UI ships with a bilingual (Chinese / English) interface plus light / dark themes — configure once, reuse everywhere.
+**68Proxy** is a plug-and-play local **reverse proxy + protocol gateway**: a relay between your clients and Command Code that rewrites requests into the CC CLI envelope format and forwards them upstream, while exposing OpenAI / Anthropic compatible endpoints — so Cursor, OpenCode, Cherry Studio and your own tools can connect directly without any SDK adaptation. Multiple CC accounts are load-balanced in round-robin, local forwarding keys (`sk-`) and CC account keys (`user_`) are managed separately, and the UI ships with a bilingual (Chinese / English) interface plus light / dark themes — configure once, reuse everywhere.
 
 ---
 
@@ -166,17 +166,17 @@ Artifacts produced:
 
 | Platform | Version | File | Notes |
 |----------|---------|------|-------|
-| 🖥️ Windows | **Installer** | `target/release/bundle/nsis/68proxy_<version>_x64-setup.exe` | NSIS setup with desktop shortcut, Start Menu entry and uninstaller — recommended for daily use |
-| 🖥️ Windows | **Portable** | `68proxy.exe` | No install needed, double-click to run — great for on-the-go use |
-| 🍎 macOS | **dmg image** | `target/aarch64-apple-darwin/release/bundle/dmg/68proxy_<version>_aarch64.dmg` | Apple Silicon (arm64) dmg; not Apple-notarized (see first-launch note below) |
-| 🍎 macOS | **App bundle zip** | `target/aarch64-apple-darwin/release/bundle/macos/68proxy.app` | Packed as `68proxy-<version>-macOS-aarch64.app.zip`; unzip to get `68proxy.app` and drag it into Applications — handy for scripted distribution or when mounting a disk image is inconvenient |
+| 🖥️ Windows | **Installer** | `target/release/bundle/nsis/68Proxy_<version>_x64-setup.exe` | NSIS setup with desktop shortcut, Start Menu entry and uninstaller — recommended for daily use |
+| 🖥️ Windows | **Portable** | `68Proxy.exe` | No install needed, double-click to run — great for on-the-go use |
+| 🍎 macOS | **dmg image** | `target/aarch64-apple-darwin/release/bundle/dmg/68Proxy_<version>_aarch64.dmg` | Apple Silicon (arm64) dmg; not Apple-notarized (see first-launch note below) |
+| 🍎 macOS | **App bundle zip** | `target/aarch64-apple-darwin/release/bundle/macos/68Proxy.app` | Packed as `68Proxy-<version>-macOS-aarch64.app.zip`; unzip to get `68Proxy.app` and drag it into Applications — handy for scripted distribution or when mounting a disk image is inconvenient |
 
 > GitHub Releases ships both Windows versions plus the macOS dmg and app-bundle zip; the two macOS artifacts are identical in content, pick whichever you prefer.
 
 > **First launch on macOS**: the app is not signed or notarized by Apple, so Gatekeeper may block it on first launch. Right-click the app in Finder → Applications → **Open** to bypass, or remove the quarantine attribute in Terminal:
 >
 > ```bash
-> sudo xattr -r -d com.apple.quarantine /Applications/68proxy.app
+> sudo xattr -r -d com.apple.quarantine /Applications/68Proxy.app
 > ```
 
 <p align="center">

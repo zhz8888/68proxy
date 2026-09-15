@@ -4,8 +4,8 @@
 
 | 平台 | 架构 | 下载 | 说明 |
 | :--- | :--- | :--- | :--- |
-| 🪟 **Windows** | x86_64 | [安装版](https://github.com/{{REPO}}/releases/download/{{TAG}}/68proxy-{{TAG}}-Windows-x64-setup.exe) · [绿色版](https://github.com/{{REPO}}/releases/download/{{TAG}}/68proxy-{{TAG}}-Windows-x64-Portable.zip) | 安装版含快捷方式与卸载项；绿色版解压即用，不写注册表 |
-| 🍎 **macOS** | Apple Silicon (arm64) | [磁盘映像 dmg](https://github.com/{{REPO}}/releases/download/{{TAG}}/68proxy-{{TAG}}-macOS-aarch64.dmg) · [应用包 zip](https://github.com/{{REPO}}/releases/download/{{TAG}}/68proxy-{{TAG}}-macOS-aarch64.app.zip) | dmg 打开后拖入「应用程序」；zip 解压得到 `68proxy.app`，同样拖入即可 |
+| 🪟 **Windows** | x86_64 | [安装版](https://github.com/{{REPO}}/releases/download/{{TAG}}/68Proxy-{{TAG}}-Windows-x64-setup.exe) · [绿色版](https://github.com/{{REPO}}/releases/download/{{TAG}}/68Proxy-{{TAG}}-Windows-x64-Portable.zip) | 安装版含快捷方式与卸载项；绿色版解压即用，不写注册表 |
+| 🍎 **macOS** | Apple Silicon (arm64) | [磁盘映像 dmg](https://github.com/{{REPO}}/releases/download/{{TAG}}/68Proxy-{{TAG}}-macOS-aarch64.dmg) · [应用包 zip](https://github.com/{{REPO}}/releases/download/{{TAG}}/68Proxy-{{TAG}}-macOS-aarch64.app.zip) | dmg 打开后拖入「应用程序」；zip 解压得到 `68Proxy.app`，同样拖入即可 |
 
 > macOS 的两个产物内容相同，按习惯二选一：**dmg** 适合常规安装，**zip** 适合脚本分发或不便挂载磁盘映像的场景。
 
@@ -19,7 +19,7 @@
 - 若提示「已损坏」，先在终端移除隔离属性，再重新打开：
 
   ```bash
-  sudo xattr -r -d com.apple.quarantine /Applications/68proxy.app
+  sudo xattr -r -d com.apple.quarantine /Applications/68Proxy.app
   ```
 
 **Windows** — SmartScreen 可能提示「Windows 已保护你的电脑」，点击「更多信息」→「仍要运行」。

@@ -236,7 +236,7 @@
   },
   "tools": {
     "title": "工具接入",
-    "description": "把 68proxy 的本地代理接入 Cursor / OpenCode / Cherry Studio / 自研工具等：填好工具名与模型，复制下方提示词发给 AI，让它替你完成接入；协议不支持时它会回复「不支持」。",
+    "description": "把 68Proxy 的本地代理接入 Cursor / OpenCode / Cherry Studio / 自研工具等：填好工具名与模型，复制下方提示词发给 AI，让它替你完成接入；协议不支持时它会回复「不支持」。",
     "targetTool": "目标工具",
     "toolPlaceholder": "例如 Cursor、OpenCode、Cherry Studio（留空则写“目标工具”）",
     "models": "模型",
@@ -272,12 +272,12 @@
       "reqUpstream": "调用 GET http://127.0.0.1:{{p0}}/v1/models 获取全量模型列表并全部配置到「{{p1}}」；若「{{p1}}」支持从 base_url 自动拉取模型列表，直接填 base_url 即可",
       "reqCustom": "只配置我指定的这些模型：{{p0}}，不要添加列表以外的任何模型",
       "protocols": "## 支持的协议（务必核对工具支持哪一种，优先 OpenAI）\n1) OpenAI 兼容协议（首选）:\n   - POST /v1/chat/completions，流式 SSE 与非流式 JSON 均支持\n   - 支持 system/user/assistant/tool 消息角色、工具调用 tools / tool_choice、多模态图片输入（image_url）、reasoning_effort、max_tokens、temperature\n   - 流式响应为标准 SSE：data: {\"choices\":[{\"delta\":{\"content\":...}}]}，结束为 data: [DONE]\n2) Anthropic Messages 协议（备选）:\n   - POST /v1/messages，流式 SSE 与非流式 JSON 均支持\n   - 支持顶层 system 字段、content 数组（text / tool_use / tool_result）、thinking.budget_tokens 映射、max_tokens\n3) 模型列表: GET /v1/models，返回 OpenAI 格式的模型数组\n4) 健康检查: GET /health",
-      "requirements": "## 接入要求\n- {{p0}}\n- **禁止对模型列表中的每个模型逐一发消息测试可用性**；如需发测试消息验证，只允许使用模型 「deepseek/deepseek-v4-flash」，不要向其他模型发送任何请求\n- 如果健康检查或验证请求失败，**必须先问用户两件事：① 是否已在 68proxy 中填写了有效的 API Key；② 是否已启动中继代理服务**；在得到用户明确回答之前，不要自行判断原因或跳过排查\n- 给「{{p1}}」配置代理时，必须**新建一个独立的自定义供应商/服务商条目**（例如命名 68proxy），指向本代理的 base_url；**绝对禁止修改、覆盖、替换该工具已有的其他供应商、模型或 base_url 配置**\n- 如果「{{p1}}」支持自定义供应商且支持 OpenAI 兼容协议：新增供应商，base_url 设为 http://127.0.0.1:{{p2}}/v1，模型的 models 列表写入 /v1/models 返回的全量结果\n- 如果「{{p1}}」只支持 Anthropic 协议：新增供应商，base_url 设为 http://127.0.0.1:{{p2}}，模型用 /v1/models 返回的列表\n- 如果两者都不支持：直接回复「不支持」\n- OpenCode 具体做法参考：在 opencode.json 的 provider 字段下**新增**一项（例如 \"68proxy\"，npm 包用 @ai-sdk/openai-compatible，options.baseURL 指向上述地址，apiKey 用占位符），models 里写入 /v1/models 返回的模型 id；已有项一律不动\n- 给出具体的配置位置（界面字段 / 配置文件 / 环境变量），以及如何验证（例如调用 GET /v1/models 或发一条测试消息）\n- 配置完成后，说明如何切换回原服务，方便随时恢复"
+      "requirements": "## 接入要求\n- {{p0}}\n- **禁止对模型列表中的每个模型逐一发消息测试可用性**；如需发测试消息验证，只允许使用模型 「deepseek/deepseek-v4-flash」，不要向其他模型发送任何请求\n- 如果健康检查或验证请求失败，**必须先问用户两件事：① 是否已在 68Proxy 中填写了有效的 API Key；② 是否已启动中继代理服务**；在得到用户明确回答之前，不要自行判断原因或跳过排查\n- 给「{{p1}}」配置代理时，必须**新建一个独立的自定义供应商/服务商条目**（例如命名 68Proxy），指向本代理的 base_url；**绝对禁止修改、覆盖、替换该工具已有的其他供应商、模型或 base_url 配置**\n- 如果「{{p1}}」支持自定义供应商且支持 OpenAI 兼容协议：新增供应商，base_url 设为 http://127.0.0.1:{{p2}}/v1，模型的 models 列表写入 /v1/models 返回的全量结果\n- 如果「{{p1}}」只支持 Anthropic 协议：新增供应商，base_url 设为 http://127.0.0.1:{{p2}}，模型用 /v1/models 返回的列表\n- 如果两者都不支持：直接回复「不支持」\n- OpenCode 具体做法参考：在 opencode.json 的 provider 字段下**新增**一项（例如 \"68Proxy\"，npm 包用 @ai-sdk/openai-compatible，options.baseURL 指向上述地址，apiKey 用占位符），models 里写入 /v1/models 返回的模型 id；已有项一律不动\n- 给出具体的配置位置（界面字段 / 配置文件 / 环境变量），以及如何验证（例如调用 GET /v1/models 或发一条测试消息）\n- 配置完成后，说明如何切换回原服务，方便随时恢复"
     },
     "removePrompt": {
       "title": "# 任务：把「{{p0}}」中接入的本地代理供应商移除",
-      "intro": "请帮我把之前接入到「{{p0}}」的 68proxy 本地代理供应商/服务商删除。",
-      "targets": "## 移除目标\n- 该供应商条目（例如 opencode.json 中 provider 下名为 68proxy 的那一项，或 Cursor / 其他工具中 base_url 指向本代理的 provider）\n- 该供应商下所有模型（当时从 /v1/models 写入的全部模型 id）\n- **绝对不要改动「{{p0}}」中其他任何供应商、模型或配置**",
+      "intro": "请帮我把之前接入到「{{p0}}」的 68Proxy 本地代理供应商/服务商删除。",
+      "targets": "## 移除目标\n- 该供应商条目（例如 opencode.json 中 provider 下名为 68Proxy 的那一项，或 Cursor / 其他工具中 base_url 指向本代理的 provider）\n- 该供应商下所有模型（当时从 /v1/models 写入的全部模型 id）\n- **绝对不要改动「{{p0}}」中其他任何供应商、模型或配置**",
       "criteria": "## 判断依据\n- 供应商的 base_url 指向 http://127.0.0.1:{{p0}} 或 http://127.0.0.1:{{p0}}/v1，即视为本次接入的本地代理\n- 如果找不到这样的供应商，直接回复「未找到」，不要删除任何内容",
       "requirements": "## 移除要求\n- 删除时保留该工具原有的其他所有供应商与配置\n- 说明删除的位置（界面字段 / 配置文件），以及如何验证（例如重新打开模型选择器确认该供应商已消失）"
     }
@@ -365,7 +365,7 @@
     "authorTitle": "作者",
     "originalAuthor": "原始作者",
     "forkMaintainer": "Fork 维护",
-    "attribution": "68proxy 由 <b>6ix8ight</b> 开发，本 fork 由 <b>zhz8888</b> 维护与增强："
+    "attribution": "68Proxy 由 <b>6ix8ight</b> 开发，本 fork 由 <b>zhz8888</b> 维护与增强："
   },
   "config": {
     "loadFailed": "配置加载失败，自动保存已停用以免覆盖后端配置：{{p0}}",
@@ -407,7 +407,7 @@
     "programTitle": "程序",
     "programDesc": "程序启动与窗口行为",
     "autoStartProxy": "启动程序时自动运行代理",
-    "autostart": "开机自动启动 68proxy",
+    "autostart": "开机自动启动 68Proxy",
     "closeToTray": "关闭窗口时隐藏到托盘",
     "showWindowOnStart": "启动时显示窗口",
     "statsTitle": "Token 统计",
@@ -516,7 +516,7 @@
     "bridge_unreachable": "无法连接后端调试桥接（{{p0}}）。请确认已运行 pnpm tauri dev 或 cargo run。",
     "command_failed": "命令调用失败",
     "event_stream_unavailable": "事件流不可用",
-    "dialog_desktop_only": "保存文件对话框仅在桌面应用内可用，请在 68proxy 窗口中使用该功能"
+    "dialog_desktop_only": "保存文件对话框仅在桌面应用内可用，请在 68Proxy 窗口中使用该功能"
   },
   "messages": {
     "port_freed": "已结束占用进程（PID {{p0}}）",

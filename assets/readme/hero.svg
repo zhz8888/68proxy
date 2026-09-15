@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg"
      width="1200" height="200" viewBox="0 0 1200 200"
      role="img" aria-labelledby="hero-title hero-desc">
-  <title id="hero-title">68PROXY — Command Code 协议转换网关</title>
-  <desc id="hero-desc">68PROXY turns the private Command Code API into OpenAI &amp; Anthropic compatible endpoints.</desc>
+  <title id="hero-title">68Proxy — Command Code 协议转换网关</title>
+  <desc id="hero-desc">68Proxy turns the private Command Code API into OpenAI &amp; Anthropic compatible endpoints.</desc>
   <defs>
     <linearGradient id="hero-ic-bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#171717"/>
@@ -49,7 +49,7 @@
   </g>
 
   <!-- 标题与副标题 -->
-  <text class="title" x="164" y="84" font-family="Bahnschrift,'Segoe UI',Arial,sans-serif" font-size="46" font-weight="700" letter-spacing="1">68PROXY</text>
+  <text class="title" x="164" y="84" font-family="Bahnschrift,'Segoe UI',Arial,sans-serif" font-size="46" font-weight="700" letter-spacing="1">68Proxy</text>
   <text class="sub" x="166" y="110" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif" font-size="17" letter-spacing="0.5">Command Code 本地反向代理 · 协议转换网关</text>
   <text class="sub2" x="166" y="132" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif" font-size="13.5">Turn the private Command Code API into OpenAI &amp; Anthropic compatible endpoints</text>
 

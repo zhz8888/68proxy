@@ -81,7 +81,7 @@ fn success_page_html() -> &'static str {
   h1{font-size:18px;margin:12px 0 8px}
   p{color:#9aa3af;font-size:13px;margin:0}
 </style></head>
-<body><div class="card"><div class="tick">✅</div><h1>授权成功</h1><p>你可以关闭此窗口并返回 68proxy。</p></div>
+<body><div class="card"><div class="tick">✅</div><h1>授权成功</h1><p>你可以关闭此窗口并返回 68Proxy。</p></div>
 <script>setTimeout(() => { try { window.close(); } catch (e) {} }, 1200);</script>
 </body></html>"#
 }
@@ -98,7 +98,7 @@ fn denied_page_html() -> &'static str {
   h1{font-size:18px;margin:12px 0 8px}
   p{color:#9aa3af;font-size:13px;margin:0}
 </style></head>
-<body><div class="card"><div class="x">⚠️</div><h1>授权被拒绝</h1><p>你可以在 68proxy 中重试登录。</p></div>
+<body><div class="card"><div class="x">⚠️</div><h1>授权被拒绝</h1><p>你可以在 68Proxy 中重试登录。</p></div>
 <script>setTimeout(() => { try { window.close(); } catch (e) {} }, 1200);</script>
 </body></html>"#
 }
@@ -135,7 +135,7 @@ fn no_session_page_html() -> &'static str {
   h1{font-size:18px;margin:12px 0 8px}
   p{color:#9aa3af;font-size:13px;margin:0}
 </style></head>
-<body><div class="card"><div class="x">ℹ️</div><h1>没有进行中的授权</h1><p>本次登录已取消或已结束，请在 68proxy 中重新发起登录。</p></div>
+<body><div class="card"><div class="x">ℹ️</div><h1>没有进行中的授权</h1><p>本次登录已取消或已结束，请在 68Proxy 中重新发起登录。</p></div>
 <script>setTimeout(() => { try { window.close(); } catch (e) {} }, 1200);</script>
 </body></html>"#
 }

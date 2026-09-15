@@ -1,7 +1,7 @@
 [package]
 name = "proxy68"
 version = "1.0.0"
-description = "68proxy - Command Code reverse proxy desktop app"
+description = "68Proxy - Command Code reverse proxy desktop app"
 authors = ["you"]
 edition = "2021"
 

@@ -325,7 +325,7 @@ export function ConfigView() {
   /** 弹出保存对话框，把最近日志导出到用户选择的文件。 */
   async function exportLogs() {
     try {
-      const path = await pickSavePath("68proxy-logs.log", ["log", "txt"]);
+      const path = await pickSavePath("68Proxy-logs.log", ["log", "txt"]);
       if (!path) return;
       const count = await api.logsExport(path);
       toast.success(t("config.exported", { p0: count }));

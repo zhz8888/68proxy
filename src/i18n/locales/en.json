@@ -236,7 +236,7 @@
   },
   "tools": {
     "title": "Tool Integration",
-    "description": "Connect 68proxy's local proxy to Cursor / OpenCode / Cherry Studio / your own tools: fill in the tool name and models, copy the prompt below and send it to your AI, and let it complete the integration for you; if the protocol is unsupported it will reply \"not supported\".",
+    "description": "Connect 68Proxy's local proxy to Cursor / OpenCode / Cherry Studio / your own tools: fill in the tool name and models, copy the prompt below and send it to your AI, and let it complete the integration for you; if the protocol is unsupported it will reply \"not supported\".",
     "targetTool": "Target tool",
     "toolPlaceholder": "e.g. Cursor, OpenCode, Cherry Studio (leave blank to use \"target tool\")",
     "models": "Models",
@@ -272,12 +272,12 @@
       "reqUpstream": "Call GET http://127.0.0.1:{{p0}}/v1/models to fetch the full model list and configure all of them into \"{{p1}}\"; if \"{{p1}}\" supports pulling the model list from base_url automatically, just fill in base_url",
       "reqCustom": "Configure only the models I specify: {{p0}}, and do not add any models outside that list",
       "protocols": "## Supported protocols (be sure to check which one the tool supports; prefer OpenAI)\n1) OpenAI-compatible protocol (preferred):\n   - POST /v1/chat/completions, supports both streaming SSE and non-streaming JSON\n   - Supports system/user/assistant/tool message roles, tool calls tools / tool_choice, multimodal image input (image_url), reasoning_effort, max_tokens, temperature\n   - Streaming responses use standard SSE: data: {\"choices\":[{\"delta\":{\"content\":...}}]}, ending with data: [DONE]\n2) Anthropic Messages protocol (alternative):\n   - POST /v1/messages, supports both streaming SSE and non-streaming JSON\n   - Supports a top-level system field, content array (text / tool_use / tool_result), thinking.budget_tokens mapping, max_tokens\n3) Model list: GET /v1/models, returns the model array in OpenAI format\n4) Health check: GET /health",
-      "requirements": "## Integration requirements\n- {{p0}}\n- **Do NOT send a test message to each model in the model list to check availability**; if you need to send a test message to verify, only the model \"deepseek/deepseek-v4-flash\" is allowed, and do not send any requests to other models\n- If the health check or verification request fails, **you MUST first ask the user two things: (1) whether a valid API Key has been filled in in 68proxy; (2) whether the relay proxy service has been started**; before the user gives a clear answer, do not judge the cause on your own or skip troubleshooting\n- When configuring the proxy for \"{{p1}}\", you MUST **create a new, separate custom provider entry** (e.g. named 68proxy) pointing to this proxy's base_url; **it is absolutely forbidden to modify, overwrite, or replace any other existing provider, model, or base_url configuration of the tool**\n- If \"{{p1}}\" supports custom providers and the OpenAI-compatible protocol: add a provider, set base_url to http://127.0.0.1:{{p2}}/v1, and write the full result returned by /v1/models into the provider's models list\n- If \"{{p1}}\" supports only the Anthropic protocol: add a provider, set base_url to http://127.0.0.1:{{p2}}, and use the list returned by /v1/models as the models\n- If it supports neither: just reply \"not supported\"\n- For OpenCode specifically: **add** a new entry under the provider field in opencode.json (e.g. \"68proxy\", using the npm package @ai-sdk/openai-compatible, options.baseURL pointing to the address above, apiKey as a placeholder), and write the model ids returned by /v1/models into models; do not touch any existing entries\n- Provide the exact configuration location (UI field / config file / environment variable) and how to verify it (e.g. call GET /v1/models or send a test message)\n- After configuration, explain how to switch back to the original service so it can be restored at any time"
+      "requirements": "## Integration requirements\n- {{p0}}\n- **Do NOT send a test message to each model in the model list to check availability**; if you need to send a test message to verify, only the model \"deepseek/deepseek-v4-flash\" is allowed, and do not send any requests to other models\n- If the health check or verification request fails, **you MUST first ask the user two things: (1) whether a valid API Key has been filled in in 68Proxy; (2) whether the relay proxy service has been started**; before the user gives a clear answer, do not judge the cause on your own or skip troubleshooting\n- When configuring the proxy for \"{{p1}}\", you MUST **create a new, separate custom provider entry** (e.g. named 68Proxy) pointing to this proxy's base_url; **it is absolutely forbidden to modify, overwrite, or replace any other existing provider, model, or base_url configuration of the tool**\n- If \"{{p1}}\" supports custom providers and the OpenAI-compatible protocol: add a provider, set base_url to http://127.0.0.1:{{p2}}/v1, and write the full result returned by /v1/models into the provider's models list\n- If \"{{p1}}\" supports only the Anthropic protocol: add a provider, set base_url to http://127.0.0.1:{{p2}}, and use the list returned by /v1/models as the models\n- If it supports neither: just reply \"not supported\"\n- For OpenCode specifically: **add** a new entry under the provider field in opencode.json (e.g. \"68Proxy\", using the npm package @ai-sdk/openai-compatible, options.baseURL pointing to the address above, apiKey as a placeholder), and write the model ids returned by /v1/models into models; do not touch any existing entries\n- Provide the exact configuration location (UI field / config file / environment variable) and how to verify it (e.g. call GET /v1/models or send a test message)\n- After configuration, explain how to switch back to the original service so it can be restored at any time"
     },
     "removePrompt": {
       "title": "# Task: remove the local proxy provider integrated into \"{{p0}}\"",
-      "intro": "Please help me delete the 68proxy local proxy provider/service that was previously integrated into \"{{p0}}\".",
-      "targets": "## Removal targets\n- The provider entry (e.g. the one named 68proxy under provider in opencode.json, or a provider in Cursor / other tools whose base_url points to this proxy)\n- All models under that provider (all model ids written from /v1/models at the time)\n- **Do NOT modify any other provider, model, or configuration in \"{{p0}}\"**",
+      "intro": "Please help me delete the 68Proxy local proxy provider/service that was previously integrated into \"{{p0}}\".",
+      "targets": "## Removal targets\n- The provider entry (e.g. the one named 68Proxy under provider in opencode.json, or a provider in Cursor / other tools whose base_url points to this proxy)\n- All models under that provider (all model ids written from /v1/models at the time)\n- **Do NOT modify any other provider, model, or configuration in \"{{p0}}\"**",
       "criteria": "## How to identify it\n- A provider whose base_url points to http://127.0.0.1:{{p0}} or http://127.0.0.1:{{p0}}/v1 is considered the local proxy from this integration\n- If no such provider is found, just reply \"not found\" and do not delete anything",
       "requirements": "## Removal requirements\n- Preserve all other existing providers and configuration of the tool when deleting\n- Explain where the deletion happened (UI field / config file) and how to verify it (e.g. reopen the model selector and confirm the provider is gone)"
     }
@@ -365,7 +365,7 @@
     "authorTitle": "Author",
     "originalAuthor": "Original author",
     "forkMaintainer": "Fork maintainer",
-    "attribution": "68proxy is developed by <b>6ix8ight</b>; this fork is maintained and enhanced by <b>zhz8888</b>:"
+    "attribution": "68Proxy is developed by <b>6ix8ight</b>; this fork is maintained and enhanced by <b>zhz8888</b>:"
   },
   "config": {
     "loadFailed": "Failed to load settings; auto-save is disabled to avoid overwriting the backend settings: {{p0}}",
@@ -407,7 +407,7 @@
     "programTitle": "Application",
     "programDesc": "Startup and window behavior",
     "autoStartProxy": "Start proxy automatically with the app",
-    "autostart": "Launch 68proxy at login",
+    "autostart": "Launch 68Proxy at login",
     "closeToTray": "Hide to tray on window close",
     "showWindowOnStart": "Show window on startup",
     "statsTitle": "Token Stats",
@@ -516,7 +516,7 @@
     "bridge_unreachable": "Cannot reach the backend debug bridge ({{p0}}). Make sure pnpm tauri dev or cargo run is running.",
     "command_failed": "Command failed",
     "event_stream_unavailable": "Event stream unavailable",
-    "dialog_desktop_only": "The save-file dialog is only available in the desktop app; use this feature in the 68proxy window"
+    "dialog_desktop_only": "The save-file dialog is only available in the desktop app; use this feature in the 68Proxy window"
   },
   "messages": {
     "port_freed": "Killed the process occupying the port (PID {{p0}})",

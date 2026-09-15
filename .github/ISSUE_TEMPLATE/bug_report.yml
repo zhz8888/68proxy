@@ -1,5 +1,5 @@
 name: 问题反馈 Bug Report
-description: 报告 68proxy 使用中遇到的问题 (Report a bug)
+description: 报告 68Proxy 使用中遇到的问题 (Report a bug)
 title: "[Bug] "
 labels: [bug]
 body:
@@ -55,7 +55,7 @@ body:
     attributes:
       label: 复现步骤 Steps to reproduce
       placeholder: |
-        1. 打开 68proxy
+        1. 打开 68Proxy
         2. 点击...
         3. 出现...
     validations:

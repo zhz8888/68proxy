@@ -177,7 +177,7 @@ pub async fn serve(
 ) -> io::Result<()> {
     let addr = listener.local_addr().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap());
     state.mark_started();
-    log::info(&format!("68proxy listening on http://{}", addr));
+    log::info(&format!("68Proxy listening on http://{}", addr));
     // 启动状态打印：会话策略、配置开关、空闲超时、在途上限与请求体内存告警。
     {
         let cfg = state.config.read().unwrap().clone();

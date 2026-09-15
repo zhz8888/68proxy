@@ -142,7 +142,7 @@ function App() {
             className="flex h-11 shrink-0 select-none items-center gap-2 border-b border-border px-4"
           >
             <span className="font-display text-sm font-semibold tracking-[0.22em] text-primary">
-              68PROXY
+              68Proxy
             </span>
           </div>
           {/* min-h-0 + overflow-y-auto：窗口高度不足时让导航自身滚动，
