@@ -420,10 +420,29 @@ pub async fn fetch_account_quota(
     let period_start = sub_data.and_then(|d| d.get("currentPeriodStart")).and_then(|x| x.as_u64());
     let period_end = sub_data.and_then(|d| d.get("currentPeriodEnd")).and_then(|x| x.as_u64());
 
-    // 额度对象（兼容顶层 credits 与 data.credits 两种包法）
-    let credits_obj = credits
-        .as_ref()
-        .and_then(|v| v.get("credits").or_else(|| v.pointer("/data/credits")));
+    // 额度响应：完整 body（兼容顶层 `{credits, windowLimits}` 与 `data` 包裹两种包法）
+    let credits_body = credits.as_ref().and_then(|v| {
+        if v.get("success").and_then(|s| s.as_bool()) == Some(false) {
+            None
+        } else {
+            Some(v.get("data").unwrap_or(v))
+        }
+    });
+    // 额度对象：`credits` 顶层字段（或 data.credits）
+    let credits_obj = credits_body.and_then(|v| v.get("credits"));
+    // 窗口限额与 credits 平级（CLI 读 e.credits?.windowLimits），兼容旧式内层写法
+    let window_limits = credits_body
+        .and_then(|v| v.get("windowLimits"))
+        .or_else(|| credits_obj.and_then(|c| c.get("windowLimits")));
+
+    // 订阅异常（如 Go 账户无 subscription 记录）时，planId 可从 credits 兜底
+    // （CLI 的 credits.planId 用于遥测身份，同一字段可作展示兜底）
+    let plan_id = plan_id.or_else(|| {
+        credits_obj
+            .and_then(|c| c.get("planId"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+    });
 
     // ③ 用量汇总：since 取订阅周期起点（与 CLI 一致）
     let since_q = period_start
@@ -463,7 +482,8 @@ pub async fn fetch_account_quota(
         .filter(|_| status.as_deref() == Some("active"))
         .unwrap_or(monthly);
     let total_pool = base_monthly.max(monthly) + purchased + free;
-    let has_billing = credits.is_some() || subs.is_some();
+    // 有计费数据：任一账单接口返回过有效响应（CLI 同款口径 Boolean(credits || subscription)）
+    let has_billing = credits_body.is_some() || subs.is_some();
     let usage_percent = if total_pool > 0.0 {
         ((total_pool - total_remaining).max(0.0) / total_pool * 100.0).min(100.0)
     } else if spent > 0.0 {
@@ -478,8 +498,8 @@ pub async fn fetch_account_quota(
         (((end_ms - now) / 86_400_000.0).ceil()).max(0.0) as i64
     });
 
-    // 窗口限额：credits.windowLimits.{fiveHour,weekly}
-    let (five_hour, weekly) = match credits_obj.and_then(|c| c.get("windowLimits")) {
+    // 窗口限额：windowLimits.{fiveHour,weekly}（与 credits 平级，兼容内层）
+    let (five_hour, weekly) = match window_limits {
         Some(w) if w.get("limited").and_then(|x| x.as_bool()).unwrap_or(true) => (
             w.get("fiveHour").and_then(LimitWindow::from_json),
             w.get("weekly").and_then(LimitWindow::from_json),

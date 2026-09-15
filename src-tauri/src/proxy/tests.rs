@@ -1678,7 +1678,10 @@ async fn spawn_billing_mock(counter: Arc<std::sync::atomic::AtomicUsize>) -> Str
     let credits = Json(json!({
         "credits": {
             "monthlyCredits": 30, "purchasedCredits": 5, "freeCredits": 2,
-            "windowLimits": { "limited": true, "fiveHour": { "used": 10, "cap": 50 }, "weekly": { "used": 100, "cap": 500 } }
+            "planId": "individual-pro",
+        },
+        "windowLimits": {
+            "limited": true, "fiveHour": { "used": 10, "cap": 50 }, "weekly": { "used": 100, "cap": 500 }
         }
     }));
     let summary = Json(json!({ "totalCost": 3.5 }));
@@ -1726,6 +1729,95 @@ async fn quota_fetch_full_flow() {
     assert_eq!(q.org_limits[0].pct, 80.0, "0-1 比例应换算为百分比");
     let days = q.days_left.unwrap();
     assert!((24..=26).contains(&days), "周期剩余天数应约 25: {days}");
+}
+
+/// Go 订阅账户额度解析：订阅正常返回 active + planId，窗口限额在 credits 平级。
+#[tokio::test]
+async fn quota_fetch_go_subscription() {
+    use axum::Json;
+    let whoami = Json(json!({
+        "success": true,
+        "org": { "id": "org_go" },
+        "user": { "id": "user_go", "userName": "GoUser" },
+        "orgLimits": []
+    }));
+    let subs = Json(json!({
+        "success": true,
+        "data": {
+            "status": "active",
+            "planId": "individual-go",
+            "currentPeriodStart": super::state::now_millis() - 86_400_000u64,
+            "currentPeriodEnd": super::state::now_millis() + 29 * 86_400_000u64,
+        }
+    }));
+    // windowLimits 与 credits 平级（真实结构，CLI 读 e.credits?.windowLimits）
+    let credits = Json(json!({
+        "credits": { "monthlyCredits": 0, "purchasedCredits": 4.5, "freeCredits": 0, "planId": "individual-go" },
+        "windowLimits": { "limited": true, "fiveHour": { "used": 3, "cap": 50 }, "weekly": { "used": 20, "cap": 200 } }
+    }));
+    let summary = Json(json!({ "totalCost": 1.25 }));
+    let router = Router::new()
+        .route("/alpha/whoami", axum::routing::get(move || { let v = whoami.0.clone(); async move { Json(v) } }))
+        .route("/alpha/billing/subscriptions", axum::routing::get(move || { let v = subs.0.clone(); async move { Json(v) } }))
+        .route("/alpha/billing/credits", axum::routing::get(move || { let v = credits.0.clone(); async move { Json(v) } }))
+        .route("/alpha/usage/summary", axum::routing::get(move || { let v = summary.0.clone(); async move { Json(v) } }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+
+    let state = plain_state(&format!("http://{addr}"));
+    let q = super::quota::fetch_account_quota(&state, "GoUser", "user_…go", "user_k").await;
+    assert_eq!(q.error, None);
+    assert_eq!(q.plan_id.as_deref(), Some("individual-go"));
+    assert_eq!(q.plan_name, "Go");
+    assert_eq!(q.status.as_deref(), Some("active"));
+    assert!(q.has_billing);
+    assert_eq!(q.monthly_remaining, 0.0);
+    assert_eq!(q.purchased_remaining, 4.5);
+    assert_eq!(q.total_remaining, 4.5);
+    // 总池 = max(套餐月额度 10, 上报 0) + 4.5
+    assert_eq!(q.total_pool, 14.5);
+    // 窗口限额来自 credits 平级 windowLimits
+    let five = q.five_hour.unwrap();
+    assert_eq!((five.used, five.cap), (3.0, 50.0));
+    let weekly = q.weekly.unwrap();
+    assert_eq!((weekly.used, weekly.cap), (20.0, 200.0));
+}
+
+/// 订阅接口异常但 credits 带 planId 时：plan 从 credits 兜底，窗口限额仍可解析。
+#[tokio::test]
+async fn quota_fetch_plan_fallback_from_credits() {
+    use axum::Json;
+    let whoami = Json(json!({
+        "success": true,
+        "org": { "id": "org_f" },
+        "user": { "id": "user_f", "userName": "Fallback" }
+    }));
+    // subscriptions 返回 success=false（模拟 Go 等账户无订阅记录/接口异常）
+    let subs = Json(json!({ "success": false, "data": null }));
+    let credits = Json(json!({
+        "credits": { "monthlyCredits": 0, "purchasedCredits": 2, "freeCredits": 0, "planId": "individual-go" },
+        "windowLimits": { "limited": true, "fiveHour": { "used": 1, "cap": 50 } }
+    }));
+    let summary = Json(json!({ "totalCost": 0.5 }));
+    let router = Router::new()
+        .route("/alpha/whoami", axum::routing::get(move || { let v = whoami.0.clone(); async move { Json(v) } }))
+        .route("/alpha/billing/subscriptions", axum::routing::get(move || { let v = subs.0.clone(); async move { Json(v) } }))
+        .route("/alpha/billing/credits", axum::routing::get(move || { let v = credits.0.clone(); async move { Json(v) } }))
+        .route("/alpha/usage/summary", axum::routing::get(move || { let v = summary.0.clone(); async move { Json(v) } }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
+
+    let state = plain_state(&format!("http://{addr}"));
+    let q = super::quota::fetch_account_quota(&state, "Fallback", "user_…f", "user_k").await;
+    assert_eq!(q.error, None);
+    // plan 从 credits.planId 兜底
+    assert_eq!(q.plan_id.as_deref(), Some("individual-go"));
+    assert_eq!(q.plan_name, "Go");
+    assert!(q.has_billing);
+    assert_eq!(q.total_remaining, 2.0);
+    assert!(q.five_hour.is_some(), "windowLimits 平级时 5h 窗口应可解析");
 }
 
 /// whoami 不可达时额度快照降级为失败占位（不 panic、error 码正确）。
