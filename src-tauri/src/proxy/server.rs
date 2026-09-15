@@ -104,9 +104,61 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/", get(health))
         .fallback(not_found)
+        // 本地代理只服务本机客户端：先做来源校验（拒绝跨源 / DNS rebinding），
+        // 再挂在途计数。不挂 CORS 层——放开跨域会让任意网页驱动本服务。
+        .layer(axum::middleware::from_fn_with_state(state.clone(), origin_guard))
         .layer(axum::middleware::from_fn_with_state(state.clone(), inflight_guard))
-        .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
+}
+
+/// 来源校验中间件：拒绝跨源调用与非本机 Host（防 DNS rebinding）。
+///
+/// 本代理持有用户的上游账户凭据，若允许任意网页跨域访问（或伪造 Host 指向
+/// 127.0.0.1），同源策略这道墙就被移除，页面可无凭据地打 /v1/models 并施压资源。
+/// 直接访问本地地址的客户端（SDK/curl）不带 Origin，放行；只校验存在时的取值。
+/// 用户显式把监听地址设为 0.0.0.0 时放行任意 Host（LAN 访问是显式选择的功能）。
+async fn origin_guard(
+    State(st): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let lan_exposed = st.config.read().unwrap().host.trim() == "0.0.0.0";
+    let host_ok = lan_exposed
+        || req
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(|h| {
+                // 去掉端口后比对；IPv6 形如 [::1]:3050
+                let host = h.rsplit_once(':').map(|(a, _)| a).filter(|a| !a.is_empty()).unwrap_or(h);
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                matches!(host, "127.0.0.1" | "localhost" | "::1")
+            })
+            // 无 Host（HTTP/1.0 或本地进程探测）视为可接受
+            .unwrap_or(true);
+    let origin = req.headers().get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok());
+    // Origin 只允许本机来源：远程网页携带的 Origin 一律拒绝（同源策略的墙不能被移除）。
+    // 本机页面（如直连 127.0.0.1 的本地调试 UI）不属于外部攻击面，放行。
+    let origin_ok = origin
+        .map(|o| {
+            ["http://127.0.0.1", "http://localhost", "http://[::1]"]
+                .iter()
+                .any(|p| o == *p || o.starts_with(&format!("{p}:")))
+        })
+        .unwrap_or(true);
+    if !host_ok || !origin_ok {
+        return json_response(
+            403,
+            json!({
+                "error": {
+                    "message": "Forbidden: local proxy only accepts requests from this machine's own clients",
+                    "type": "permission_error",
+                },
+            }),
+            None,
+        );
+    }
+    next.run(req).await
 }
 
 /// 在途请求计数守卫：绑定到响应 body 的生命周期，body 结束时计数减 1。
@@ -546,10 +598,24 @@ async fn send_frame(tx: &mpsc::Sender<Frame>, frame: Frame, drain_timeout: Durat
     }
 }
 
+/// 读取请求体的整体时限：超过则按 408 处理。防止慢速滴字节的客户端
+/// （slowloris）在鉴权前长期占用连接与在途名额。
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// 流式读取请求体为 JSON。超过 `max_size` 时返回 413——剩余请求体交由
 /// hyper 自动排空（丢弃未读数据），使连接保持 keep-alive 可复用，
-/// 客户端收到明确的 413 而非 Connection reset。
+/// 客户端收到明确的 413 而非 Connection reset。整体读取时限见 `BODY_READ_TIMEOUT`。
 async fn read_json_body(
+    body: axum::body::Body,
+    max_size: usize,
+) -> Result<Value, (u16, &'static str, &'static str)> {
+    match tokio::time::timeout(BODY_READ_TIMEOUT, read_json_body_inner(body, max_size)).await {
+        Ok(r) => r,
+        Err(_) => Err((408, "invalid_request_error", "Request body read timeout")),
+    }
+}
+
+async fn read_json_body_inner(
     body: axum::body::Body,
     max_size: usize,
 ) -> Result<Value, (u16, &'static str, &'static str)> {
@@ -587,24 +653,11 @@ fn route_session_key(headers: &HeaderMap, prompt_cache_key: Option<&str>) -> Opt
     prompt_cache_key.filter(|k| k.len() >= 8).map(|k| k.to_string())
 }
 
-/// 鉴权并选出本次转发的 Command Code 账户 key。
+/// 校验本地转发 Key（不含账户路由）：在读取请求体**之前**调用，避免未认证客户端
+/// 用大 body / 慢速上传消耗资源（请求体在鉴权前被完整读入是资源耗尽面）。
 ///
-/// 流程：
-/// 1. 从请求头提取本地转发 Key（sk- 开头），必须与本地已生成的 key 一致，否则 401；
-///    未配置本地 key 时同样 401（提示先生成）。
-/// 2. 鉴权通过后按配置的账户策略选取账户（`round_robin` 轮询 / `priority` 优先消耗
-///    指定账户 + 会话粘滞，见 `credentials::route_account`），返回 `(api_key, user_id)`
-///    供上游转发（api_key 用于 Bearer/伪造头，user_id 用于会话/指纹/初始化键控）。
-///    未配置任何账户时 401（提示先添加账户）。
-///
-/// `session_key` 为下游会话标识，供 `priority` 策略维持账户粘滞。
-/// 失败返回 `(状态码, 具体原因)`，由各协议入口包装成对应的错误体，避免丢失失败细节。
-async fn api_key_or_401(
-    st: &AppState,
-    headers: &HeaderMap,
-    session_key: Option<&str>,
-) -> Result<(String, String), (u16, &'static str)> {
-    // 本地 key 必须已生成，且请求头携带的必须与本地一致（sk- 开头，防止任意 sk- 直过）
+/// 失败返回 `(状态码, 具体原因)`，由各协议入口包装成对应错误体。
+fn check_local_key(headers: &HeaderMap) -> Result<(), (u16, &'static str)> {
     let local = crate::credentials::cached_local_key();
     let Some(expected) = local else {
         // 对外 HTTP 报文（下游 LLM 客户端读取，非界面文案）：按 API 惯例用英文
@@ -619,6 +672,26 @@ async fn api_key_or_401(
     if sent != expected {
         return Err((401, "Invalid API key"));
     }
+    Ok(())
+}
+
+/// 鉴权并选出本次转发的 Command Code 账户 key。
+///
+/// 流程：
+/// 1. 校验本地转发 Key（见 `check_local_key`）；
+/// 2. 鉴权通过后按配置的账户策略选取账户（`round_robin` 轮询 / `priority` 优先消耗
+///    指定账户 + 会话粘滞，见 `credentials::route_account`），返回 `(api_key, user_id)`
+///    供上游转发（api_key 用于 Bearer/伪造头，user_id 用于会话/指纹/初始化键控）。
+///    未配置任何账户时 401（提示先添加账户）。
+///
+/// `session_key` 为下游会话标识，供 `priority` 策略维持账户粘滞。
+/// 失败返回 `(状态码, 具体原因)`，由各协议入口包装成对应的错误体，避免丢失失败细节。
+async fn api_key_or_401(
+    st: &AppState,
+    headers: &HeaderMap,
+    session_key: Option<&str>,
+) -> Result<(String, String), (u16, &'static str)> {
+    check_local_key(headers)?;
 
     // 鉴权通过：按账户策略选取本次转发的 Command Code 账户
     match crate::credentials::route_account(st, session_key) {
@@ -639,6 +712,14 @@ async fn chat_completions(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> axum::response::Response {
+    // 鉴权前置：未通过则不读请求体，避免未认证客户端用大 body/慢速上传消耗资源
+    if let Err((status, msg)) = check_local_key(&headers) {
+        return json_response(
+            status,
+            json!({ "error": { "message": msg, "type": "authentication_error" } }),
+            None,
+        );
+    }
     let max_body = (st.config.read().unwrap().max_body_mb as usize) * 1024 * 1024;
     let req = match read_json_body(body, max_body).await {
         Ok(v) => v,
@@ -749,6 +830,14 @@ async fn messages(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> axum::response::Response {
+    // 鉴权前置：未通过则不读请求体（见 chat_completions 同处注释）
+    if let Err((status, msg)) = check_local_key(&headers) {
+        return json_response(
+            status,
+            errors::anthropic_error(status, "authentication_error", msg, None).1,
+            None,
+        );
+    }
     let max_body = (st.config.read().unwrap().max_body_mb as usize) * 1024 * 1024;
     let req = match read_json_body(body, max_body).await {
         Ok(v) => v,
@@ -863,6 +952,14 @@ async fn responses(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> axum::response::Response {
+    // 鉴权前置：未通过则不读请求体（见 chat_completions 同处注释）
+    if let Err((status, msg)) = check_local_key(&headers) {
+        return json_response(
+            status,
+            json!({ "error": { "message": msg, "type": "authentication_error" } }),
+            None,
+        );
+    }
     let max_body = (st.config.read().unwrap().max_body_mb as usize) * 1024 * 1024;
     let req = match read_json_body(body, max_body).await {
         Ok(v) => v,
@@ -1767,7 +1864,14 @@ async fn models(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let _ = headers;
+    // 与其他业务路由一致要求本地 key：否则同网段主机可无凭据枚举模型目录
+    if let Err((status, msg)) = check_local_key(&headers) {
+        return json_response(
+            status,
+            json!({ "error": { "message": msg, "type": "authentication_error" } }),
+            None,
+        );
+    }
     let (list, _) = cc_client::fetch_models(&st).await;
     Json(json!({
         "object": "list",
@@ -1798,11 +1902,13 @@ async fn not_found() -> axum::response::Response {
     )
 }
 
-/// 由配置计算监听地址，host 非法时回退 0.0.0.0。
+/// 由配置计算监听地址，host 非法时回退 127.0.0.1。
+///
+/// 回退到回环而非 0.0.0.0：非法地址不应把带凭据的转发口意外暴露到所有网卡。
 pub fn listen_addr(cfg: &Config) -> SocketAddr {
     let host: std::net::IpAddr = cfg
         .host
         .parse()
-        .unwrap_or_else(|_| "0.0.0.0".parse().unwrap());
+        .unwrap_or_else(|_| "127.0.0.1".parse().unwrap());
     SocketAddr::new(host, config_port(cfg))
 }

@@ -228,8 +228,8 @@ mod tests {
             }]
         );
         assert_eq!(got.local_api_key, "sk_local_key");
-        // 未显式写入的字段走默认值
-        assert_eq!(got.max_inflight, 0);
+        // 未显式写入的字段走默认值（max_inflight 默认 32；0 表示不限流，不再作默认）
+        assert_eq!(got.max_inflight, 32);
         assert!(got.usage_enabled);
     }
 

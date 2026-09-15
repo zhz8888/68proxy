@@ -587,8 +587,27 @@ fn logs_clear() {
 }
 
 /// 将最近 1000 条日志按「[时间] [级别] 消息」格式导出写入指定文件，返回导出条数。
+///
+/// `path` 来自前端经系统保存对话框的选择（覆盖是用户已确认的语义），但 IPC 参数
+/// 本身不可信：这里仍限制扩展名并拒绝符号链接，避免被控前端借本命令把日志内容
+/// 写到 shell 配置、开机自启项等任何可写文件上。
 #[tauri::command]
 fn logs_export(path: String) -> Result<usize, String> {
+    let p = std::path::Path::new(&path);
+    let ext_ok = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "log" | "txt"))
+        .unwrap_or(false);
+    if !ext_ok {
+        return Err(i18n::err("export_invalid_path"));
+    }
+    // 拒绝符号链接：否则可借一个 .log 软链把内容写到其指向的任意文件
+    if let Ok(meta) = std::fs::symlink_metadata(p) {
+        if meta.file_type().is_symlink() {
+            return Err(i18n::err("export_invalid_path"));
+        }
+    }
     let entries = proxy::log::get_logs(1000, 0);
     let total = entries.len();
     let mut out = String::new();
@@ -598,8 +617,7 @@ fn logs_export(path: String) -> Result<usize, String> {
             .unwrap_or_default();
         out.push_str(&format!("[{ts}] [{level}] {msg}\n", level = e.level, msg = e.msg));
     }
-    std::fs::write(&path, out)
-        .map_err(|e| i18n::err_args("export_failed", &[&e.to_string()]))?;
+    std::fs::write(p, out).map_err(|e| i18n::err_args("export_failed", &[&e.to_string()]))?;
     Ok(total)
 }
 

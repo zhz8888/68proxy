@@ -436,6 +436,7 @@
   },
   "errors": {
     "browser_open_failed": "打开浏览器失败：{{p0}}",
+    "browser_url_invalid": "授权地址非法，已拒绝打开",
     "settings_store_uninitialized": "设置库未初始化",
     "account_key_prefix": "Command Code 账户 Key 必须以 user_ 开头",
     "local_key_invalid": "本地转发 Key 非法：必须以 sk- 开头且不少于 16 个字符",
@@ -478,6 +479,7 @@
     "auth_timeout": "登录超时（5 分钟未完成授权），请重试",
     "serialize_failed": "序列化失败: {{p0}}",
     "export_failed": "日志写入失败: {{p0}}",
+    "export_invalid_path": "导出路径非法：仅支持 .log / .txt 且不得为符号链接",
     "open_usage_db_failed": "打开用量数据库失败: {{p0}}",
     "init_usage_table_failed": "初始化用量表失败: {{p0}}",
     "wal_failed": "设置 WAL 失败: {{p0}}",

@@ -30,6 +30,7 @@ pub struct OpenBrowserOutcome {
 ///
 /// 返回实际浏览器与隐私模式状态；无可用的隐私模式浏览器时回退普通打开并如实上报。
 pub fn open_auth_browser(url: &str, private: bool) -> Result<OpenBrowserOutcome, String> {
+    validate_auth_url(url)?;
     if !private {
         // 非隐私模式：交给系统默认浏览器（沿用 opener 的打开语义）
         open_default(url)?;
@@ -38,12 +39,49 @@ pub fn open_auth_browser(url: &str, private: bool) -> Result<OpenBrowserOutcome,
     open_private(url)
 }
 
-/// 用系统默认浏览器打开（`open` / `cmd /C start` / `xdg-open`）。
+/// 校验待打开的授权 URL：仅允许本应用授权页所在的 https 主机。
+///
+/// `url` 经 IPC 传入，若不加约束，被控前端可借系统启动器打开任意 scheme
+/// （`file:` / `javascript:` / 自定义协议），Windows 上还会把值拼进 `cmd` 命令行。
+pub(crate) fn validate_auth_url(url: &str) -> Result<(), String> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| i18n::err("browser_url_invalid"))?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or_else(|| rest.split(['/', '?', '#']).next().unwrap_or(""));
+    let allowed = [
+        "commandcode.ai",
+        "www.commandcode.ai",
+        "staging.commandcode.ai",
+    ];
+    if !allowed.contains(&host) {
+        return Err(i18n::err("browser_url_invalid"));
+    }
+    // 拒绝控制字符与引号：授权 URL 的查询串本身含 `&`，故不能整体禁用 `&`，
+    // 改为在 Windows 上避免经 cmd 传参（见 open_default），此处只挡明显非法字符。
+    if url.chars().any(|c| c.is_control() || c == '"' || c == '\'' || c == '<' || c == '>') {
+        return Err(i18n::err("browser_url_invalid"));
+    }
+    Ok(())
+}
+
+/// 用系统默认浏览器打开（`open` / ShellExecute / `xdg-open`）。
+///
+/// Windows 不经 `cmd /C start`：cmd.exe 会重新解析参数中的 `&`/`|` 等元字符，
+/// 而授权 URL 的查询串必然含 `&`，存在命令注入面。改用 `rundll32` 走 ShellExecute，
+/// 它把 URL 当普通参数交给系统协议处理，不经过命令行解析器。
 fn open_default(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let result = Command::new("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let result = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    let result = Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let result = Command::new("xdg-open").arg(url).spawn();
     result
@@ -135,5 +173,21 @@ mod tests {
     #[test]
     fn non_existent_app_unavailable() {
         assert!(!app_available("NoSuchBrowser_68proxy"));
+    }
+
+    /// 授权 URL 只接受 Command Code 官方 https 主机，拒绝其它 scheme / 主机 / 非法字符。
+    #[test]
+    fn auth_url_validation() {
+        assert!(validate_auth_url("https://commandcode.ai/studio/auth/cli?state=x&mode=redirect").is_ok());
+        assert!(validate_auth_url("https://staging.commandcode.ai/studio/auth/cli").is_ok());
+        // 非官方域名
+        assert!(validate_auth_url("https://evil.example.com/studio/auth/cli").is_err());
+        // 非 https
+        assert!(validate_auth_url("http://commandcode.ai/studio/auth/cli").is_err());
+        assert!(validate_auth_url("file:///etc/passwd").is_err());
+        assert!(validate_auth_url("javascript:alert(1)").is_err());
+        // 引号 / 控制字符
+        assert!(validate_auth_url("https://commandcode.ai/a\"b").is_err());
+        assert!(validate_auth_url("https://commandcode.ai/a\nb").is_err());
     }
 }

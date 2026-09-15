@@ -41,7 +41,7 @@ import { applyTheme, type ThemeMode } from "@/lib/theme";
 // 配置项默认值，字段与后端 config.json 一一对应
 const DEFAULTS: Config = {
   port: 3050,
-  host: "0.0.0.0",
+  host: "127.0.0.1",
   api_base: "https://api.commandcode.ai",
   project_slug: "cc-proxy",
   log_file: "",
@@ -60,7 +60,7 @@ const DEFAULTS: Config = {
   zdr: false,
   max_body_mb: 10,
   client_drain_timeout_ms: 0,
-  max_inflight: 0,
+  max_inflight: 32,
   theme: "system",
   language: "zh",
   proxy_mode: "none",

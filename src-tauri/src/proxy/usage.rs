@@ -192,13 +192,40 @@ impl Period {
 }
 
 /// 初始化数据库：建表、索引并设置 PRAGMA。失败返回中文错误描述。
+///
+/// 库中存有本地转发 key 与全部 Command Code 账户 key（明文），故文件与所在目录
+/// 一律收紧到仅属主可读写（Unix 0600/0700）。
 pub fn init_usage(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| {
         let e = e.to_string();
         i18n::err_args("open_usage_db_failed", &[&e])
     })?;
     init_usage_on(&conn)?;
+    #[cfg(unix)]
+    restrict_permissions(path);
     Ok(conn)
+}
+
+/// 收紧数据库及其 WAL 附属文件的权限为 0600、所在目录为 0700（Unix）。
+///
+/// 明文凭据落盘，默认 umask 下的 0644 会让同机其他用户可读；WAL 模式下
+/// `-wal`/`-shm` 同样含明文行，需一并处理。失败仅记日志，不阻断启动。
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let file_mode = std::fs::Permissions::from_mode(0o600);
+    let _ = std::fs::set_permissions(path, file_mode.clone());
+    for suffix in ["-wal", "-shm"] {
+        let mut p = path.as_os_str().to_os_string();
+        p.push(suffix);
+        let p = std::path::PathBuf::from(p);
+        if p.exists() {
+            let _ = std::fs::set_permissions(&p, file_mode.clone());
+        }
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
 }
 
 /// 在已有连接上建表与索引（供 init_usage 与内存库测试复用）。

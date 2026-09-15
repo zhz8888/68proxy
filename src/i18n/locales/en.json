@@ -436,6 +436,7 @@
   },
   "errors": {
     "browser_open_failed": "Failed to open the browser: {{p0}}",
+    "browser_url_invalid": "Invalid authorization URL; refusing to open",
     "settings_store_uninitialized": "Settings store is not initialized",
     "account_key_prefix": "The Command Code account key must start with user_",
     "local_key_invalid": "Invalid local forwarding key: must start with sk- and be at least 16 characters",
@@ -478,6 +479,7 @@
     "auth_timeout": "Login timed out (no authorization within 5 minutes); please retry",
     "serialize_failed": "Serialization failed: {{p0}}",
     "export_failed": "Failed to write logs: {{p0}}",
+    "export_invalid_path": "Invalid export path: only .log / .txt files, and no symlinks",
     "open_usage_db_failed": "Failed to open the usage database: {{p0}}",
     "init_usage_table_failed": "Failed to initialize the usage table: {{p0}}",
     "wal_failed": "Failed to enable WAL: {{p0}}",

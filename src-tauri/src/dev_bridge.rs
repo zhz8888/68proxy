@@ -21,7 +21,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use tokio::sync::broadcast;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::i18n;
 
@@ -30,6 +30,16 @@ const EVENT_BUFFER: usize = 1024;
 
 /// 桥接默认监听端口。
 const DEFAULT_PORT: u16 = 1431;
+
+/// 允许跨域访问桥接的来源：仅 Vite 开发服务器。
+///
+/// 桥接暴露了全部 IPC 命令（含读取明文 key、写任意文件），若放行任意来源，
+/// 用户浏览器里的任意网页都能跨域调用它。Vite 默认端口 1420。
+const ALLOWED_ORIGINS: &[&str] = &["http://localhost:1420", "http://127.0.0.1:1420"];
+
+/// 可选访问令牌：设置 `CC_DEV_BRIDGE_TOKEN` 后，请求必须携带
+/// `Authorization: Bearer <token>`（或 `?token=`）才被受理。
+static TOKEN: OnceLock<Option<String>> = OnceLock::new();
 
 /// 进程级事件广播发送端（`start` 时初始化）。
 static EVENTS: OnceLock<broadcast::Sender<(String, Value)>> = OnceLock::new();
@@ -50,19 +60,32 @@ pub fn publish(name: &str, payload: Value) {
 pub fn start(app: tauri::AppHandle) {
     let _ = APP.set(app);
     let _ = EVENTS.set(broadcast::channel(EVENT_BUFFER).0);
+    // 可选令牌：设置后所有 /rpc 与 /events 请求都必须携带
+    let _ = TOKEN.set(std::env::var("CC_DEV_BRIDGE_TOKEN").ok().filter(|t| !t.is_empty()));
 
     let port = std::env::var("CC_DEV_BRIDGE_PORT")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
+    let allowed: Vec<axum::http::HeaderValue> = ALLOWED_ORIGINS
+        .iter()
+        .filter_map(|o| o.parse().ok())
+        .collect();
 
     tauri::async_runtime::spawn(async move {
         let router = Router::new()
             .route("/rpc", post(rpc))
             .route("/events", get(events))
             .route("/health", get(|| async { "ok" }))
-            // 开发用：放行来自任意本地开发源（localhost:1420 等）的跨域请求
-            .layer(CorsLayer::permissive());
+            // 只放行 Vite 开发页面的来源：桥接暴露全部 IPC 命令，放行任意来源
+            // 等于允许用户浏览器里的任意网页跨域读取凭据、写任意文件。
+            .layer(
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::list(allowed))
+                    .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                    .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION]),
+            )
+            .layer(axum::middleware::from_fn(bridge_guard));
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
@@ -84,6 +107,46 @@ pub fn start(app: tauri::AppHandle) {
             )),
         }
     });
+}
+
+/// 桥接访问守卫：校验来源与可选令牌。
+///
+/// - `/health` 恒放行（探活）；
+/// - 带 `Origin` 的请求必须来自 Vite 开发源，否则 403（阻断任意网页跨域调用）；
+/// - 配置了 `CC_DEV_BRIDGE_TOKEN` 时还需携带匹配的 Bearer 令牌。
+async fn bridge_guard(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    if req.uri().path() == "/health" {
+        return next.run(req).await;
+    }
+    if let Some(origin) = req.headers().get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        if !ALLOWED_ORIGINS.contains(&origin) {
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::FORBIDDEN)
+                .body(axum::body::Body::from("forbidden origin"))
+                .expect("valid response");
+        }
+    }
+    if let Some(expected) = TOKEN.get().and_then(|t| t.as_deref()) {
+        let header_ok = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|t| t == expected)
+            .unwrap_or(false);
+        let query_ok = req
+            .uri()
+            .query()
+            .map(|q| q.split('&').any(|kv| kv == format!("token={expected}")))
+            .unwrap_or(false);
+        if !header_ok && !query_ok {
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::UNAUTHORIZED)
+                .body(axum::body::Body::from("missing or invalid bridge token"))
+                .expect("valid response");
+        }
+    }
+    next.run(req).await
 }
 
 /// RPC 请求体。

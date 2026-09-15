@@ -140,6 +140,24 @@ fn no_session_page_html() -> &'static str {
 </body></html>"#
 }
 
+/// 收尾跳转：附 `Referrer-Policy: no-referrer` 与 `Cache-Control: no-store`。
+///
+/// 上游在 `mode=redirect` 下会把 apiKey 放在回调 URL 的查询参数里，浏览器跳转后
+/// 该 URL 可能进入历史记录，并可能经 `Referer` 头泄漏给后续页面或第三方资源；
+/// 收尾响应显式声明不发送 Referer、不缓存。
+fn redirect_complete() -> axum::response::Response {
+    let mut resp = Redirect::to("/callback/complete").into_response();
+    resp.headers_mut().insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    resp
+}
+
 /// 构建授权 URL：`{studio}/studio/auth/cli?callback=...&state=...&mode=redirect`。
 pub fn build_auth_url(studio_base: &str, port: u16, state: &str) -> String {
     let callback = format!("http://127.0.0.1:{port}/callback");
@@ -275,7 +293,7 @@ async fn callback_post_handler(
                         }
                     }
                     drop(session);
-                    return Redirect::to("/callback/complete").into_response();
+                    return redirect_complete();
                 }
             },
             Err(_) => {
@@ -287,7 +305,7 @@ async fn callback_post_handler(
                     }
                 }
                 drop(session);
-                return Redirect::to("/callback/complete").into_response();
+                return redirect_complete();
             }
         },
         // 表单或未声明类型：按 URL 编码表单解析（上游默认行为）
@@ -302,7 +320,7 @@ async fn callback_post_handler(
                     }
                 }
                 drop(session);
-                return Redirect::to("/callback/complete").into_response();
+                return redirect_complete();
             }
         },
     };
@@ -338,7 +356,7 @@ fn process_callback(
             }
         }
         drop(session);
-        return Redirect::to("/callback/complete").into_response();
+        return redirect_complete();
     }
 
     // 错误分支（用户拒绝等），已在上面完成 state 校验
@@ -359,7 +377,7 @@ fn process_callback(
             }
         }
         drop(session);
-        return Redirect::to("/callback/complete").into_response();
+        return redirect_complete();
     }
 
     // 上下游字段命名不确定：camelCase 与 snake_case 都接受
@@ -371,10 +389,10 @@ fn process_callback(
     {
         let mut session = st.auth_login.lock().unwrap();
         let Some(s) = session.as_mut() else {
-            return Redirect::to("/callback/complete").into_response();
+            return redirect_complete();
         };
         if s.state != expected_state {
-            return Redirect::to("/callback/complete").into_response();
+            return redirect_complete();
         }
         if api_key.is_empty() || user_id.is_empty() {
             s.result = Some(LoginResult::Failed(
@@ -388,7 +406,7 @@ fn process_callback(
             });
         }
     }
-    Redirect::to("/callback/complete").into_response()
+    redirect_complete()
 }
 
 /// 授权收尾页：按登录结果渲染成功/拒绝/错误页，页面内自动关窗。

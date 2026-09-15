@@ -156,7 +156,7 @@ pub struct Config {
     pub max_body_mb: u32,
     /// 下游写缓冲背压僵死看门狗（毫秒），0 表示禁用（不主动断开僵死客户端）。
     pub client_drain_timeout_ms: u64,
-    /// 进程内在途请求上限，0 表示不限；超限返回 503 + Retry-After。
+    /// 进程内在途请求上限，0 表示不限；超限返回 503 + Retry-After。默认 32。
     pub max_inflight: u32,
     /// 账户使用策略：`round_robin`（轮询，默认）/ `priority`（优先消耗指定账户 + 会话粘滞）。
     pub account_strategy: String,
@@ -196,7 +196,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             port: 3050,
-            host: "0.0.0.0".into(),
+            // 默认只监听回环：0.0.0.0 会把带着账户凭据的转发口暴露到局域网，
+            // 需要局域网访问时由用户在配置页显式改为 0.0.0.0。
+            host: "127.0.0.1".into(),
             api_base: "https://api.commandcode.ai".into(),
             project_slug: "cc-proxy".into(),
             log_file: String::new(),
@@ -215,7 +217,9 @@ impl Default for Config {
             zdr: false,
             max_body_mb: 10,
             client_drain_timeout_ms: 0,
-            max_inflight: 0,
+            // 默认给一个正数上限：0（不限）会让并发请求无界占用内存与上游连接，
+            // 用户仍可在配置页改为 0 表示不限。
+            max_inflight: 32,
             account_strategy: "round_robin".into(),
             preferred_account_id: String::new(),
             theme: "system".into(),
@@ -235,6 +239,32 @@ impl Default for Config {
 }
 
 impl Config {
+    /// `api_base` 是否允许：必须是 https 的 Command Code 官方域名，或是本机回环地址。
+    ///
+    /// 上游地址决定账户 key（`Authorization: Bearer`）会被发往何处。若不加约束，
+    /// 一次 IPC 调用即可把上游指向攻击者主机，后续所有账户 key 都会外泄到那里。
+    /// 回环地址（本地自建/测试）不构成外泄，放行；其他自定义主机需显式设置
+    /// 环境变量 `CC_ALLOW_CUSTOM_API_BASE=1`。
+    fn api_base_allowed(&self) -> bool {
+        if std::env::var("CC_ALLOW_CUSTOM_API_BASE").as_deref() == Ok("1") {
+            return true;
+        }
+        let rest = self.api_base.split("://").nth(1).unwrap_or("");
+        let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let host = host_port
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_port)
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+        if loopback {
+            return true;
+        }
+        self.api_base.starts_with("https://")
+            && (host == "commandcode.ai" || host.ends_with(".commandcode.ai"))
+    }
+
     /// 校验配置合法性（端口范围、监听地址、api_base 协议前缀、日志级别枚举）。
     /// 返回 `Err(消息码)`（形如 `err:<code>`，见 crate::i18n），由前端翻译为当前语言。
     pub fn validate(&self) -> Result<(), String> {
@@ -245,6 +275,9 @@ impl Config {
             return Err(crate::i18n::err("config_invalid_host"));
         }
         if !self.api_base.starts_with("http://") && !self.api_base.starts_with("https://") {
+            return Err(crate::i18n::err("config_invalid_api_base"));
+        }
+        if !self.api_base_allowed() {
             return Err(crate::i18n::err("config_invalid_api_base"));
         }
         if !matches!(self.log_level.as_str(), "debug" | "info" | "warn" | "error") {
@@ -570,6 +603,16 @@ mod tests {
             (
                 "config_invalid_api_base",
                 |c: &mut Config| c.api_base = "ftp://x".into(),
+            ),
+            (
+                // 非官方域名的 https 上游同样拒绝：防止把账户 key 发往攻击者主机
+                "config_invalid_api_base",
+                |c: &mut Config| c.api_base = "https://evil.example.com".into(),
+            ),
+            (
+                // 官方域名也必须是 https
+                "config_invalid_api_base",
+                |c: &mut Config| c.api_base = "http://api.commandcode.ai".into(),
             ),
             (
                 "config_invalid_log_level",
