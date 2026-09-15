@@ -41,7 +41,7 @@ export function RecentRequestsCard({ limit = 20 }: { limit?: number }) {
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm">{t("stats.recentRequests")}</CardTitle>
-        <CardDescription>{t("stats.recentRequestsDesc")}</CardDescription>
+        <CardDescription>{t("stats.recentRequestsDesc", { p0: limit })}</CardDescription>
       </CardHeader>
       <CardContent className="pt-0">
         {rows.length === 0 ? (

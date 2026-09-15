@@ -188,7 +188,7 @@
     "output": "Output",
     "totalTokens": "Total Tokens",
     "recentRequests": "Recent requests",
-    "recentRequestsDesc": "Token usage of the 20 most recent successfully billed requests across all time (does not follow the time range above)",
+    "recentRequestsDesc": "Token usage of the {{p0}} most recent successfully billed requests across all time (does not follow the time range above)",
     "noRecentRequests": "No recent request records. They appear here once a request completes and produces tokens.",
     "clearDialogTitle": "Clear usage stats",
     "clearDialogDesc": "This will delete all historical usage records and trend data and cannot be undone. Continue?",
