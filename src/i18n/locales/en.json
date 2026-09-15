@@ -203,7 +203,10 @@
       "vision": "Vision",
       "reasoning": "Reasoning",
       "free": "Free",
-      "unavailable": "Unavailable"
+      "unavailable": "Unavailable",
+      "providerAll": "All providers",
+      "providerLabel": "Filter by provider",
+      "capabilityLabel": "Filter by capability"
     },
     "searchPlaceholder": "Search models…",
     "totalModels": "{{p0}} models",

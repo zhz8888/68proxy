@@ -7,6 +7,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { api, type ModelAccessInfo, type ModelInfo, type ModelPricing, type ModelRates, type ModelTier, type PlanContext } from "@/lib/api";
 import { copyText, formatContextTokens, formatPeakWindows, formatPrice } from "@/lib/format";
 import { errText } from "@/lib/messages";
@@ -14,6 +21,14 @@ import { cn } from "@/lib/utils";
 
 /** 能力/价格筛选维度。 */
 type Filter = "all" | "vision" | "reasoning" | "free" | "unavailable";
+
+/** 厂商筛选哨兵值：表示「全部厂商」。 */
+const ALL_PROVIDERS = "__all__";
+
+/** 模型归属厂商显示名：与卡片 Badge 同一口径（上游 provider 优先，缺省按 ID 前缀推断）。 */
+function modelProvider(model: ModelInfo): string {
+  return model.provider ?? providerForModel(model.id) ?? "";
+}
 
 /** 四项费率完全一致时视为同价档位。 */
 function ratesEqual(a: ModelRates, b: ModelRates): boolean {
@@ -158,6 +173,7 @@ export function ModelsView() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  const [providerFilter, setProviderFilter] = useState(ALL_PROVIDERS);
   const [copiedId, setCopiedId] = useState("");
 
   /** 拉取模型列表、内置计费表与套餐准入结果。
@@ -212,10 +228,27 @@ export function ModelsView() {
     [rows],
   );
 
+  // 厂商列表：按「模型卡片展示口径」聚合（上游 provider 显示名，缺省按 ID 前缀推断），
+  // 带各自模型数量，按数量降序（数量相同时按名称排序），保证下拉框顺序稳定
+  const providerOptions = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const { model } of rows) {
+      const p = modelProvider(model);
+      if (!p) continue;
+      map.set(p, (map.get(p) ?? 0) + 1);
+    }
+    return [...map.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [rows]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter(({ model, pricing, access: acc }) => {
       if (q && !model.id.toLowerCase().includes(q) && !model.name.toLowerCase().includes(q)) {
+        return false;
+      }
+      if (providerFilter !== ALL_PROVIDERS && modelProvider(model) !== providerFilter) {
         return false;
       }
       switch (filter) {
@@ -231,7 +264,7 @@ export function ModelsView() {
           return true;
       }
     });
-  }, [rows, search, filter]);
+  }, [rows, search, filter, providerFilter]);
 
   /** 复制模型 ID 到剪贴板，并在对应按钮上短暂显示“已复制”图标。 */
   async function copy(id: string) {
@@ -249,6 +282,10 @@ export function ModelsView() {
     { value: "unavailable", label: t("models.filter.unavailable"), count: counts.unavailable },
   ];
 
+  /** 能力下拉框当前选中的选项文案（含数量，无计数项不显示）。 */
+  const activeFilterLabel =
+    FILTERS.find((f) => f.value === filter)?.label ?? t("models.filter.all");
+
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-center gap-2">
@@ -261,24 +298,40 @@ export function ModelsView() {
             className="h-8 w-64 pl-8 text-xs"
           />
         </div>
-        {/* 能力 / 免费筛选 */}
-        <div className="flex items-center gap-1">
-          {FILTERS.map((f) => (
-            <Button
-              key={f.value}
-              variant={filter === f.value ? "secondary" : "ghost"}
-              size="sm"
-              className="h-7 px-2 text-xs"
-              onClick={() => setFilter(f.value)}
-              disabled={f.count === 0 && f.value !== "all"}
-            >
-              {f.label}
-              {f.count !== undefined && f.count > 0 && (
-                <span className="ml-1 text-muted-foreground">{f.count}</span>
-              )}
-            </Button>
-          ))}
-        </div>
+        {/* 能力 / 厂商筛选下拉框 */}
+        <Select value={filter} onValueChange={(v) => setFilter(v as Filter)}>
+          <SelectTrigger className="h-8 w-36 text-xs" title={t("models.filter.capabilityLabel")}>
+            <SelectValue>{activeFilterLabel}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {FILTERS.map((f) => (
+              <SelectItem key={f.value} value={f.value}>
+                {f.label}
+                {f.count !== undefined && f.count > 0 && (
+                  <span className="ml-2 text-muted-foreground">{f.count}</span>
+                )}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={providerFilter} onValueChange={setProviderFilter}>
+          <SelectTrigger className="h-8 w-40 text-xs" title={t("models.filter.providerLabel")}>
+            <SelectValue>
+              {providerFilter === ALL_PROVIDERS
+                ? t("models.filter.providerAll")
+                : providerFilter}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_PROVIDERS}>{t("models.filter.providerAll")}</SelectItem>
+            {providerOptions.map((p) => (
+              <SelectItem key={p.name} value={p.name}>
+                {p.name}
+                <span className="ml-2 text-muted-foreground">{p.count}</span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <span className="text-xs text-muted-foreground">
           {models.length > 0 ? t("models.totalModels", { p0: models.length }) : ""}
         </span>
@@ -334,7 +387,9 @@ export function ModelsView() {
       ) : filtered.length === 0 ? (
         <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed border-border">
           <p className="text-sm text-muted-foreground">
-            {search || filter !== "all" ? t("models.noMatch") : t("models.emptyHint")}
+            {search || filter !== "all" || providerFilter !== ALL_PROVIDERS
+              ? t("models.noMatch")
+              : t("models.emptyHint")}
           </p>
         </div>
       ) : (

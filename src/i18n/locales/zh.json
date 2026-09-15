@@ -203,7 +203,10 @@
       "vision": "视觉",
       "reasoning": "思考",
       "free": "免费",
-      "unavailable": "不可用"
+      "unavailable": "不可用",
+      "providerAll": "全部厂商",
+      "providerLabel": "按厂商筛选",
+      "capabilityLabel": "按能力筛选"
     },
     "searchPlaceholder": "搜索模型…",
     "totalModels": "共 {{p0}} 个模型",
