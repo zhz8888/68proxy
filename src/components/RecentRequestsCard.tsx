@@ -9,15 +9,15 @@ import { formatLogTime, formatTokens } from "@/lib/format";
 import { lampForStatus } from "@/lib/status";
 import { cn } from "@/lib/utils";
 
-/** 最近请求卡片：展示最近 20 条成功计费请求的 token 用量，随统计事件实时刷新。 */
-export function RecentRequestsCard() {
+/** 最近请求卡片：展示最近成功计费请求的 token 用量，随统计事件实时刷新。 */
+export function RecentRequestsCard({ limit = 20 }: { limit?: number }) {
   const { t } = useTranslation();
   const [rows, setRows] = useState<UsageRecentRow[]>([]);
 
   useEffect(() => {
     let mounted = true;
     /** 拉取一次最近请求；组件已卸载时丢弃结果。 */
-    const refresh = () => api.statsRecent(20).then((r) => mounted && setRows(r)).catch(() => {});
+    const refresh = () => api.statsRecent(limit).then((r) => mounted && setRows(r)).catch(() => {});
     refresh();
     // 订阅后端用量事件（节流合并到 1 秒），并以 3 秒轮询兜底
     let debounce: ReturnType<typeof setTimeout> | null = null;
@@ -35,7 +35,7 @@ export function RecentRequestsCard() {
       if (debounce) clearTimeout(debounce);
       clearInterval(timer);
     };
-  }, []);
+  }, [limit]);
 
   return (
     <Card>

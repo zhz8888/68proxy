@@ -163,7 +163,7 @@ export function ConsoleView() {
         </Card>
       </div>
 
-      <RecentRequestsCard />
+      <RecentRequestsCard limit={5} />
 
       <Card>
         <CardHeader className="pb-2">
