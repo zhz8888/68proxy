@@ -90,7 +90,17 @@ pub fn add_account(conn: &Connection, acct: &Account) -> Result<Vec<Account>, St
         if acct.source == "oauth" {
             existing.source = "oauth".into();
         }
-    } else if !accounts.iter().any(|a| a.key == key) {
+    } else if let Some(existing) = accounts.iter_mut().find(|a| a.key == key) {
+        // 同 key 但 userId 不同（上游账号重建、先手工添加后又走 OAuth）：
+        // 按 key 归并并刷新身份字段，否则两个分支都不命中，会静默不生效却返回成功。
+        existing.user_id = acct.user_id.clone();
+        if !acct.user_name.is_empty() {
+            existing.user_name = acct.user_name.clone();
+        }
+        if acct.source == "oauth" && existing.source != "oauth" {
+            existing.source = "oauth".into();
+        }
+    } else {
         accounts.push(Account {
             key,
             user_id: acct.user_id.clone(),

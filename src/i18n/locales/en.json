@@ -438,6 +438,7 @@
     "browser_open_failed": "Failed to open the browser: {{p0}}",
     "settings_store_uninitialized": "Settings store is not initialized",
     "account_key_prefix": "The Command Code account key must start with user_",
+    "local_key_invalid": "Invalid local forwarding key: must start with sk- and be at least 16 characters",
     "account_key_empty": "Account key cannot be empty",
     "account_name_empty": "Display name cannot be empty",
     "account_not_found": "No account found for userId {{p0}}",

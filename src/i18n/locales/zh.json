@@ -438,6 +438,7 @@
     "browser_open_failed": "打开浏览器失败：{{p0}}",
     "settings_store_uninitialized": "设置库未初始化",
     "account_key_prefix": "Command Code 账户 Key 必须以 user_ 开头",
+    "local_key_invalid": "本地转发 Key 非法：必须以 sk- 开头且不少于 16 个字符",
     "account_key_empty": "账户 key 不能为空",
     "account_name_empty": "显示名不能为空",
     "account_not_found": "未找到 userId 为 {{p0}} 的账户",

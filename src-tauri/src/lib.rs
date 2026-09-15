@@ -31,6 +31,9 @@ struct AppCtx {
     config_path: PathBuf,
     usage_path: PathBuf,
     proxy_state: Arc<proxy::state::AppState>,
+    /// 代理启停串行锁：start 判定 `is_running` 与 `bind`/`mark_started` 之间存在窗口，
+    /// 并发 start（托盘、setup 自动启动、前端按钮）会各自 bind 一次并互相报错。
+    lifecycle: tokio::sync::Mutex<()>,
 }
 
 /// 启动本地代理。返回启动后的代理状态 JSON；未保存 API Key 或端口被占用时返回错误。
@@ -143,16 +146,22 @@ fn local_key_get(app: AppHandle) -> Result<Value, String> {
     }))
 }
 
-/// 保存本地转发 Key（sk_ 开头）到设置库并刷新内存缓存；同步内存配置。入参为完整的 Key。
+/// 保存本地转发 Key（sk- 开头）到设置库并刷新内存缓存；同步内存配置。入参为完整的 Key。
 #[tauri::command]
 fn local_key_set(app: AppHandle, key: String) -> Result<(), String> {
+    // 与 account_add 对齐做前缀/长度校验：纯空白或异常字符的 key 会被鉴权侧视为
+    // 「已设置但不匹配」，导致正在运行的代理对所有下游请求 401，且前端显示「已设置」。
+    let key = key.trim().to_string();
+    if !key.starts_with("sk-") || key.len() < 16 || key.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(i18n::err("local_key_invalid"));
+    }
     let ctx = app.state::<AppCtx>();
     {
         let guard = ctx.proxy_state.usage.lock().unwrap();
         let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         credentials::save_local_key(conn, &key)?;
     }
-    ctx.proxy_state.config.write().unwrap().local_api_key = key.trim().to_string();
+    ctx.proxy_state.config.write().unwrap().local_api_key = key;
     Ok(())
 }
 
@@ -423,16 +432,23 @@ fn theme_set(app: AppHandle, theme: String) -> Result<(), String> {
         return Err(i18n::err("theme_invalid"));
     }
     let ctx = app.state::<AppCtx>();
+    // 先落库再改内存（与 language_set 一致）：落库失败时内存不应停留在新值，
+    // 否则会出现「设置报错但界面已生效、重启后回退」的分叉。
     let updated = {
-        let mut cfg = ctx.proxy_state.config.write().unwrap();
-        cfg.theme = theme;
-        cfg.clone()
+        let cfg = ctx.proxy_state.config.read().unwrap();
+        let mut next = cfg.clone();
+        next.theme = theme;
+        next
     };
-    let guard = ctx.proxy_state.usage.lock().unwrap();
-    let conn = guard
-        .as_ref()
-        .ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
-    proxy::settings::save_config(conn, &updated)
+    {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
+        proxy::settings::save_config(conn, &updated)?;
+    }
+    ctx.proxy_state.config.write().unwrap().theme = updated.theme;
+    Ok(())
 }
 
 /// 读取界面语言：`zh`（简体中文）/ `en`（英文）。
@@ -498,16 +514,23 @@ fn account_routing_set(
         return Err(i18n::err("strategy_invalid"));
     }
     let ctx = app.state::<AppCtx>();
+    // 先落库再改内存：落库失败时不应留下「内存已换新策略、旧绑定却未清」的混合状态
     let updated = {
-        let mut cfg = ctx.proxy_state.config.write().unwrap();
-        cfg.account_strategy = strategy;
-        cfg.preferred_account_id = preferred_account_id;
-        cfg.clone()
+        let cfg = ctx.proxy_state.config.read().unwrap();
+        let mut next = cfg.clone();
+        next.account_strategy = strategy;
+        next.preferred_account_id = preferred_account_id;
+        next
     };
     {
         let guard = ctx.proxy_state.usage.lock().unwrap();
         let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
         proxy::settings::save_config(conn, &updated)?;
+    }
+    {
+        let mut cfg = ctx.proxy_state.config.write().unwrap();
+        cfg.account_strategy = updated.account_strategy;
+        cfg.preferred_account_id = updated.preferred_account_id;
     }
     // 规则变更后原有绑定可能不再符合预期，全部清除以便按新规则重选
     ctx.proxy_state.account_bindings.lock().unwrap().clear();
@@ -745,6 +768,8 @@ async fn start_proxy_inner(app: &AppHandle) -> Result<Value, String> {
 /// 启动代理的核心逻辑（不含失败处理，由 `start_proxy_inner` 包装）。
 async fn start_proxy_inner_impl(app: &AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
+    // 串行化启停：避免并发 start 各自 bind 一次导致「端口占用」假错误
+    let _guard = ctx.lifecycle.lock().await;
     if ctx.proxy_state.is_running() {
         return Ok(status_value(app));
     }
@@ -767,8 +792,17 @@ async fn start_proxy_inner_impl(app: &AppHandle) -> Result<Value, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     *ctx.proxy_state.shutdown.lock().unwrap() = Some(tx);
     let st = ctx.proxy_state.clone();
+    let st_task = st.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = proxy::server::serve(listener, st, rx, true).await;
+        // serve 因 accept/监听错误等非关停原因退出时，必须复位运行标志：
+        // 否则 UI 会长期显示「运行中」而实际已死，且停止/重启都会因 is_running() 早退而无效。
+        if let Err(e) = proxy::server::serve(listener, st, rx, true).await {
+            proxy::log::warn(&format!(
+                "{}: {e}",
+                i18n::pick("代理服务异常退出", "Proxy server exited unexpectedly")
+            ));
+            st_task.mark_stopped();
+        }
     });
 
     // 最多等待 3 秒（60 次 × 50ms），确认后台服务已将运行标志置位
@@ -1130,6 +1164,7 @@ pub fn run() {
                 config_path,
                 usage_path,
                 proxy_state,
+                lifecycle: tokio::sync::Mutex::new(()),
             });
 
             // 启动开发调试桥接（仅 debug 构建），使浏览器直连前端页面也能调用后端命令
