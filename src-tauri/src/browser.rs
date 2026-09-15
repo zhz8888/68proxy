@@ -94,7 +94,9 @@ fn spawn_private(app: &str, args: &[&str], url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         let mut cmd = Command::new("open");
-        cmd.arg("-na").arg(app).args(args).arg(url);
+        // `--args` 分隔符必须保留：其后的参数才会传给应用。缺了它 `open` 会把
+        // `--incognito` 当作自身选项解析并报错退出，浏览器实际没有打开。
+        cmd.arg("-na").arg(app).arg("--args").args(args).arg(url);
         cmd.spawn().map(|_| ())
     }
     #[cfg(not(target_os = "macos"))]
