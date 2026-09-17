@@ -552,7 +552,8 @@ pub fn get_stats(conn: &Connection, period: Period) -> Result<UsageStats, String
         }
     }
 
-    // 组装分组行（按请求数降序）
+    // 组装分组行（请求数降序；请求数相同时按成本降序、再按名称升序，
+    // 提供完全确定的排序，避免 HashMap 随机迭代顺序导致同行数模型位置抖动）
     let mut by_model: Vec<GroupRow> = total
         .by_model
         .into_iter()
@@ -566,7 +567,12 @@ pub fn get_stats(conn: &Connection, period: Period) -> Result<UsageStats, String
             cost: v.cost,
         })
         .collect();
-    by_model.sort_by(|a, b| b.requests.cmp(&a.requests));
+    by_model.sort_by(|a, b| {
+        b.requests
+            .cmp(&a.requests)
+            .then_with(|| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.key.cmp(&b.key))
+    });
 
     let mut by_endpoint: Vec<GroupRow> = total
         .by_endpoint
@@ -581,7 +587,12 @@ pub fn get_stats(conn: &Connection, period: Period) -> Result<UsageStats, String
             cost: v.cost,
         })
         .collect();
-    by_endpoint.sort_by(|a, b| b.requests.cmp(&a.requests));
+    by_endpoint.sort_by(|a, b| {
+        b.requests
+            .cmp(&a.requests)
+            .then_with(|| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.key.cmp(&b.key))
+    });
 
     // 最近 10 分钟：10 个分钟桶（数组按时间从旧到新排列，index 0 最早）
     let mut last_10_minutes = Vec::with_capacity(10);
@@ -1111,6 +1122,72 @@ mod tests {
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].model, "m");
         assert_eq!(recent[0].prompt_tokens, 100);
+    }
+
+    /// 请求数相同的免费模型与极低成本模型：排序必须确定（成本降序、再按名称升序），
+    /// 不能随 HashMap 随机迭代顺序抖动（回归：免费模型与低成本模型位置互换）。
+    #[test]
+    fn same_request_count_models_sorted_stably() {
+        // 注入受控注册表：免费模型（费率 0）+ 极低成本模型（input 0.00001）
+        let free = super::pricing::ModelPricing {
+            id: "free-model".into(),
+            deal: Some(super::pricing::Deal {
+                discount_percent: 0,
+                free: true,
+                expires: None,
+                ends_when: None,
+            }),
+            time_of_day: None,
+            tiers: vec![super::pricing::Tier {
+                max_context: None,
+                rates: super::pricing::Rates {
+                    input: 0.0,
+                    output: 0.0,
+                    cached: 0.0,
+                    cache_write: 0.0,
+                },
+                list_rates: None,
+            }],
+        };
+        let cheap = super::pricing::ModelPricing {
+            id: "cheap-model".into(),
+            deal: None,
+            time_of_day: None,
+            tiers: vec![super::pricing::Tier {
+                max_context: None,
+                rates: super::pricing::Rates {
+                    input: 0.00001,
+                    output: 0.0,
+                    cached: 0.0,
+                    cache_write: 0.0,
+                },
+                list_rates: None,
+            }],
+        };
+        super::pricing::set_models(vec![free, cheap]);
+
+        let conn = temp_conn();
+        let now = super::super::state::now_millis();
+        // 两模型各 1 次请求：请求数相同，只能靠次级键区分
+        record_usage(&conn, &entry(now, "free-model", "/v1/chat/completions", "ok", 1_000_000, 0, 0)).unwrap();
+        record_usage(&conn, &entry(now, "cheap-model", "/v1/chat/completions", "ok", 1_000_000, 0, 0)).unwrap();
+
+        let stats = get_stats(&conn, Period::Today).unwrap();
+        assert_eq!(stats.by_model.len(), 2);
+        // 请求数相同：成本高的 cheap-model 排前，免费模型排后
+        assert_eq!(stats.by_model[0].key, "cheap-model");
+        assert_eq!(stats.by_model[1].key, "free-model");
+        assert!(stats.by_model[0].cost > 0.0);
+        assert_eq!(stats.by_model[1].cost, 0.0);
+        // 反复读取结果保持一致（确定性排序，不随 HashMap 迭代顺序变化）
+        for _ in 0..5 {
+            let again = get_stats(&conn, Period::Today).unwrap();
+            assert_eq!(again.by_model[0].key, "cheap-model");
+            assert_eq!(again.by_model[1].key, "free-model");
+        }
+
+        // 恢复内置注册表，避免污染其它测试
+        super::pricing::set_models(super::pricing::builtin_pricing());
     }
 
     /// 天键为本地时间的 YYYY-MM-DD 格式。
