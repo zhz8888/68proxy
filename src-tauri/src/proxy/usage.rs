@@ -238,6 +238,9 @@ pub fn init_usage_on(conn: &Connection) -> Result<(), String> {
             i18n::err_args("wal_failed", &[&e])
         })?;
     conn.pragma_update(None, "synchronous", "NORMAL").ok();
+    // 多进程（如旧实例残留/双开）同时写库时，无 busy_timeout 会让写操作在锁竞争
+    // 时立即报 database is locked；设 3 秒等待让瞬时竞争自动重试，消除随机写失败。
+    conn.pragma_update(None, "busy_timeout", 3000).ok();
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS usage_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
