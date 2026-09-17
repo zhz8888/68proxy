@@ -768,6 +768,15 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
                 "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":50,\"outputTokens\":0,\"inputTokenDetails\":{\"cacheReadTokens\":40}}}\n",
             ));
         }
+        if parsed["params"]["model"] == "usage-only" {
+            // 模拟 meta/muse-spark 等模型在 max_tokens 截断时的真实行为：
+            // 上游只回 usage 元数据（outputTokens>0，含 reasoning/text 明细），
+            // 不下发任何 text-delta/reasoning-delta 内容事件，finishReason=length。
+            // 此场景不是零输出：usage 明确有输出 token，不应判空返回 429。
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"start-step\"}\n{\"type\":\"finish-step\",\"finishReason\":\"length\",\"usage\":{\"inputTokens\":27,\"inputTokenDetails\":{\"noCacheTokens\":27,\"cacheReadTokens\":0},\"outputTokens\":32,\"outputTokenDetails\":{\"textTokens\":3,\"reasoningTokens\":29}}}\n{\"type\":\"finish\",\"finishReason\":\"length\",\"totalUsage\":{\"inputTokens\":27,\"inputTokenDetails\":{\"noCacheTokens\":27,\"cacheReadTokens\":0},\"outputTokens\":32,\"outputTokenDetails\":{\"textTokens\":3,\"reasoningTokens\":29}}}\n{\"type\":\"provider-metadata\"}\n",
+            ));
+        }
         if parsed["params"]["model"] == "slow" {
             // 慢响应：sleep 300ms 模拟上游耗时，用于并发上限测试占用在途额度
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1049,6 +1058,73 @@ async fn chat_completions_zero_output_returns_429() {
     let body: Value = res.json().await.unwrap();
     assert_eq!(body["error"]["type"], "rate_limit_error");
     assert_eq!(body["retry_after"], 10);
+    state.mark_stopped();
+}
+
+/// 端到端：上游只回 usage 元数据（outputTokens>0）而无任何内容事件时不算零输出。
+///
+/// 回归：meta/muse-spark-1.3-contributor 在 max_tokens 截断（finishReason=length）时
+/// 只回 outputTokenDetails（textTokens/reasoningTokens），内容事件一个都不发；
+/// 按「聚合内容为空」判定会误杀成 429，丢失上游已产出 usage 的响应。
+#[tokio::test]
+async fn usage_only_response_is_not_zero_output() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+
+    // 非流式：应返回 200 + finish_reason=length + usage，而非 429 空响应
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "usage-only",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "usage 有输出 token 时不应判为零输出");
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["choices"][0]["finish_reason"], "length");
+    assert_eq!(body["usage"]["completion_tokens"], 32);
+    assert_eq!(body["usage"]["prompt_tokens"], 27);
+
+    // 流式：应正常收尾（finish 帧 + [DONE]），而非 429 错误帧
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "usage-only",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+    assert!(
+        !text.contains("Empty response from upstream"),
+        "流式不应下发零输出错误帧: {text}"
+    );
+    assert!(text.contains("\"finish_reason\":\"length\""), "应有 length 结束帧: {text}");
+    assert!(text.contains("[DONE]"), "应有 [DONE] 收尾: {text}");
+
+    // Anthropic 非流式：同样不应判空
+    let res = client
+        .post(format!("{base}/v1/messages"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "usage-only",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_tokens": 32,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "Anthropic 协议下同样不应判为零输出");
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["stop_reason"], "max_tokens");
+
     state.mark_stopped();
 }
 

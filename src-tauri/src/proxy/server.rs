@@ -1293,10 +1293,13 @@ async fn stream_openai(
         translator.cached_tokens,
         &last_event,
     );
-    // 以「是否真的产出了内容」判定成败：零输出会被下游以 429 错误帧收尾，不应计入统计
-    let produced = translator.produced_content();
+    // 以「是否真的产出了内容」判定成败：零输出会被下游以 429 错误帧收尾，不应计入统计。
+    // 上游回报了输出 token（output_tokens > 0）时不算零输出——部分模型在 max_tokens
+    // 截断时只回 usage 元数据（如 meta/muse-spark 系列只给 outputTokenDetails），
+    // 内容事件并未下发，按内容判定会误杀。
+    let produced = translator.produced_content() || translator.output_tokens > 0;
     record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true, produced);
-    if translator.produced_content() {
+    if produced {
         let _ = send_frame(&tx, Frame::Sse(translator.done_event()), drain).await;
         let _ = send_frame(&tx, Frame::Done, drain).await;
     } else {
@@ -1372,7 +1375,7 @@ async fn stream_anthropic(
             }
         }
     }
-    if !translator.produced_content {
+    if !translator.produced_content && translator.output_tokens == 0 {
         // 未产出任何内容：message_start 仍缓存在首帧前缀中未下发，
         // 直接以 ZeroOutput 让首帧循环回退为携带 429 的 JSON 响应
         let _ = send_frame(&tx, Frame::ZeroOutput, drain).await;
@@ -1471,7 +1474,7 @@ async fn stream_responses(
             }
         }
     }
-    if !translator.produced_content() {
+    if !translator.produced_content() && translator.output_tokens == 0 {
         // 未产出任何内容：response.created 仍缓存在首帧前缀中未下发，
         // 直接以 ZeroOutput 让首帧循环回退为携带 429 的 JSON 响应
         let _ = send_frame(&tx, Frame::ZeroOutput, drain).await;
@@ -1659,7 +1662,12 @@ async fn handle_nonstream(
     }
     // 零输出判定：三种协议一律按实际聚合内容判定——上游偶发不回 usage 时，
     // 按 usage 判定会把已产出完整文本的响应误杀成 429 并丢弃正文。
-    let empty = full_text.is_empty() && reasoning.is_empty() && tool_calls.is_empty();
+    //
+    // 例外：usage 明确回报 outputTokens > 0 时不算空响应。上游对部分模型
+    // （如 meta/muse-spark-1.3-contributor）在 max_tokens 截断（finishReason=length）
+    // 时只回 usage 元数据（含 outputTokenDetails.textTokens/reasoningTokens），
+    // 不下发任何 text-delta/reasoning-delta 内容事件；此时按聚合内容判定会误杀。
+    let empty = full_text.is_empty() && reasoning.is_empty() && tool_calls.is_empty() && output == 0;
     if empty {
         finish_request(&st, &ctx, "error");
         return nonstream_error(
