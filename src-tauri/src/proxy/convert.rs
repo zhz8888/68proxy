@@ -322,8 +322,13 @@ pub fn build_cc_request(
     } else if empty_system_placeholder {
         // 上游在 params.system 缺省时会注入自身约 7.5K token 的默认提示词
         // （进入默认上下文/前缀路径），既产生大量 cached tokens 又污染对话。
-        // 发一个空格占位即可绕过。
-        params.insert("system".into(), json!([{ "type": "text", "text": " " }]));
+        // 发一个非空占位即可绕过注入。
+        //
+        // 占位内容必须是「非空白字符」：部分 provider（moonshotai/Kimi-K2.5、
+        // zai-org/GLM-5、MiniMaxAI/MiniMax-M2.5 等）会校验并拒绝全空白 system
+        // （报 "The system field can't be blank"），导致这些模型整体不可用。
+        // 句点既能通过所有 provider 的校验，也同样是极短的显式 system。
+        params.insert("system".into(), json!([{ "type": "text", "text": "." }]));
     }
     if let Some(t) = openai_req.get("temperature") {
         params.insert("temperature".into(), t.clone());

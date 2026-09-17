@@ -157,16 +157,18 @@ fn build_cc_request_tool_alias_and_output_join() {
     assert_eq!(cc["params"]["messages"][2]["content"][0]["output"]["value"], "第一行\n第二行");
 }
 
-/// 验证无 system 时 params.system 发空格占位（开关开启），关闭时缺省字段。
+/// 验证无 system 时 params.system 发非空占位（开关开启），关闭时缺省字段。
 #[test]
 fn build_cc_request_empty_system_placeholder() {
     let req = json!({
         "model": "deepseek/deepseek-v4-flash",
         "messages": [{ "role": "user", "content": "你好" }],
     });
-    // 开关开启：无 system 时发空格占位（块数组形态），阻止上游注入默认提示词
+    // 开关开启：无 system 时发句点占位（块数组形态），阻止上游注入默认提示词。
+    // 不能用空格：部分 provider（Kimi-K2.5 / GLM-5 / MiniMax-M2.5）会以
+    // "The system field can't be blank" 拒绝全空白 system。
     let cc = build_cc(&req, true);
-    assert_eq!(cc["params"]["system"][0]["text"], " ");
+    assert_eq!(cc["params"]["system"][0]["text"], ".");
     // 开关关闭：不写 system 字段
     let cc2 = build_cc(&req, false);
     assert!(cc2["params"].get("system").is_none());
@@ -768,6 +770,19 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
                 "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":50,\"outputTokens\":0,\"inputTokenDetails\":{\"cacheReadTokens\":40}}}\n",
             ));
         }
+        if parsed["params"]["model"] == "stream-error" {
+            // 上游以 200 开流后立即下发 error 事件（provider 不可用、参数被拒等）：
+            // 必须透传真实错误，不能被「零输出」兜底掩盖成误导性的限流 429。
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"No available providers match the 'only' filter: wafer.\",\"statusCode\":503,\"isRetryable\":false}}\n",
+            ));
+        }
+        if parsed["params"]["model"] == "stream-error-400" {
+            // 参数类错误（statusCode 400、不可重试）：下游应看到 400 而非 429
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"The system field can't be blank.\",\"statusCode\":400,\"isRetryable\":false}}\n",
+            ));
+        }
         if parsed["params"]["model"] == "usage-only" {
             // 模拟 meta/muse-spark 等模型在 max_tokens 截断时的真实行为：
             // 上游只回 usage 元数据（outputTokens>0，含 reasoning/text 明细），
@@ -1128,6 +1143,76 @@ async fn usage_only_response_is_not_zero_output() {
     state.mark_stopped();
 }
 
+/// 端到端：上游以 200 开流后下发 error 事件时，透传真实状态码与消息。
+///
+/// 回归：此前 error 事件只记日志，流结束被「零输出」兜底覆盖成 429 限流错误，
+/// 下游看不到真实原因（如 provider 不可用、system 被拒），也无法区分该重试还是换模型。
+#[tokio::test]
+async fn stream_error_event_is_propagated_not_masked_as_zero_output() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+
+    // 503 + 不可重试：下游应看到上游状态码与原始消息，且不暗示重试
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "stream-error",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 503, "应透传上游状态码而非 429");
+    let body: Value = res.json().await.unwrap();
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(msg.contains("No available providers"), "应透传上游原始消息: {msg}");
+    assert!(
+        !msg.contains("Empty response"),
+        "不应被零输出兜底掩盖: {msg}"
+    );
+
+    // 400 参数类错误：同样透传（不可重试 → 无 retry_after）
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "stream-error-400",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400, "参数类错误应透传 400");
+    let body: Value = res.json().await.unwrap();
+    assert!(
+        body["error"]["message"].as_str().unwrap_or("").contains("system field"),
+        "应透传上游参数错误消息"
+    );
+
+    // Anthropic 协议入口同样透传
+    let res = client
+        .post(format!("{base}/v1/messages"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "stream-error",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_tokens": 16,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 503, "Anthropic 入口同样透传上游状态码");
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["type"], "error");
+    assert!(
+        body["error"]["message"].as_str().unwrap_or("").contains("No available providers"),
+        "Anthropic 错误体应含上游消息"
+    );
+
+    state.mark_stopped();
+}
+
 /// 端到端：上游返回 429 错误体时，透传状态码、retry_after=30 与上游错误消息。
 #[tokio::test]
 async fn upstream_error_mapped() {
@@ -1172,8 +1257,8 @@ async fn empty_system_placeholder_and_zdr_header() {
     assert_eq!(res.status(), 200);
 
     let cap = captured.lock().unwrap();
-    // 无 system 时 params.system 为空格占位（块数组形态）
-    assert_eq!(cap["body"]["params"]["system"][0]["text"], " ");
+    // 无 system 时 params.system 为句点占位（块数组形态，空格会被部分 provider 拒绝）
+    assert_eq!(cap["body"]["params"]["system"][0]["text"], ".");
     // ZDR 模式开启时 generate 请求携带 x-cmd-zdr: 1
     assert_eq!(cap["zdr"], "1");
     drop(cap);

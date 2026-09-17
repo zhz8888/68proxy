@@ -73,6 +73,46 @@ pub fn read_cache_write_tokens(u: &Value) -> u64 {
         .unwrap_or(0)
 }
 
+/// 上游在流中下发的 `error` 事件（HTTP 200 的流里承载错误）。
+///
+/// 上游对业务性失败（provider 不可用、参数被拒等）仍以 200 开流，随后发
+/// `{"type":"error","error":{"message":…,"statusCode":…,"isRetryable":…}}`。
+/// 该事件必须在流结束判定前保留：否则真实错误会被「零输出」兜底覆盖成
+/// 误导性的限流 429，下游既看不到原因也无法区分「该换模型」与「等一会重试」。
+#[derive(Debug, Clone)]
+pub struct StreamError {
+    /// 上游给出的状态码语义（缺省 502）。
+    pub status: u16,
+    /// 上游错误消息（原样透传）。
+    pub message: String,
+    /// 上游标记的可重试性；`false` 时下游错误不再带 retry_after 暗示重试。
+    pub retryable: bool,
+}
+
+impl StreamError {
+    /// 从上游 `error` 事件解析；兼容 `error` 为字符串的旧形态。
+    pub fn from_event(event: &Value) -> Self {
+        let message = event
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .or_else(|| event.get("error").and_then(|v| v.as_str()))
+            .or_else(|| event.get("message").and_then(|v| v.as_str()))
+            .unwrap_or("Unknown Command Code error")
+            .to_string();
+        let status = event
+            .pointer("/error/statusCode")
+            .and_then(|v| v.as_u64())
+            .filter(|v| (100..600).contains(v))
+            .map(|v| v as u16)
+            .unwrap_or(502);
+        let retryable = event
+            .pointer("/error/isRetryable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        Self { status, message, retryable }
+    }
+}
+
 /// Command Code NDJSON → OpenAI SSE 翻译器。
 pub struct OpenAiTranslator {
     /// 下游响应体的 completion id（跨帧保持不变）。
@@ -96,6 +136,8 @@ pub struct OpenAiTranslator {
     pub cached_tokens: u64,
     /// 写入缓存的输入 token 数（映射为成本估算的 cache_write）。
     pub cache_write_tokens: u64,
+    /// 上游在流中下发的 error 事件（若有）；流结束判定时优先于「零输出」兜底。
+    pub stream_error: Option<StreamError>,
 }
 
 impl OpenAiTranslator {
@@ -113,6 +155,7 @@ impl OpenAiTranslator {
             output_tokens: 0,
             cached_tokens: 0,
             cache_write_tokens: 0,
+            stream_error: None,
         }
     }
 
@@ -233,12 +276,10 @@ impl OpenAiTranslator {
                 out.push(make_chunk(&self.completion_id, self.created, &self.model, serde_json::json!({}), Some(&fr), Some(usage)));
             }
             "error" => {
-                let msg = event
-                    .pointer("/error/message")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| event.get("message").and_then(|v| v.as_str()))
-                    .unwrap_or("Unknown error");
-                log::warn(&format!("Command Code stream error: {msg}"));
+                let err = StreamError::from_event(&event);
+                log::warn(&format!("Command Code stream error: {} (status {})", err.message, err.status));
+                // 记录供流结束判定复用（无内容时以真实错误回退，而非误报空响应 429）
+                self.stream_error = Some(err);
             }
             "reasoning-end" | "provider-metadata" | "tool-input-start" | "tool-input-delta" | "tool-input-end" | "tool-error" | "text-end" => {}
             other => {
@@ -323,6 +364,8 @@ pub struct ResponsesTranslator {
     produced_content: bool,
     /// 流中已出现过 error 事件，finalize 时不再补发完成事件。
     pub has_error: bool,
+    /// 上游在流中下发的 error 事件（若有）；无内容回退时优先透传真实错误。
+    pub stream_error: Option<StreamError>,
 }
 
 impl ResponsesTranslator {
@@ -351,6 +394,7 @@ impl ResponsesTranslator {
             cache_write_tokens: 0,
             produced_content: false,
             has_error: false,
+            stream_error: None,
         }
     }
 
@@ -630,11 +674,9 @@ impl ResponsesTranslator {
             }
             "error" => {
                 self.has_error = true;
-                let msg = event
-                    .pointer("/error/message")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| event.get("message").and_then(|v| v.as_str()))
-                    .unwrap_or("Unknown Command Code error");
+                let err = StreamError::from_event(&event);
+                let msg = err.message.clone();
+                self.stream_error = Some(err);
                 out.push(self.sse(
                     "response.failed",
                     serde_json::json!({
@@ -724,6 +766,8 @@ pub struct AnthropicTranslator {
     pub produced_content: bool,
     /// 流中已出现过 error 事件，finalize 时不再补发完成事件。
     pub has_error: bool,
+    /// 上游在流中下发的 error 事件（若有）；无内容回退时优先透传真实错误。
+    pub stream_error: Option<StreamError>,
 }
 
 impl AnthropicTranslator {
@@ -746,6 +790,7 @@ impl AnthropicTranslator {
             cache_write_tokens: None,
             produced_content: false,
             has_error: false,
+            stream_error: None,
         }
     }
 
@@ -960,11 +1005,9 @@ impl AnthropicTranslator {
             }
             "error" => {
                 self.has_error = true;
-                let msg = event
-                    .pointer("/error/message")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| event.get("message").and_then(|v| v.as_str()))
-                    .unwrap_or("Unknown Command Code error");
+                let err = StreamError::from_event(&event);
+                let msg = err.message.clone();
+                self.stream_error = Some(err);
                 out.push(format!(
                     "event: error\ndata: {}\n\n",
                     serde_json::json!({ "type": "error", "error": { "type": "internal_error", "message": msg } })

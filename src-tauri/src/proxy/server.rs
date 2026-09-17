@@ -373,15 +373,18 @@ fn sse_response(
                         finish_request(&st, &ctx, "ok");
                         return None;
                     }
-                    Some(Some(Frame::ZeroOutput)) => {
+                    Some(Some(Frame::ZeroOutput(err))) => {
                         // 零输出帧正常应在首帧前被 handle_stream 拦截；此处为兜底：
-                        // 已发出 SSE 头，只能用协议错误帧收尾
+                        // 已发出 SSE 头，只能用协议错误帧收尾（有上游错误则透传其消息）
                         finish_request(&st, &ctx, "error");
-                        pending = Some(protocol_error_frame(
-                            protocol,
-                            "Empty response from upstream (zero output tokens)",
-                            Some(10),
-                        ));
+                        let (msg, retry) = match err {
+                            Some(e) => (e.message, e.retryable.then_some(10)),
+                            None => (
+                                "Empty response from upstream (zero output tokens)".to_string(),
+                                Some(10),
+                            ),
+                        };
+                        pending = Some(protocol_error_frame(protocol, &msg, retry));
                         ended = true;
                     }
                     Some(Some(Frame::Timeout)) => {
@@ -573,8 +576,9 @@ enum Frame {
     Sse(String),
     /// 上游流正常结束（已产出内容或正常收尾）。
     Done,
-    /// 上游零输出（未产出任何内容）：首帧前仍可回退为携带正确状态码的 JSON 限流响应。
-    ZeroOutput,
+    /// 上游零输出（未产出任何内容）：首帧前仍可回退为携带正确状态码的 JSON 响应。
+    /// 携带上游 error 事件（若有），使回退响应透传真实原因而非笼统的限流错误。
+    ZeroOutput(Option<super::sse::StreamError>),
     /// 上游空闲超时。
     Timeout,
     /// 上游读流出错，携带错误消息。
@@ -1150,31 +1154,35 @@ async fn handle_stream(
                 finish_request(&st, &ctx, "ok");
                 return sse_response(prefix, rx, protocol, st, ctx);
             }
-            Some(Frame::ZeroOutput) => {
-                // 上游未产出任何内容：尚未发 SSE 头，直接以 JSON 429 限流响应回退
+            Some(Frame::ZeroOutput(err)) => {
+                // 上游未产出任何内容：尚未发 SSE 头，直接以 JSON 错误响应回退。
+                // 携带上游 error 事件时透传其真实状态与消息（provider 不可用、
+                // 参数被拒等业务错误不该被伪装成限流）；否则回退为限流 429。
                 reset_timeouts(&st);
                 finish_request(&st, &ctx, "error");
-                let (status, body, ra) = match protocol {
+                let (status, etype, message, retry_after) = match err {
+                    Some(e) => (
+                        e.status,
+                        if e.status == 429 { "rate_limit_error" } else { "upstream_error" },
+                        e.message,
+                        e.retryable.then_some(10),
+                    ),
+                    None => (
+                        429,
+                        "rate_limit_error",
+                        "Empty response from upstream (zero output tokens)".to_string(),
+                        Some(10),
+                    ),
+                };
+                let body = match protocol {
                     Protocol::OpenAi | Protocol::Responses => {
-                            let (s, b) = errors::openai_error(
-                                429,
-                                "rate_limit_error",
-                                "Empty response from upstream (zero output tokens)",
-                                Some(10),
-                            );
-                            (s, b, Some(10))
-                        }
-                        Protocol::Anthropic => {
-                            let (s, b) = errors::anthropic_error(
-                                429,
-                                "rate_limit_error",
-                                "Empty response from upstream (zero output tokens)",
-                                Some(10),
-                            );
-                            (s, b, Some(10))
-                        }
-                    };
-                return json_response(status, body, ra);
+                        errors::openai_error(status, etype, &message, retry_after).1
+                    }
+                    Protocol::Anthropic => {
+                        errors::anthropic_error(status, etype, &message, retry_after).1
+                    }
+                };
+                return json_response(status, body, retry_after);
             }
             Some(Frame::Timeout) => {
                 let msg = timeout_message(&st);
@@ -1304,7 +1312,7 @@ async fn stream_openai(
         let _ = send_frame(&tx, Frame::Done, drain).await;
     } else {
         let _ = send_frame(&tx, Frame::Sse(translator.zero_output_error_frame()), drain).await;
-        let _ = send_frame(&tx, Frame::ZeroOutput, drain).await;
+        let _ = send_frame(&tx, Frame::ZeroOutput(translator.stream_error.clone()), drain).await;
     }
 }
 
@@ -1377,8 +1385,8 @@ async fn stream_anthropic(
     }
     if !translator.produced_content && translator.output_tokens == 0 {
         // 未产出任何内容：message_start 仍缓存在首帧前缀中未下发，
-        // 直接以 ZeroOutput 让首帧循环回退为携带 429 的 JSON 响应
-        let _ = send_frame(&tx, Frame::ZeroOutput, drain).await;
+        // 直接以 ZeroOutput 让首帧循环回退为 JSON 错误响应（携带上游真实错误）
+        let _ = send_frame(&tx, Frame::ZeroOutput(translator.stream_error.clone()), drain).await;
         return;
     }
     for f in translator.finalize() {
@@ -1476,8 +1484,8 @@ async fn stream_responses(
     }
     if !translator.produced_content() && translator.output_tokens == 0 {
         // 未产出任何内容：response.created 仍缓存在首帧前缀中未下发，
-        // 直接以 ZeroOutput 让首帧循环回退为携带 429 的 JSON 响应
-        let _ = send_frame(&tx, Frame::ZeroOutput, drain).await;
+        // 直接以 ZeroOutput 让首帧循环回退为 JSON 错误响应（携带上游真实错误）
+        let _ = send_frame(&tx, Frame::ZeroOutput(translator.stream_error.clone()), drain).await;
         return;
     }
     for f in translator.finalize() {
@@ -1609,6 +1617,7 @@ async fn handle_nonstream(
     let mut usage: Option<Value> = None;
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut last_event = String::new();
+    let mut stream_error: Option<super::sse::StreamError> = None;
 
     loop {
         let chunk = match tokio::time::timeout(NONSTREAM_IDLE_TIMEOUT, stream.next()).await {
@@ -1636,6 +1645,7 @@ async fn handle_nonstream(
                 &mut usage,
                 &mut tool_calls,
                 &mut last_event,
+                &mut stream_error,
             );
         }
     }
@@ -1648,6 +1658,7 @@ async fn handle_nonstream(
             &mut usage,
             &mut tool_calls,
             &mut last_event,
+            &mut stream_error,
         );
     }
 
@@ -1670,6 +1681,12 @@ async fn handle_nonstream(
     let empty = full_text.is_empty() && reasoning.is_empty() && tool_calls.is_empty() && output == 0;
     if empty {
         finish_request(&st, &ctx, "error");
+        // 上游已下发 error 事件时透传其真实原因与状态码：否则 provider 不可用、
+        // 参数被拒等业务错误会被「空响应 429」掩盖，下游无法区分该换模型还是重试。
+        if let Some(e) = stream_error {
+            let retry_after = e.retryable.then_some(10);
+            return nonstream_error(protocol, e.status, &e.message, retry_after);
+        }
         return nonstream_error(
             protocol,
             429,
@@ -1793,6 +1810,7 @@ fn parse_ndjson_line(
     usage: &mut Option<Value>,
     tool_calls: &mut Vec<Value>,
     last_event: &mut String,
+    stream_error: &mut Option<super::sse::StreamError>,
 ) {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed == "[DONE]" || trimmed.starts_with(':') {
@@ -1850,12 +1868,14 @@ fn parse_ndjson_line(
             }
         }
         "error" => {
-            let msg = event
-                .pointer("/error/message")
-                .and_then(|v| v.as_str())
-                .or_else(|| event.get("message").and_then(|v| v.as_str()))
-                .unwrap_or("Unknown error");
-            log::warn(&format!("Command Code error (non-stream): {msg}"));
+            // 上游业务性失败（provider 不可用、参数被拒等）：保留完整结构，
+            // 供流结束判定时透传，避免被「零输出」兜底掩盖成误导性的限流 429。
+            let err = super::sse::StreamError::from_event(&event);
+            log::warn(&format!(
+                "Command Code error (non-stream): {} (status {})",
+                err.message, err.status
+            ));
+            *stream_error = Some(err);
         }
         "reasoning-end" | "provider-metadata" | "tool-input-start" | "tool-input-delta" | "tool-input-end" | "tool-error" | "text-end" => {}
         other => {

@@ -387,7 +387,7 @@
     "proxyTitle": "Proxy",
     "proxyDesc": "Upstream call behavior for Command Code",
     "emptySystemPlaceholder": "Empty system placeholder",
-    "emptySystemPlaceholderHint": "Send a space placeholder when there is no system prompt, preventing the Command Code upstream from injecting its ~7.5K-token default prompt.",
+    "emptySystemPlaceholderHint": "Send a single period placeholder when there is no system prompt, preventing the Command Code upstream from injecting its ~7.5K-token default prompt.",
     "zdr": "ZDR mode",
     "zdrHint": "Send the x-cmd-zdr: 1 header to the Command Code upstream (applies to both generation and init pre-requests).",
     "outboundProxyTitle": "Outbound Proxy",
