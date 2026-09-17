@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Check,
+  Copy,
   Download,
   Eye,
   EyeOff,
@@ -35,6 +37,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, type ApiKeyState, type Config } from "@/lib/api";
 import { errText, msgText } from "@/lib/messages";
+import { copyText } from "@/lib/format";
 import { pickSavePath } from "@/lib/platform";
 import { applyTheme, type ThemeMode } from "@/lib/theme";
 
@@ -175,6 +178,8 @@ export function ConfigView() {
   const [localKey, setLocalKey] = useState<ApiKeyState>({ has_key: false, masked: "" });
   const [localKeyInput, setLocalKeyInput] = useState("");
   const [showLocalKey, setShowLocalKey] = useState(false);
+  // 是否刚复制过完整 Key（短暂显示「已复制」图标）
+  const [copiedKey, setCopiedKey] = useState(false);
   const [portInUse, setPortInUse] = useState<{ in_use: boolean; pid: number | null }>({
     in_use: false,
     pid: null,
@@ -322,6 +327,23 @@ export function ConfigView() {
       setLocalKey({ has_key: true, masked: r.masked });
       setLocalKeyInput("");
       toast.success(t("config.keyGenerated"));
+    } catch (e) {
+      toast.error(errText(e));
+    }
+  }
+
+  /** 复制完整本地转发 Key 到剪贴板（Key 仅在用户主动复制时由后端返回）。 */
+  async function copyLocalKey() {
+    try {
+      const key = await api.localKeyExpose();
+      if (!key) {
+        toast.error(t("config.localKeyMissing"));
+        return;
+      }
+      if (await copyText(key)) {
+        setCopiedKey(true);
+        setTimeout(() => setCopiedKey(false), 1400);
+      }
     } catch (e) {
       toast.error(errText(e));
     }
@@ -628,6 +650,20 @@ export function ConfigView() {
               {localKey.has_key
                 ? t("config.localKeyCurrent", { p0: localKey.masked })
                 : t("config.localKeyMissing")}
+              {localKey.has_key && (
+                <button
+                  type="button"
+                  onClick={copyLocalKey}
+                  className="text-muted-foreground hover:text-foreground"
+                  title={t("common.copy")}
+                >
+                  {copiedKey ? (
+                    <Check className="h-3.5 w-3.5 text-success" />
+                  ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              )}
             </div>
             {/* 输入框独占一行，按钮统一置于卡片底部 */}
             <div className="relative">

@@ -324,8 +324,9 @@ export const api = {
   // 配置读写：保存时返回是否需要重启代理生效
   configGet: () => invoke<Config>("config_get"),
   configSave: (config: Config) => invoke<{ needs_restart: boolean }>("config_save", { config }),
-  // 本地转发 Key：读取（掩码）/ 保存 / 随机生成 / 删除
+  // 本地转发 Key：读取（掩码）/ 返回完整 Key（复制用）/ 保存 / 随机生成 / 删除
   localKeyGet: () => invoke<ApiKeyState>("local_key_get"),
+  localKeyExpose: () => invoke<string>("local_key_expose"),
   localKeySet: (key: string) => invoke<void>("local_key_set", { key }),
   localKeyGenerate: () => invoke<{ key: string; masked: string }>("local_key_generate"),
   localKeyDelete: () => invoke<void>("local_key_delete"),

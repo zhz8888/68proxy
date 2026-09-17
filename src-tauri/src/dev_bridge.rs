@@ -232,6 +232,7 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
 
         // ── 本地转发 Key ──
         "local_key_get" => Ok(to_value(crate::local_key_get(app()?)?)?),
+        "local_key_expose" => Ok(to_value(crate::local_key_expose(app()?)?)?),
         "local_key_set" => {
             crate::local_key_set(app()?, s("key"))?;
             Ok(Value::Null)

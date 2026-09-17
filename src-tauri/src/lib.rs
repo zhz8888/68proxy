@@ -146,6 +146,16 @@ fn local_key_get(app: AppHandle) -> Result<Value, String> {
     }))
 }
 
+/// 返回完整本地转发 Key（供用户复制到客户端配置）；未设置时返回空字符串。
+/// 仅在用户主动触发复制时调用，不在列表/状态接口中下发完整 Key。
+#[tauri::command]
+fn local_key_expose(app: AppHandle) -> Result<String, String> {
+    let ctx = app.state::<AppCtx>();
+    let guard = ctx.proxy_state.usage.lock().unwrap();
+    let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
+    Ok(credentials::load_local_key(conn)?.unwrap_or_default())
+}
+
 /// 保存本地转发 Key（sk- 开头）到设置库并刷新内存缓存；同步内存配置。入参为完整的 Key。
 #[tauri::command]
 fn local_key_set(app: AppHandle, key: String) -> Result<(), String> {
@@ -1061,6 +1071,7 @@ pub fn run() {
             config_get,
             config_save,
             local_key_get,
+            local_key_expose,
             local_key_set,
             local_key_generate,
             local_key_delete,
