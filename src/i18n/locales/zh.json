@@ -187,16 +187,14 @@
     "requests": "请求",
     "input": "输入",
     "output": "输出",
+    "cached": "缓存",
     "totalTokens": "总 Tokens",
     "recentRequests": "最近请求",
     "recentRequestsDesc": "全时段最近 {{p0}} 条成功计费请求的 Token 用量（不随上方时间范围变化）",
     "noRecentRequests": "暂无最近请求记录。请求完成且产出 Token 后显示在此。",
     "clearDialogTitle": "清空用量统计",
     "clearDialogDesc": "将删除全部历史用量记录与趋势数据，且不可恢复。确认继续？",
-    "confirmClear": "确认清空",
-    "tokenIn": "输入 {{p0}}",
-    "tokenOut": "输出 {{p0}}",
-    "tokenCached": "缓存 {{p0}}"
+    "confirmClear": "确认清空"
   },
   "models": {
     "filter": {

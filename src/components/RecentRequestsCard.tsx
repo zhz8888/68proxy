@@ -46,6 +46,23 @@ export function RecentRequestsCard({ limit = 20 }: { limit?: number }) {
   // 兜底轮询：窗口隐藏时暂停，重新可见时立即刷一次
   useVisiblePolling(refresh, 3000);
 
+  /** 双行 token 单元格：上行文字描述（输入/输出/缓存），下行数值。 */
+  function TokenCell({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+    return (
+      <span className="flex w-16 flex-col items-end gap-0.5">
+        <span className="text-2xs leading-none text-muted-foreground/80">{label}</span>
+        <span
+          className={cn(
+            "font-mono text-xs leading-none",
+            highlight ? "text-signal-info" : "text-muted-foreground",
+          )}
+        >
+          {value}
+        </span>
+      </span>
+    );
+  }
+
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -73,20 +90,13 @@ export function RecentRequestsCard({ limit = 20 }: { limit?: number }) {
                 </span>
                 <span className="min-w-0 truncate text-xs text-muted-foreground">{r.endpoint}</span>
                 <StatusLamp state={lampForStatus(r.status)} />
-                <span className="w-14 text-right font-mono text-xs text-muted-foreground">
-                  {t("stats.tokenIn", { p0: formatTokens(r.prompt_tokens) })}
-                </span>
-                <span className="w-14 text-right font-mono text-xs text-muted-foreground">
-                  {t("stats.tokenOut", { p0: formatTokens(r.completion_tokens) })}
-                </span>
-                <span
-                  className={cn(
-                    "w-14 text-right font-mono text-xs",
-                    r.cached_tokens > 0 ? "text-signal-info" : "text-muted-foreground",
-                  )}
-                >
-                  {t("stats.tokenCached", { p0: formatTokens(r.cached_tokens) })}
-                </span>
+                <TokenCell label={t("stats.input")} value={formatTokens(r.prompt_tokens)} />
+                <TokenCell label={t("stats.output")} value={formatTokens(r.completion_tokens)} />
+                <TokenCell
+                  label={t("stats.cached")}
+                  value={formatTokens(r.cached_tokens)}
+                  highlight={r.cached_tokens > 0}
+                />
               </div>
             ))}
           </div>
