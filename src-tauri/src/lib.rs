@@ -673,8 +673,17 @@ fn stats_clear_all(app: AppHandle) -> Result<Value, String> {
 }
 
 /// 检查本机端口是否被占用：尝试绑定 127.0.0.1:port，返回 `{ in_use, pid }`（pid 仅 Windows 可解析）。
+///
+/// 本代理自身正在监听该端口时不视为被占用（绑定探测必然失败，但占用者是自己，
+/// 配置页不应把「代理运行中」误报为「端口被外部程序占用」）。
 #[tauri::command]
-async fn port_check(port: u16) -> Result<Value, String> {
+async fn port_check(app: AppHandle, port: u16) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let own_port = ctx.proxy_state.config.read().unwrap().port;
+    let self_listening = ctx.proxy_state.is_running() && own_port == port;
+    if self_listening {
+        return Ok(json!({ "in_use": false, "pid": Value::Null }));
+    }
     match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(_) => Ok(json!({ "in_use": false, "pid": Value::Null })),
         Err(_) => Ok(json!({ "in_use": true, "pid": find_pid_for_port(port).map(|p| json!(p)).unwrap_or(Value::Null) })),

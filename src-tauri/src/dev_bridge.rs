@@ -328,7 +328,7 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
         "stats_clear_all" => Ok(to_value(crate::stats_clear_all(app()?)?)?),
 
         // ── 端口 / 开机自启 ──
-        "port_check" => Ok(to_value(crate::port_check(n("port").unwrap_or(0) as u16).await?)?),
+        "port_check" => Ok(to_value(crate::port_check(app()?, n("port").unwrap_or(0) as u16).await?)?),
         "port_free" => Ok(to_value(crate::port_free(n("port").unwrap_or(0) as u16).await?)?),
         "autostart_get" => Ok(json!(crate::autostart_get(app()?))),
         "autostart_set" => {
