@@ -1178,12 +1178,26 @@ pub fn run() {
                 }
             }
 
+            // 预热模型列表与套餐缓存：模型/套餐缓存启动时为空，首次进入模型列表页
+            // 若直接打上游（模型 1 个请求 + 套餐 whoami/subscriptions/credits 共 3 个，
+            // 每个最长 10s 超时），会让首次点击明显卡顿。这里异步预热，成功即写入
+            // 内存缓存（fetch_models 同时整表落库），用户首次进入时直接命中缓存。
+            let prewarm_state = proxy_state.clone();
             app.manage(AppCtx {
                 config_path,
                 usage_path,
                 proxy_state,
                 lifecycle: tokio::sync::Mutex::new(()),
             });
+            {
+                tauri::async_runtime::spawn(async move {
+                    let _ = proxy::cc_client::fetch_models(&prewarm_state).await;
+                    let key = credentials::accounts_from_state(&prewarm_state)
+                        .first()
+                        .map(|a| a.key.clone());
+                    proxy::plans::plan_context(&prewarm_state, key.as_deref(), false).await;
+                });
+            }
 
             // 启动开发调试桥接（仅 debug 构建），使浏览器直连前端页面也能调用后端命令
             #[cfg(debug_assertions)]
