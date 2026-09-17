@@ -1,5 +1,24 @@
 use serde_json::{json, Value};
 
+/// Command Code 上游状态码 → 下游（状态码, 错误类型）。
+///
+/// 抽成独立函数供 HTTP 错误体映射与流内 error 事件共用，避免两处映射表漂移。
+pub fn map_cc_status(cc_status: u16) -> (u16, &'static str) {
+    match cc_status {
+        400 => (400, "invalid_request_error"),
+        401 => (401, "authentication_error"),
+        402 => (429, "rate_limit_error"),
+        403 => (401, "authentication_error"),
+        404 => (404, "not_found"),
+        422 => (400, "invalid_request_error"),
+        429 => (429, "rate_limit_error"),
+        500 => (502, "upstream_error"),
+        502 => (502, "upstream_error"),
+        503 => (503, "temporarily_unavailable"),
+        _ => (502, "upstream_error"),
+    }
+}
+
 /// Command Code 上游 HTTP 状态 → 下游（OpenAI/Anthropic）状态与错误类型映射。
 ///
 /// - `cc_status`：上游返回的 HTTP 状态码；
@@ -12,19 +31,7 @@ use serde_json::{json, Value};
 /// OpenAI 错误体（`error.code`），供下游 SDK 与运维判定；Anthropic / Responses 路径
 /// 不直接使用本函数返回体、自行重包装，故不会泄漏 code。
 pub fn map_cc_error(cc_status: u16, cc_body: &str) -> (u16, Value) {
-    let mapped = match cc_status {
-        400 => (400, "invalid_request_error"),
-        401 => (401, "authentication_error"),
-        402 => (429, "rate_limit_error"),
-        403 => (401, "authentication_error"),
-        404 => (404, "not_found"),
-        422 => (400, "invalid_request_error"),
-        429 => (429, "rate_limit_error"),
-        500 => (502, "upstream_error"),
-        502 => (502, "upstream_error"),
-        503 => (503, "temporarily_unavailable"),
-        _ => (502, "upstream_error"),
-    };
+    let mapped = map_cc_status(cc_status);
 
     let mut message = format!("Command Code API error ({cc_status})");
     // 上游错误体：{"success":false,"error":{"code":"BAD_REQUEST"|"USAGE_EXCEEDED",...}}

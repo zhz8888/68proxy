@@ -633,7 +633,8 @@ pub fn convert_responses_to_openai(resp: &Value) -> Value {
 ///
 /// - `thinking_text`：推理内容，非空时作为首个 output 条目输出 `reasoning` 类型；
 /// - `tool_calls`：可选的工具调用列表（OpenAI Chat 格式的 tool_call 对象）；
-/// - `finish_reason == "length"` 时 status 置 incomplete 并附 max_output_tokens 原因。
+/// - 截断（`length` 家族）置 status=incomplete + max_output_tokens；
+///   `pause_turn` 同样是「还有内容没发完」，置 incomplete + pause_turn。
 pub fn build_responses_response(
     response_id: &str,
     model: &str,
@@ -676,7 +677,9 @@ pub fn build_responses_response(
             }));
         }
     }
-    let incomplete = finish_reason == "length";
+    let truncated = finish_reason == "length";
+    let paused = finish_reason == "pause_turn";
+    let incomplete = truncated || paused;
     let mut body = json!({
         "id": response_id,
         "object": "response",
@@ -693,8 +696,10 @@ pub fn build_responses_response(
             "output_tokens_details": { "reasoning_tokens": 0 },
         },
     });
-    if incomplete {
+    if truncated {
         body["incomplete_details"] = json!({ "reason": "max_output_tokens" });
+    } else if paused {
+        body["incomplete_details"] = json!({ "reason": "pause_turn" });
     } else {
         body["incomplete_details"] = Value::Null;
     }
@@ -1025,26 +1030,94 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
     openai_req
 }
 
-/// Command Code finishReason → OpenAI finish_reason（tool-calls 归一为 tool_calls，空值视为 stop，未知透传）。
+/// Command Code finishReason → 本代理内部规范化取值。
+///
+/// 对齐 CLI 的 normalizeStopReason / isNetworkFailureFinish：
+/// - `tool-calls` / `tool_calls` / `tool_use` → `tool_calls`
+/// - `length` / `max_tokens` / `max_output_tokens` / `model_context_window_exceeded` → `length`
+/// - `network-error` / `connection_error` / `upstream error` 等 → `upstream_error`
+/// - `pause_turn` 原样保留（表示这一轮被暂停、后面还有内容）
+/// - 未知值一律原样返回，不再静默折成 stop
+///
+/// 关键点：`length` 家族不止 `length` 一个值。`max_output_tokens` 与
+/// `model_context_window_exceeded` 同样是「输出被截断」，折成 stop/end_turn
+/// 等于把半截回答谎报成完整回答。
 pub fn map_finish_reason(reason: &str) -> String {
-    match reason {
-        "tool-calls" => "tool_calls".into(),
-        "length" => "length".into(),
-        "stop" => "stop".into(),
-        other if other.is_empty() => "stop".into(),
-        other => other.to_string(),
+    let r = reason.trim().to_lowercase();
+    if r.is_empty() {
+        return "stop".into();
+    }
+    match r.as_str() {
+        "tool-calls" | "tool_calls" | "tool_use" => "tool_calls".into(),
+        "length" | "max_tokens" | "max_output_tokens" | "model_context_window_exceeded" => "length".into(),
+        _ if is_network_failure_finish(&r) => "upstream_error".into(),
+        _ => r,
     }
 }
 
-/// OpenAI finish_reason → Anthropic stop_reason（tool_use / max_tokens / end_turn，未知一律 end_turn）。
+/// 结束原因是否为 provider 连接类失败（CLI 的 isNetworkFailureFinish）。
 ///
-/// 同时接受上游原始的 `tool-calls` 写法：调用方通常已用 `map_finish_reason` 归一，
-/// 但流式路径直接传入原始值时若漏归一，这里仍能正确映射为 tool_use。
+/// 形态：`network`/`connection`/`upstream` + 可选一个分隔符（`-`/`_`/空格）+ `error`。
+fn is_network_failure_finish(r: &str) -> bool {
+    ["network", "connection", "upstream"].iter().any(|prefix| {
+        r.strip_prefix(prefix)
+            .map(|rest| rest.strip_prefix(['-', '_', ' ']).unwrap_or(rest) == "error")
+            .unwrap_or(false)
+    })
+}
+
+/// 上游「没有正常走完 finish」的判定：返回可读原因，正常结束返回 None。
+///
+/// 两种情形 CLI 都当成可重试错误处理：
+/// - 流里根本没有完成信号 —— "Stream ended unexpectedly before completion (no finish event)"；
+/// - provider 报 network/connection/upstream 连接失败。
+///
+/// `saw_finish` 的口径是「上游给过任何完成信号」：终态 `finish`，以及上游实际在发的
+/// `finish-step` 都算。真正要拦的是「一个完成信号都没有就断了」。
+pub fn incomplete_upstream_detail(saw_finish: bool, finish_reason: &str) -> Option<&'static str> {
+    if !saw_finish {
+        return Some("no finish event");
+    }
+    if finish_reason == "upstream_error" {
+        return Some("provider reported an upstream connection failure");
+    }
+    None
+}
+
+/// 「未正常走完」的错误信息与重试间隔（502 可重试，与 CLI 同口径）。
+pub fn incomplete_upstream_error(detail: &str) -> (u16, String, Option<u64>) {
+    (
+        502,
+        format!("Upstream stream ended without a completion finish ({detail}) — response was truncated"),
+        Some(10),
+    )
+}
+
+/// 内部规范化 finish_reason → OpenAI finish_reason。
+///
+/// OpenAI 的枚举只有 stop / length / tool_calls / content_filter / function_call。
+/// `pause_turn`（Anthropic 原生）没有对应值：折成 `stop` 是谎报完成，
+/// 折成 `length` 至少如实表达「输出不完整」，下游的截断处理会做对的事。
+pub fn to_openai_finish_reason(finish_reason: &str) -> String {
+    if finish_reason == "pause_turn" {
+        "length".into()
+    } else {
+        finish_reason.to_string()
+    }
+}
+
+/// 内部规范化 finish_reason → Anthropic stop_reason。
+///
+/// `pause_turn` / `refusal` 是 Anthropic 原生枚举，必须原样透出：
+/// pause_turn 表示「这一轮被暂停，后面还有内容」，折成 end_turn 会让下游
+/// 把半截回答当成写完了（CLI 靠自动续写吸收它，代理不续写就必须如实上报）。
 pub fn map_anthropic_stop_reason(reason: &str) -> &'static str {
     match reason {
         "tool_calls" | "tool-calls" => "tool_use",
         "length" => "max_tokens",
         "stop" => "end_turn",
+        "pause_turn" => "pause_turn",
+        "refusal" => "refusal",
         _ => "end_turn",
     }
 }
@@ -1080,7 +1153,7 @@ pub fn build_openai_response(
         "choices": [{
             "index": 0,
             "message": message,
-            "finish_reason": finish_reason,
+            "finish_reason": to_openai_finish_reason(finish_reason),
         }],
         "usage": {
             "prompt_tokens": input_tokens,

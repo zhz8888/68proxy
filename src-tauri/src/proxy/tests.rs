@@ -582,6 +582,8 @@ fn responses_translator_reasoning_events() {
 fn responses_translator_reasoning_only_not_empty() {
     let mut t = ResponsesTranslator::new("m", "resp_r2");
     t.process_line(r#"{"type":"reasoning-delta","text":"只有思考"}"#);
+    // 上游必须给出完成信号，否则按「未正常走完」报错（不谎报成功）
+    t.process_line(r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":1,"outputTokens":1}}"#);
     let end = t.finalize();
     assert!(end.iter().any(|f| f.contains("response.completed")));
     assert!(!end.iter().any(|f| f.contains("response.failed")));
@@ -781,6 +783,25 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
             // 参数类错误（statusCode 400、不可重试）：下游应看到 400 而非 429
             return axum::response::Response::new(axum::body::Body::from(
                 "{\"type\":\"start\"}\n{\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"The system field can't be blank.\",\"statusCode\":400,\"isRetryable\":false}}\n",
+            ));
+        }
+        if parsed["params"]["model"] == "no-finish" {
+            // 有正文但流里根本没有 finish 事件（上游被截断）：不能谎报成功。
+            // 对齐 CLI："Stream ended unexpectedly before completion (no finish event)"。
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"半截回答\"}\n",
+            ));
+        }
+        if parsed["params"]["model"] == "max-output-tokens" {
+            // 截断类 finishReason 不止 length：max_output_tokens 同样表示被截断
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"text-delta\",\"text\":\"回答\"}\n{\"type\":\"finish\",\"finishReason\":\"max_output_tokens\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5}}\n",
+            ));
+        }
+        if parsed["params"]["model"] == "pause-turn" {
+            // Anthropic 原生枚举：这一轮被暂停、后面还有内容，不能折成正常结束
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"text-delta\",\"text\":\"部分\"}\n{\"type\":\"finish\",\"finishReason\":\"pause_turn\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5}}\n",
             ));
         }
         if parsed["params"]["model"] == "usage-only" {
@@ -1140,6 +1161,67 @@ async fn usage_only_response_is_not_zero_output() {
     let body: Value = res.json().await.unwrap();
     assert_eq!(body["stop_reason"], "max_tokens");
 
+    // Anthropic 流式：应正常收尾（message_delta + message_stop），而非错误帧。
+    // 该路径的零输出判定在 translator.finalize() 内部，与 chat 流式不在同一处。
+    let res = client
+        .post(format!("{base}/v1/messages"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "usage-only",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_tokens": 32,
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+    assert!(
+        !text.contains("Empty response from upstream"),
+        "Anthropic 流式不应下发零输出错误帧: {text}"
+    );
+    assert!(text.contains("message_stop"), "Anthropic 流式应正常收尾: {text}");
+
+    // Responses 非流式：同样是独立的判定点
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "usage-only",
+            "input": "hi",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "Responses 协议下同样不应判为零输出");
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["status"], "incomplete");
+    assert_eq!(body["incomplete_details"]["reason"], "max_output_tokens");
+
+    // Responses 流式：零输出判定在 ResponsesTranslator::finalize() 内部
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "usage-only",
+            "input": "hi",
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+    assert!(
+        !text.contains("Empty response from upstream"),
+        "Responses 流式不应下发零输出错误帧: {text}"
+    );
+    assert!(
+        text.contains("response.incomplete"),
+        "Responses 流式应报 incomplete 而非 completed: {text}"
+    );
+
     state.mark_stopped();
 }
 
@@ -1209,6 +1291,125 @@ async fn stream_error_event_is_propagated_not_masked_as_zero_output() {
         body["error"]["message"].as_str().unwrap_or("").contains("No available providers"),
         "Anthropic 错误体应含上游消息"
     );
+
+    state.mark_stopped();
+}
+
+/// 端到端：上游未正常走完 finish 时不谎报成功（对齐上游 #39）。
+///
+/// 三种情形：流里没有 finish 事件（被截断）、截断类 finishReason 的别名
+/// （max_output_tokens / model_context_window_exceeded）、pause_turn。
+#[tokio::test]
+async fn incomplete_upstream_is_not_reported_as_success() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+
+    // 情形一：有正文但流里没有 finish 事件 —— 非流式应报可重试错误而非 200
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "no-finish",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 502, "没有 finish 事件时不应谎报 200");
+    let body: Value = res.json().await.unwrap();
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(msg.contains("no finish event"), "错误消息应指明根因: {msg}");
+
+    // 流式同场景：应下发错误帧而不是 [DONE]
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "no-finish",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let text = res.text().await.unwrap();
+    assert!(
+        text.contains("no finish event") || text.contains("without a completion finish"),
+        "流式应告知上游被截断: {text}"
+    );
+
+    // 情形二：finishReason=max_output_tokens（length 家族别名）—— 不谎报 completed
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "max-output-tokens",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(
+        body["choices"][0]["finish_reason"], "length",
+        "max_output_tokens 应归一为 length: {body}"
+    );
+
+    // Anthropic 协议下同一 finishReason 应报 max_tokens 而非 end_turn
+    let res = client
+        .post(format!("{base}/v1/messages"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "max-output-tokens",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_tokens": 32,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["stop_reason"], "max_tokens", "截断类 finishReason 不折成 end_turn: {body}");
+
+    // 情形三：pause_turn —— Anthropic 原样透出，Responses 报 incomplete
+    let res = client
+        .post(format!("{base}/v1/messages"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "pause-turn",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_tokens": 32,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["stop_reason"], "pause_turn", "pause_turn 应原样透出: {body}");
+
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({ "model": "pause-turn", "input": "hi" }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["status"], "incomplete", "pause_turn 不应报 completed: {body}");
+    assert_eq!(body["incomplete_details"]["reason"], "pause_turn");
+
+    // OpenAI 协议下 pause_turn 折成 length（OpenAI 无该枚举，length 表达输出不完整）
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "pause-turn",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["choices"][0]["finish_reason"], "length", "pause_turn 应折成 length: {body}");
 
     state.mark_stopped();
 }
@@ -1687,6 +1888,9 @@ fn responses_translator_tool_flow() {
     all.extend(t.process_line(r#"{"type":"reasoning-delta","text":"think"}"#));
     all.extend(t.process_line(r#"{"type":"text-delta","text":"answer"}"#));
     all.extend(t.process_line(r#"{"type":"tool-call","toolCallId":"c1","toolName":"run","input":"{}"}"#));
+    // 完成信号：先 finish-step 给出 tool-calls（权威），再尾部 finish（仅 stop 回退）
+    all.extend(t.process_line(r#"{"type":"finish-step","finishReason":"tool-calls","usage":{"inputTokens":7,"outputTokens":3}}"#));
+    all.extend(t.process_line(r#"{"type":"finish","finishReason":"stop","totalUsage":{"inputTokens":7,"outputTokens":3}}"#));
     all.extend(t.finalize());
     let joined = all.join("");
     assert!(joined.contains("response.reasoning_summary_text.delta"));

@@ -1,7 +1,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::convert::{map_anthropic_stop_reason, map_finish_reason};
+use super::convert::{map_anthropic_stop_reason, map_finish_reason, to_openai_finish_reason};
 use super::log;
 use super::state::now_secs;
 
@@ -99,17 +99,38 @@ impl StreamError {
             .or_else(|| event.get("message").and_then(|v| v.as_str()))
             .unwrap_or("Unknown Command Code error")
             .to_string();
-        let status = event
-            .pointer("/error/statusCode")
-            .and_then(|v| v.as_u64())
-            .filter(|v| (100..600).contains(v))
-            .map(|v| v as u16)
+        // 优先取消息里的 "<NNN>" 前缀（CLI 同款约定），再取 error.statusCode。
+        // 上游对 provider 不可用/容量类失败会在 statusCode 里给出 429/503，
+        // 若一律塌成 502，客户端不会按限流退避、监控也会错归类成后端故障。
+        let from_prefix = message
+            .strip_prefix('<')
+            .and_then(|rest| rest.get(..3))
+            .and_then(|s| s.parse::<u16>().ok());
+        let status = from_prefix
+            .or_else(|| {
+                event
+                    .pointer("/error/statusCode")
+                    .and_then(|v| v.as_u64())
+                    .filter(|v| (100..600).contains(v))
+                    .map(|v| v as u16)
+            })
             .unwrap_or(502);
         let retryable = event
             .pointer("/error/isRetryable")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
         Self { status, message, retryable }
+    }
+
+    /// 映射后的下游（状态码, 错误类型）；与 HTTP 错误体走同一张映射表。
+    pub fn mapped(&self) -> (u16, &'static str) {
+        super::errors::map_cc_status(self.status)
+    }
+
+    /// 由「未正常走完 finish」的判定原因构造可重试错误（供 ZeroOutput 回退复用）。
+    pub fn incomplete(detail: &str) -> Self {
+        let (status, message, _) = super::convert::incomplete_upstream_error(detail);
+        Self { status, message, retryable: true }
     }
 }
 
@@ -138,6 +159,8 @@ pub struct OpenAiTranslator {
     pub cache_write_tokens: u64,
     /// 上游在流中下发的 error 事件（若有）；流结束判定时优先于「零输出」兜底。
     pub stream_error: Option<StreamError>,
+    /// 是否见过完成信号（finish / finish-step）；口径见 incomplete_upstream_detail。
+    saw_finish: bool,
 }
 
 impl OpenAiTranslator {
@@ -156,7 +179,14 @@ impl OpenAiTranslator {
             cached_tokens: 0,
             cache_write_tokens: 0,
             stream_error: None,
+            saw_finish: false,
         }
+    }
+
+    /// 上游是否正常走完 finish；未走完时返回可读原因（见 convert::incomplete_upstream_detail）。
+    pub fn incomplete_detail(&self) -> Option<&'static str> {
+        let finish_reason = self.finish_reason.clone().unwrap_or_default();
+        super::convert::incomplete_upstream_detail(self.saw_finish, &finish_reason)
     }
 
     /// 解析一行 Command Code NDJSON 事件，返回需要下发给下游的 SSE 帧列表（可能为空）。
@@ -239,6 +269,8 @@ impl OpenAiTranslator {
                 out.push(make_chunk(&self.completion_id, self.created, &self.model, delta, None, None));
             }
             "finish-step" => {
+                // 上游给过完成信号即算「已正常结束」（口径见 incomplete_upstream_detail）
+                self.saw_finish = true;
                 // finish_reason 与 usage 通常在 finish-step 就给出，先记录供 finish 帧缺省时回退
                 if let Some(fr) = event.get("finishReason").and_then(|v| v.as_str()) {
                     self.finish_reason = Some(map_finish_reason(fr));
@@ -251,6 +283,7 @@ impl OpenAiTranslator {
                 }
             }
             "finish" => {
+                self.saw_finish = true;
                 let fr = self
                     .finish_reason
                     .clone()
@@ -273,6 +306,8 @@ impl OpenAiTranslator {
                     "total_tokens": self.input_tokens + self.output_tokens,
                     "prompt_tokens_details": { "cached_tokens": self.cached_tokens },
                 });
+                // pause_turn 在 OpenAI 无对应枚举，折成 length（如实表达输出不完整）
+                let fr = to_openai_finish_reason(&fr);
                 out.push(make_chunk(&self.completion_id, self.created, &self.model, serde_json::json!({}), Some(&fr), Some(usage)));
             }
             "error" => {
@@ -366,6 +401,8 @@ pub struct ResponsesTranslator {
     pub has_error: bool,
     /// 上游在流中下发的 error 事件（若有）；无内容回退时优先透传真实错误。
     pub stream_error: Option<StreamError>,
+    /// 是否见过完成信号（finish / finish-step）；口径见 incomplete_upstream_detail。
+    saw_finish: bool,
 }
 
 impl ResponsesTranslator {
@@ -395,6 +432,7 @@ impl ResponsesTranslator {
             produced_content: false,
             has_error: false,
             stream_error: None,
+            saw_finish: false,
         }
     }
 
@@ -434,6 +472,12 @@ impl ResponsesTranslator {
     /// 零输出判定以此为准而非 output_tokens：上游未回报 usage 时 output_tokens 可能为 0。
     pub fn produced_content(&self) -> bool {
         self.produced_content
+    }
+
+    /// 上游是否正常走完 finish；未走完时返回可读原因（见 convert::incomplete_upstream_detail）。
+    pub fn incomplete_detail(&self) -> Option<&'static str> {
+        let finish_reason = self.stop_reason.clone().unwrap_or_default();
+        super::convert::incomplete_upstream_detail(self.saw_finish, &finish_reason)
     }
 
     /// 按 Responses 协议字段名组装 usage 对象。
@@ -654,8 +698,12 @@ impl ResponsesTranslator {
                 self.output_tokens += 20;
             }
             "finish-step" | "finish" => {
+                // 上游给过完成信号即算「已正常结束」（口径见 incomplete_upstream_detail）
+                self.saw_finish = true;
+                // 必须归一化：截断类不止 length（还有 max_output_tokens /
+                // model_context_window_exceeded），直接比对原始值会漏判成 completed。
                 if let Some(fr) = event.get("finishReason").and_then(|v| v.as_str()) {
-                    self.stop_reason = Some(fr.to_string());
+                    self.stop_reason = Some(map_finish_reason(fr));
                 }
                 let u = event
                     .get("totalUsage")
@@ -696,9 +744,10 @@ impl ResponsesTranslator {
 
     /// 流结束收尾：关闭未完结条目并补发 response.completed / response.failed。
     ///
-    /// 已出错过（has_error）时返回空；无任何实际内容（文本/思考/工具调用）视为上游
-    /// 空响应，发 failed + rate_limit_error；finishReason 为 length 时 status 置
-    /// incomplete 并附 max_output_tokens 原因。
+    /// 已出错过（has_error）时返回空；上游未正常走完 finish（无完成信号/provider 连接
+    /// 失败）时发 failed + upstream_error，不谎报完成；无任何实际内容（文本/思考/
+    /// 工具调用）视为上游空响应，发 failed + rate_limit_error；截断（length 家族）与
+    /// pause_turn 置 status=incomplete。
     pub fn finalize(&mut self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         if self.has_error {
@@ -706,7 +755,27 @@ impl ResponsesTranslator {
         }
         self.close_reasoning_item(&mut out);
         self.close_text_item(&mut out);
-        if self.output_items.is_empty() {
+        // 上游没有正常走完 finish：不能报 completed（那是把截断谎报成完整回答）。
+        // 必须排在零输出判定之前——上游压根没发 finish 时，「no finish event」才是根因。
+        let finish_norm = self.stop_reason.clone().unwrap_or_default();
+        if let Some(detail) = super::convert::incomplete_upstream_detail(self.saw_finish, &finish_norm) {
+            log::warn(&format!("Upstream stream incomplete (Responses): {detail}"));
+            let (_, message, _) = super::convert::incomplete_upstream_error(detail);
+            out.push(self.sse(
+                "response.failed",
+                serde_json::json!({
+                    "type": "response.failed",
+                    "response": { "id": self.response_id, "object": "response", "created_at": self.created_at,
+                        "status": "failed", "model": self.model, "output": [],
+                        "error": { "type": "upstream_error", "message": message } },
+                }),
+            ));
+            return out;
+        }
+        // 无任何实际内容条目，且上游也没回报输出 token 时才判定为空响应。
+        // 只看条目会在「上游只回 usage 元数据、不发内容事件」时（max_tokens 截断的
+        // 思考型模型）把有输出的响应误杀成限流错误。
+        if self.output_items.is_empty() && self.output_tokens == 0 {
             out.push(self.sse(
                 "response.failed",
                 serde_json::json!({
@@ -719,15 +788,19 @@ impl ResponsesTranslator {
             return out;
         }
         let items = std::mem::take(&mut self.output_items);
-        let mut response = self.skeleton("completed", items);
-        if self.stop_reason.as_deref() == Some("length") {
-            response["status"] = serde_json::json!("incomplete");
+        let truncated = finish_norm == "length";
+        let paused = finish_norm == "pause_turn";
+        let incomplete = truncated || paused;
+        let mut response = self.skeleton(if incomplete { "incomplete" } else { "completed" }, items);
+        if truncated {
             response["incomplete_details"] = serde_json::json!({ "reason": "max_output_tokens" });
+        } else if paused {
+            response["incomplete_details"] = serde_json::json!({ "reason": "pause_turn" });
         }
         response["usage"] = self.usage_value();
         out.push(self.sse(
-            "response.completed",
-            serde_json::json!({ "type": "response.completed", "response": response }),
+            if incomplete { "response.incomplete" } else { "response.completed" },
+            serde_json::json!({ "type": if incomplete { "response.incomplete" } else { "response.completed" }, "response": response }),
         ));
         out
     }
@@ -768,6 +841,10 @@ pub struct AnthropicTranslator {
     pub has_error: bool,
     /// 上游在流中下发的 error 事件（若有）；无内容回退时优先透传真实错误。
     pub stream_error: Option<StreamError>,
+    /// 归一化后的 finishReason（未过 map_anthropic_stop_reason），供「是否正常结束」判定。
+    finish_norm: Option<String>,
+    /// 是否见过完成信号（finish / finish-step）；口径见 incomplete_upstream_detail。
+    saw_finish: bool,
 }
 
 impl AnthropicTranslator {
@@ -791,7 +868,15 @@ impl AnthropicTranslator {
             produced_content: false,
             has_error: false,
             stream_error: None,
+            finish_norm: None,
+            saw_finish: false,
         }
+    }
+
+    /// 上游是否正常走完 finish；未走完时返回可读原因（见 convert::incomplete_upstream_detail）。
+    pub fn incomplete_detail(&self) -> Option<&'static str> {
+        let finish_reason = self.finish_norm.clone().unwrap_or_default();
+        super::convert::incomplete_upstream_detail(self.saw_finish, &finish_reason)
     }
 
     /// 流开始时的 message_start 事件（usage 先置 0，最终以 message_delta 回报为准）。
@@ -968,18 +1053,21 @@ impl AnthropicTranslator {
                 // 必须先经 map_finish_reason 归一，否则 map_anthropic_stop_reason 会落到
                 // end_turn，客户端据此判定回合结束、不再执行 tool_use。
                 // finish-step 为权威来源；尾部 finish 仅在尚无值时回退，避免其 "stop" 覆盖前者。
+                self.saw_finish = true;
                 if event_type == "finish-step" {
                     if let Some(fr) = event.get("finishReason").and_then(|v| v.as_str()) {
-                        self.stop_reason =
-                            Some(map_anthropic_stop_reason(&map_finish_reason(fr)).to_string());
+                        let norm = map_finish_reason(fr);
+                        self.stop_reason = Some(map_anthropic_stop_reason(&norm).to_string());
+                        self.finish_norm = Some(norm);
                     }
                 } else if self.stop_reason.is_none() {
                     let fr = event
                         .get("finishReason")
                         .and_then(|v| v.as_str())
                         .unwrap_or("stop");
-                    self.stop_reason =
-                        Some(map_anthropic_stop_reason(&map_finish_reason(fr)).to_string());
+                    let norm = map_finish_reason(fr);
+                    self.stop_reason = Some(map_anthropic_stop_reason(&norm).to_string());
+                    self.finish_norm = Some(norm);
                 }
                 let u = event
                     .get("totalUsage")
@@ -1033,9 +1121,30 @@ impl AnthropicTranslator {
         if !close_block.is_empty() {
             out.push(close_block);
         }
-        // 以「是否产出过内容」而非 output_tokens==0 判定空响应：上游未回报 usage 时
-        // output_tokens 可能为 0，但正文已经流式输出，不能误发限流错误
-        if !self.produced_content {
+        // 上游没有正常走完 finish（无完成信号 / provider 报连接失败）：
+        // 绝不能补一个 end_turn 就 message_stop——那等于把截断谎报成完整回答。
+        // 与 CLI 同口径按可重试错误处理，且必须排在零输出判定之前
+        //（上游压根没发 finish 时，「no finish event」才是根因）。
+        let finish_norm = self.finish_norm.clone().unwrap_or_default();
+        if let Some(detail) = super::convert::incomplete_upstream_detail(self.saw_finish, &finish_norm) {
+            log::warn(&format!("Upstream stream incomplete (Anthropic): {detail}"));
+            let (_, message, _) = super::convert::incomplete_upstream_error(detail);
+            out.push(format!(
+                "event: error\ndata: {}\n\n",
+                serde_json::json!({
+                    "type": "error",
+                    "error": { "type": "upstream_error", "message": message },
+                })
+            ));
+            return out;
+        }
+        // 以「是否产出过内容」或「上游是否回报了输出 token」判定空响应：
+        // - 上游未回报 usage 时 output_tokens 可能为 0，但正文已经流式输出；
+        // - 反之（如 meta/muse-spark 系列在 max_tokens 截断时）上游只回 usage 元数据
+        //   （outputTokenDetails.textTokens/reasoningTokens）、不下发任何内容事件，
+        //   此时按内容判定会把有输出的响应误杀成限流错误。
+        // 两者任成立即视为有输出。
+        if !self.produced_content && self.output_tokens == 0 {
             out.push(format!(
                 "event: error\ndata: {}\n\n",
                 serde_json::json!({

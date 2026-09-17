@@ -375,26 +375,31 @@ fn sse_response(
                     }
                     Some(Some(Frame::ZeroOutput(err))) => {
                         // 零输出帧正常应在首帧前被 handle_stream 拦截；此处为兜底：
-                        // 已发出 SSE 头，只能用协议错误帧收尾（有上游错误则透传其消息）
+                        // 已发出 SSE 头，只能用协议错误帧收尾（有上游错误则透传消息与类型）
                         finish_request(&st, &ctx, "error");
-                        let (msg, retry) = match err {
-                            Some(e) => (e.message, e.retryable.then_some(10)),
+                        let (msg, retry, etype) = match err {
+                            Some(e) => {
+                                let (_, etype) = e.mapped();
+                                (e.message, e.retryable.then_some(10), Some(etype))
+                            }
                             None => (
                                 "Empty response from upstream (zero output tokens)".to_string(),
                                 Some(10),
+                                Some("rate_limit_error"),
                             ),
                         };
-                        pending = Some(protocol_error_frame(protocol, &msg, retry));
+                        pending = Some(protocol_error_frame(protocol, &msg, retry, etype));
                         ended = true;
                     }
                     Some(Some(Frame::Timeout)) => {
                         finish_request(&st, &ctx, "timeout");
-                        pending = Some(protocol_error_frame(protocol, &timeout_message(&st), None));
+                        pending = Some(protocol_error_frame(protocol, &timeout_message(&st), None, Some("rate_limit_error")));
                         ended = true;
                     }
-                    Some(Some(Frame::Error(msg))) => {
+                    Some(Some(Frame::Error { message, retryable })) => {
                         finish_request(&st, &ctx, "error");
-                        pending = Some(protocol_error_frame(protocol, &msg, None));
+                        // 读流出错属传输层故障，可重试时给退避提示
+                        pending = Some(protocol_error_frame(protocol, &message, retryable.then_some(10), None));
                         ended = true;
                     }
                     Some(None) | None => {
@@ -429,10 +434,12 @@ enum Protocol {
 }
 
 /// 按协议构造流内错误帧（响应头已发出、无法改状态码时使用）。
-fn protocol_error_frame(protocol: Protocol, msg: &str, retry_after: Option<u64>) -> String {
+///
+/// `err_type` 为下游错误类型（来自映射表或上游透传）；`None` 时用各协议的通用类型。
+fn protocol_error_frame(protocol: Protocol, msg: &str, retry_after: Option<u64>, err_type: Option<&str>) -> String {
     match protocol {
         Protocol::OpenAi => {
-            let mut body = json!({ "error": { "message": msg, "type": "proxy_error" } });
+            let mut body = json!({ "error": { "message": msg, "type": err_type.unwrap_or("proxy_error") } });
             if let Some(ra) = retry_after {
                 body["retry_after"] = json!(ra);
             }
@@ -440,13 +447,13 @@ fn protocol_error_frame(protocol: Protocol, msg: &str, retry_after: Option<u64>)
         }
         Protocol::Anthropic => format!(
             "event: error\ndata: {}\n\n",
-            json!({ "type": "error", "error": { "type": "internal_error", "message": msg } })
+            json!({ "type": "error", "error": { "type": err_type.unwrap_or("internal_error"), "message": msg } })
         ),
         Protocol::Responses => format!(
             "event: response.failed\ndata: {}\n\n",
             json!({ "type": "response.failed", "response": {
                 "object": "response", "status": "failed",
-                "error": { "type": "server_error", "message": msg },
+                "error": { "type": err_type.unwrap_or("server_error"), "message": msg },
             } })
         ),
     }
@@ -581,8 +588,8 @@ enum Frame {
     ZeroOutput(Option<super::sse::StreamError>),
     /// 上游空闲超时。
     Timeout,
-    /// 上游读流出错，携带错误消息。
-    Error(String),
+    /// 上游读流出错，携带错误消息与可重试性（不可重试时不附 retry_after 暗示重试）。
+    Error { message: String, retryable: bool },
 }
 
 /// 发送帧到下游通道。返回 false 表示下游不可写（客户端断连，或僵死超过
@@ -1156,17 +1163,15 @@ async fn handle_stream(
             }
             Some(Frame::ZeroOutput(err)) => {
                 // 上游未产出任何内容：尚未发 SSE 头，直接以 JSON 错误响应回退。
-                // 携带上游 error 事件时透传其真实状态与消息（provider 不可用、
-                // 参数被拒等业务错误不该被伪装成限流）；否则回退为限流 429。
+                // 携带上游 error 事件时透传其状态（经映射表，与 HTTP 错误体同口径），
+                // 使「provider 不可用 / 参数被拒」等业务错误不被伪装成限流 429。
                 reset_timeouts(&st);
                 finish_request(&st, &ctx, "error");
                 let (status, etype, message, retry_after) = match err {
-                    Some(e) => (
-                        e.status,
-                        if e.status == 429 { "rate_limit_error" } else { "upstream_error" },
-                        e.message,
-                        e.retryable.then_some(10),
-                    ),
+                    Some(e) => {
+                        let (status, etype) = e.mapped();
+                        (status, etype, e.message, e.retryable.then_some(10))
+                    }
                     None => (
                         429,
                         "rate_limit_error",
@@ -1200,19 +1205,21 @@ async fn handle_stream(
                     Some(5),
                 );
             }
-            Some(Frame::Error(msg)) => {
+            Some(Frame::Error { message: msg, retryable }) => {
                 finish_request(&st, &ctx, "error");
+                // 尚未下发 SSE 头，可按传输层错误返回 JSON；可重试时给退避提示
+                let retry_after = retryable.then_some(10);
                 return json_response(
                     502,
                     match protocol {
                         Protocol::OpenAi | Protocol::Responses => {
-                            errors::openai_error(502, "proxy_error", &msg, Some(10)).1
+                            errors::openai_error(502, "proxy_error", &msg, retry_after).1
                         }
                         Protocol::Anthropic => {
-                            errors::anthropic_error(502, "proxy_error", &msg, Some(10)).1
+                            errors::anthropic_error(502, "proxy_error", &msg, retry_after).1
                         }
                     },
-                    Some(10),
+                    retry_after,
                 );
             }
             None => {
@@ -1257,7 +1264,7 @@ async fn stream_openai(
             Ok(Some(Ok(c))) => c,
             Ok(Some(Err(e))) => {
                 log::error(&format!("Stream read error: {e}"));
-                let _ = send_frame(&tx, Frame::Error(e.to_string()), drain).await;
+                let _ = send_frame(&tx, Frame::Error { message: e.to_string(), retryable: true }, drain).await;
                 return;
             }
             Ok(None) => break,
@@ -1307,6 +1314,35 @@ async fn stream_openai(
     // 内容事件并未下发，按内容判定会误杀。
     let produced = translator.produced_content() || translator.output_tokens > 0;
     record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true, produced);
+    // 上游发过 error 事件时以错误收尾（即使已产出部分内容）：错误优先，
+    // 否则下游会拿到一个被静默截断的「正常完成」。与 CLI 对 error 事件抛异常一致。
+    if let Some(e) = &translator.stream_error {
+        let (_, etype) = e.mapped();
+        let retry = e.retryable.then_some(10);
+        let _ = send_frame(
+            &tx,
+            Frame::Sse(protocol_error_frame(Protocol::OpenAi, &e.message, retry, Some(etype))),
+            drain,
+        )
+        .await;
+        let _ = send_frame(&tx, Frame::Done, drain).await;
+        return;
+    }
+    // 上游没走完 finish（无完成信号 / provider 连接失败）时同样以错误收尾：
+    // 有正文也不能补 finish_reason 就 [DONE]，那等于把截断谎报成完整回答。
+    if let Some(detail) = translator.incomplete_detail() {
+        log::warn(&format!("Upstream stream incomplete (OpenAI): {detail}"));
+        let e = super::sse::StreamError::incomplete(detail);
+        let (_, etype) = e.mapped();
+        let _ = send_frame(
+            &tx,
+            Frame::Sse(protocol_error_frame(Protocol::OpenAi, &e.message, e.retryable.then_some(10), Some(etype))),
+            drain,
+        )
+        .await;
+        let _ = send_frame(&tx, Frame::Done, drain).await;
+        return;
+    }
     if produced {
         let _ = send_frame(&tx, Frame::Sse(translator.done_event()), drain).await;
         let _ = send_frame(&tx, Frame::Done, drain).await;
@@ -1346,7 +1382,7 @@ async fn stream_anthropic(
             Ok(Some(Ok(c))) => c,
             Ok(Some(Err(e))) => {
                 log::error(&format!("Stream read error: {e}"));
-                let _ = send_frame(&tx, Frame::Error(e.to_string()), drain).await;
+                let _ = send_frame(&tx, Frame::Error { message: e.to_string(), retryable: true }, drain).await;
                 return;
             }
             Ok(None) => break,
@@ -1385,8 +1421,16 @@ async fn stream_anthropic(
     }
     if !translator.produced_content && translator.output_tokens == 0 {
         // 未产出任何内容：message_start 仍缓存在首帧前缀中未下发，
-        // 直接以 ZeroOutput 让首帧循环回退为 JSON 错误响应（携带上游真实错误）
-        let _ = send_frame(&tx, Frame::ZeroOutput(translator.stream_error.clone()), drain).await;
+        // 直接以 ZeroOutput 让首帧循环回退为 JSON 错误响应（携带上游真实错误）。
+        // 未正常走完 finish 时优先报「没有完成信号」，而非误报空响应 429。
+        let err = match translator.incomplete_detail() {
+            Some(detail) => {
+                log::warn(&format!("Upstream stream incomplete (Anthropic): {detail}"));
+                Some(super::sse::StreamError::incomplete(detail))
+            }
+            None => translator.stream_error.clone(),
+        };
+        let _ = send_frame(&tx, Frame::ZeroOutput(err), drain).await;
         return;
     }
     for f in translator.finalize() {
@@ -1445,7 +1489,7 @@ async fn stream_responses(
             Ok(Some(Ok(c))) => c,
             Ok(Some(Err(e))) => {
                 log::error(&format!("Stream read error: {e}"));
-                let _ = send_frame(&tx, Frame::Error(e.to_string()), drain).await;
+                let _ = send_frame(&tx, Frame::Error { message: e.to_string(), retryable: true }, drain).await;
                 return;
             }
             Ok(None) => break,
@@ -1484,8 +1528,16 @@ async fn stream_responses(
     }
     if !translator.produced_content() && translator.output_tokens == 0 {
         // 未产出任何内容：response.created 仍缓存在首帧前缀中未下发，
-        // 直接以 ZeroOutput 让首帧循环回退为 JSON 错误响应（携带上游真实错误）
-        let _ = send_frame(&tx, Frame::ZeroOutput(translator.stream_error.clone()), drain).await;
+        // 直接以 ZeroOutput 让首帧循环回退为 JSON 错误响应（携带上游真实错误）。
+        // 未正常走完 finish 时优先报「没有完成信号」，而非误报空响应 429。
+        let err = match translator.incomplete_detail() {
+            Some(detail) => {
+                log::warn(&format!("Upstream stream incomplete (Responses): {detail}"));
+                Some(super::sse::StreamError::incomplete(detail))
+            }
+            None => translator.stream_error.clone(),
+        };
+        let _ = send_frame(&tx, Frame::ZeroOutput(err), drain).await;
         return;
     }
     for f in translator.finalize() {
@@ -1618,6 +1670,7 @@ async fn handle_nonstream(
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut last_event = String::new();
     let mut stream_error: Option<super::sse::StreamError> = None;
+    let mut saw_finish = false;
 
     loop {
         let chunk = match tokio::time::timeout(NONSTREAM_IDLE_TIMEOUT, stream.next()).await {
@@ -1646,6 +1699,7 @@ async fn handle_nonstream(
                 &mut tool_calls,
                 &mut last_event,
                 &mut stream_error,
+                &mut saw_finish,
             );
         }
     }
@@ -1659,6 +1713,7 @@ async fn handle_nonstream(
             &mut tool_calls,
             &mut last_event,
             &mut stream_error,
+            &mut saw_finish,
         );
     }
 
@@ -1671,6 +1726,29 @@ async fn handle_nonstream(
         input = 0;
         cached = 0;
     }
+    // 上游发过 error 事件时无条件以错误收尾（与 CLI 对 error 事件抛异常一致）：
+    // 即使已聚合出部分内容，继续回 200 会让下游把被截断的回答当成完整回答。
+    if let Some(e) = stream_error {
+        log::warn(&format!(
+            "Command Code stream error surfaced to client: {} (status {})",
+            e.message, e.status
+        ));
+        finish_request(&st, &ctx, "error");
+        let (status, etype) = e.mapped();
+        let retry_after = e.retryable.then_some(10);
+        return nonstream_error_typed(protocol, status, etype, &e.message, retry_after);
+    }
+
+    // 上游没有正常走完 finish（无完成信号 / provider 连接失败）：不能补一个
+    // finish_reason 就返回 200——那等于把截断谎报成完整回答。必须排在零输出判定
+    // 之前：上游压根没发 finish 时，「no finish event」才是根因，按 429 报会掩盖它。
+    if let Some(detail) = convert::incomplete_upstream_detail(saw_finish, &finish_reason) {
+        log::warn(&format!("Upstream stream incomplete (non-stream): {detail}"));
+        finish_request(&st, &ctx, "error");
+        let (status, message, retry_after) = convert::incomplete_upstream_error(detail);
+        return nonstream_error(protocol, status, &message, retry_after);
+    }
+
     // 零输出判定：三种协议一律按实际聚合内容判定——上游偶发不回 usage 时，
     // 按 usage 判定会把已产出完整文本的响应误杀成 429 并丢弃正文。
     //
@@ -1684,8 +1762,9 @@ async fn handle_nonstream(
         // 上游已下发 error 事件时透传其真实原因与状态码：否则 provider 不可用、
         // 参数被拒等业务错误会被「空响应 429」掩盖，下游无法区分该换模型还是重试。
         if let Some(e) = stream_error {
+            let (status, etype) = e.mapped();
             let retry_after = e.retryable.then_some(10);
-            return nonstream_error(protocol, e.status, &e.message, retry_after);
+            return nonstream_error_typed(protocol, status, etype, &e.message, retry_after);
         }
         return nonstream_error(
             protocol,
@@ -1784,6 +1863,21 @@ fn nonstream_error(protocol: Protocol, status: u16, msg: &str, retry_after: Opti
     json_response(status, body, retry_after)
 }
 
+/// 同 `nonstream_error`，但由调用方指定错误类型（用于透传上游 error 事件的映射结果）。
+fn nonstream_error_typed(
+    protocol: Protocol,
+    status: u16,
+    err_type: &str,
+    msg: &str,
+    retry_after: Option<u64>,
+) -> axum::response::Response {
+    let (status, body) = match protocol {
+        Protocol::OpenAi | Protocol::Responses => errors::openai_error(status, err_type, msg, retry_after),
+        Protocol::Anthropic => errors::anthropic_error(status, err_type, msg, retry_after),
+    };
+    json_response(status, body, retry_after)
+}
+
 /// 从 Command Code usage 对象提取 (输入, 输出, 缓存命中) token 数，缺失一律按 0。
 fn usage_tokens(usage: &Option<Value>) -> (u64, u64, u64) {
     let u = match usage {
@@ -1811,6 +1905,7 @@ fn parse_ndjson_line(
     tool_calls: &mut Vec<Value>,
     last_event: &mut String,
     stream_error: &mut Option<super::sse::StreamError>,
+    saw_finish: &mut bool,
 ) {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed == "[DONE]" || trimmed.starts_with(':') {
@@ -1828,10 +1923,16 @@ fn parse_ndjson_line(
     match event_type.as_str() {
         "text-start" | "reasoning-start" | "start" | "start-step" => {}
         "finish-step" => {
+            // 上游给过完成信号即算「已正常结束」（口径见 incomplete_upstream_detail）
+            *saw_finish = true;
             // 与流式翻译器一致：上游常在 finish-step 就给出 usage（键名为 usage），
             // 若此处不读、finish 又恰好缺 totalUsage，会把已产出正文的响应误判为空响应。
             if let Some(u) = event.get("usage").cloned() {
                 *usage = Some(u);
+            }
+            // finish_reason 同样在 finish-step 就给出时记录，供 finish 缺省回退
+            if let Some(fr) = event.get("finishReason").and_then(|v| v.as_str()) {
+                *finish_reason = convert::map_finish_reason(fr);
             }
         }
         "text-delta" => {
@@ -1861,6 +1962,7 @@ fn parse_ndjson_line(
             }));
         }
         "finish" => {
+            *saw_finish = true;
             *finish_reason = convert::map_finish_reason(event.get("finishReason").and_then(|v| v.as_str()).unwrap_or("stop"));
             // 上游偶发不回 totalUsage，此时回退到 usage 键，并保留 finish-step 已记录的值
             if let Some(u) = event.get("totalUsage").cloned().or_else(|| event.get("usage").cloned()) {
