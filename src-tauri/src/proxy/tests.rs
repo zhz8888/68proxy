@@ -8,6 +8,8 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::Router;
+use bytes::Bytes;
+use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -891,6 +893,26 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
                 "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"Hello\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"inputTokenDetails\":{\"cacheReadTokens\":3}}}\n",
             ));
         }
+        // 上游思考阶段完全静默：模型名 `idle-gap-<毫秒>` 指定首字节后的静默时长，
+        // 之后才吐正文。meta/muse-spark 系列的思考停顿就是这么产生的（上游不下发
+        // reasoning-delta，纯静默数十秒），用于验证代理的空闲超时不会误杀健康请求。
+        if let Some(ms) = parsed["params"]["model"]
+            .as_str()
+            .and_then(|m| m.strip_prefix("idle-gap-"))
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            let head: Result<Bytes, std::io::Error> =
+                Ok(Bytes::from("{\"type\":\"start\"}\n{\"type\":\"start-step\"}\n"));
+            let tail: Result<Bytes, std::io::Error> = Ok(Bytes::from(
+                "{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"思考完的正文\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":10,\"outputTokens\":5,\"inputTokenDetails\":{\"cacheReadTokens\":0}}}\n",
+            ));
+            let first = futures_util::stream::once(async move { head });
+            let second = futures_util::stream::once(async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                tail
+            });
+            return axum::response::Response::new(axum::body::Body::from_stream(first.chain(second)));
+        }
         if parsed["params"]["model"] == "no-usage" {
             // 有正文但 finish 不回报 usage：验证非流式零输出按实际内容判定而非 usage
             return axum::response::Response::new(axum::body::Body::from(
@@ -1142,6 +1164,134 @@ async fn chat_completions_streaming() {
     assert!(text.contains("\"content\":\"Hello\""));
     assert!(text.contains("data: [DONE]"));
     assert!(text.contains("\"completion_tokens\":5"));
+    state.mark_stopped();
+}
+
+/// 端到端：上游思考阶段长时间静默（不发任何字节）不应被空闲超时误杀。
+///
+/// 回归：上游对思考型模型（如 meta/muse-spark-1.3-contributor）在思考阶段完全不下发
+/// 事件——实测静默 50~55 秒，长思考可达 395 秒以上，之后才吐正文。此前硬编码的 30s
+/// 空闲超时会把这类健康请求判死（HTTP 429「Response timeout」），而官方 CLI 对上游
+/// 不设任何 idle timeout。
+/// 三条协议入口共用同一读流逻辑，必须逐一覆盖。
+#[tokio::test]
+async fn upstream_silence_is_tolerated_by_default() {
+    // 默认配置（不限空闲超时）下，静默 1.5s 后必须仍能拿到完整正文
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    for (path, body) in [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "idle-gap-1500",
+                "messages": [{ "role": "user", "content": "hi" }],
+                "stream": true,
+            }),
+        ),
+        (
+            "/v1/messages",
+            json!({
+                "model": "idle-gap-1500",
+                "messages": [{ "role": "user", "content": "hi" }],
+                "stream": true,
+            }),
+        ),
+        (
+            "/v1/responses",
+            json!({
+                "model": "idle-gap-1500",
+                "input": [{ "role": "user", "content": [{ "type": "input_text", "text": "hi" }] }],
+                "stream": true,
+            }),
+        ),
+    ] {
+        let res = client
+            .post(format!("{base}{path}"))
+            .header("Authorization", "Bearer sk-test-local-key-123")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200, "{path} 静默期间不应被空闲超时判死");
+        let text = res.text().await.unwrap();
+        assert!(
+            text.contains("思考完的正文"),
+            "{path} 应拿到静默之后的完整正文，实际: {text}"
+        );
+        assert!(
+            !text.contains("Response timeout"),
+            "{path} 不应出现超时错误帧，实际: {text}"
+        );
+    }
+    state.mark_stopped();
+}
+
+/// 端到端：显式配置空闲超时后，超过阈值的静默仍会被判为超时（该兜底能力未被移除）。
+#[tokio::test]
+async fn configured_stream_idle_timeout_still_fires() {
+    let (base, state) = start_proxy_impl(None, |c| c.stream_idle_timeout_secs = 1).await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "idle-gap-2500",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    // 静默 2.5s > 配置的 1s：应判超时（首帧前回退为 JSON 429）
+    assert_eq!(res.status(), 429);
+    let text = res.text().await.unwrap();
+    assert!(
+        text.contains("Response timeout"),
+        "配置了超时后应报超时，实际: {text}"
+    );
+    state.mark_stopped();
+}
+
+/// 端到端：非流式路径的静默同样默认不被误杀，仅显式配置后才判超时。
+#[tokio::test]
+async fn nonstream_silence_respects_configured_timeout() {
+    // 默认不限：静默 1.5s 仍应成功
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "idle-gap-1500",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "非流式静默不应被空闲超时判死");
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "思考完的正文");
+    state.mark_stopped();
+
+    // 显式配置 1s：静默 2.5s 应判超时
+    let (base, state) = start_proxy_impl(None, |c| c.nonstream_idle_timeout_secs = 1).await;
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "idle-gap-2500",
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 429);
+    let body: Value = res.json().await.unwrap();
+    assert!(
+        body["error"]["message"].as_str().unwrap_or("").contains("timeout")
+            || body["error"]["message"].as_str().unwrap_or("").contains("Response timeout"),
+        "应报超时，实际: {body}"
+    );
     state.mark_stopped();
 }
 

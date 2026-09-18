@@ -34,6 +34,10 @@ export interface Config {
   max_body_mb: number;
   /** 下游写缓冲背压僵死看门狗（毫秒），0 表示禁用。 */
   client_drain_timeout_ms: number;
+  /** 流式响应上游空闲超时（秒），0 表示不限（默认）。 */
+  stream_idle_timeout_secs: number;
+  /** 非流式响应上游空闲超时（秒），0 表示不限（默认）。 */
+  nonstream_idle_timeout_secs: number;
   /** 进程内在途请求上限，0 表示不限。 */
   max_inflight: number;
   /** 界面主题：system（跟随系统）/ dark / light。 */

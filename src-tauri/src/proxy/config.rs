@@ -156,6 +156,14 @@ pub struct Config {
     pub max_body_mb: u32,
     /// 下游写缓冲背压僵死看门狗（毫秒），0 表示禁用（不主动断开僵死客户端）。
     pub client_drain_timeout_ms: u64,
+    /// 流式响应两次上游数据之间的最大空闲时间（秒），0 表示不限（默认）。
+    ///
+    /// 上游对思考型模型在思考阶段完全不发事件（实测静默 50~55 秒，长思考可达 395 秒
+    /// 以上），官方 CLI 对上游也不设任何 idle timeout；默认不限可避免把健康请求误判为
+    /// 超时，仅在显式配置后才启用该兜底。
+    pub stream_idle_timeout_secs: u64,
+    /// 非流式响应等待上游数据的最大空闲时间（秒），0 表示不限（默认）。
+    pub nonstream_idle_timeout_secs: u64,
     /// 进程内在途请求上限，0 表示不限；超限返回 503 + Retry-After。默认 32。
     pub max_inflight: u32,
     /// 账户使用策略：`round_robin`（轮询，默认）/ `priority`（优先消耗指定账户 + 会话粘滞）。
@@ -217,6 +225,10 @@ impl Default for Config {
             zdr: false,
             max_body_mb: 10,
             client_drain_timeout_ms: 0,
+            // 默认不限：上游思考阶段可能静默数百秒而不发任何字节，设超时会误杀健康请求
+            //（官方 CLI 对上游不设 idle timeout）。需要兜底时由用户在配置页显式填秒数。
+            stream_idle_timeout_secs: 0,
+            nonstream_idle_timeout_secs: 0,
             // 默认给一个正数上限：0（不限）会让并发请求无界占用内存与上游连接，
             // 用户仍可在配置页改为 0 表示不限。
             max_inflight: 32,
@@ -372,7 +384,8 @@ impl Config {
     /// 用环境变量覆写对应字段：PORT / HOST / CC_API_BASE / PROJECT_SLUG / LOG_FILE /
     /// CC_USE_PROVIDER_MODELS（仅显式 "false" 时关闭）/ CC_EMPTY_SYSTEM_PLACEHOLDER
     /// （仅显式 "false" 时关闭）/ CMD_ZDR（仅显式 "1" 或 "true" 时开启）/
-    /// CC_MAX_BODY_MB / CC_CLIENT_DRAIN_TIMEOUT_MS / CC_MAX_INFLIGHT。
+    /// CC_MAX_BODY_MB / CC_CLIENT_DRAIN_TIMEOUT_MS / CC_STREAM_IDLE_SECS /
+    /// CC_NONSTREAM_IDLE_SECS / CC_MAX_INFLIGHT。
     pub fn apply_env(&mut self) {
         if let Ok(v) = std::env::var("PORT") {
             if let Ok(p) = v.parse::<u16>() {
@@ -410,6 +423,16 @@ impl Config {
         if let Ok(v) = std::env::var("CC_CLIENT_DRAIN_TIMEOUT_MS") {
             if let Ok(p) = v.parse::<u64>() {
                 self.client_drain_timeout_ms = p;
+            }
+        }
+        if let Ok(v) = std::env::var("CC_STREAM_IDLE_SECS") {
+            if let Ok(p) = v.parse::<u64>() {
+                self.stream_idle_timeout_secs = p;
+            }
+        }
+        if let Ok(v) = std::env::var("CC_NONSTREAM_IDLE_SECS") {
+            if let Ok(p) = v.parse::<u64>() {
+                self.nonstream_idle_timeout_secs = p;
             }
         }
         if let Ok(v) = std::env::var("CC_MAX_INFLIGHT") {
@@ -673,6 +696,8 @@ mod tests {
         std::env::set_var("CMD_ZDR", "1");
         std::env::set_var("CC_MAX_BODY_MB", "32");
         std::env::set_var("CC_CLIENT_DRAIN_TIMEOUT_MS", "500");
+        std::env::set_var("CC_STREAM_IDLE_SECS", "45");
+        std::env::set_var("CC_NONSTREAM_IDLE_SECS", "120");
         std::env::set_var("CC_MAX_INFLIGHT", "8");
         std::env::set_var("CC_ACCOUNT_STRATEGY", "priority");
         std::env::set_var("CC_PREFERRED_ACCOUNT_ID", "id_env");
@@ -688,6 +713,8 @@ mod tests {
         assert!(c.zdr);
         assert_eq!(c.max_body_mb, 32);
         assert_eq!(c.client_drain_timeout_ms, 500);
+        assert_eq!(c.stream_idle_timeout_secs, 45);
+        assert_eq!(c.nonstream_idle_timeout_secs, 120);
         assert_eq!(c.max_inflight, 8);
         assert_eq!(c.account_strategy, "priority");
         assert_eq!(c.preferred_account_id, "id_env");
@@ -695,23 +722,53 @@ mod tests {
         // 非法值不生效
         std::env::set_var("PORT", "not-a-port");
         std::env::set_var("CC_MAX_BODY_MB", "0");
+        std::env::set_var("CC_STREAM_IDLE_SECS", "not-a-number");
+        std::env::set_var("CC_NONSTREAM_IDLE_SECS", "not-a-number");
         std::env::set_var("CC_ACCOUNT_STRATEGY", "bogus");
         std::env::set_var("CMD_ZDR", "off");
         let mut c2 = Config::default();
         c2.apply_env();
         assert_ne!(c2.port, 0);
         assert_eq!(c2.max_body_mb, 10); // 0 被拒，保持默认
+        assert_eq!(c2.stream_idle_timeout_secs, 0); // 非法值被忽略，保持默认不限
+        assert_eq!(c2.nonstream_idle_timeout_secs, 0);
         assert_eq!(c2.account_strategy, "round_robin");
         assert!(!c2.zdr);
         // 清理环境变量，避免影响其他测试
         for k in [
             "PORT", "HOST", "CC_API_BASE", "PROJECT_SLUG", "LOG_FILE",
             "CC_USE_PROVIDER_MODELS", "CC_EMPTY_SYSTEM_PLACEHOLDER", "CMD_ZDR",
-            "CC_MAX_BODY_MB", "CC_CLIENT_DRAIN_TIMEOUT_MS", "CC_MAX_INFLIGHT",
+            "CC_MAX_BODY_MB", "CC_CLIENT_DRAIN_TIMEOUT_MS", "CC_STREAM_IDLE_SECS",
+            "CC_NONSTREAM_IDLE_SECS", "CC_MAX_INFLIGHT",
             "CC_ACCOUNT_STRATEGY", "CC_PREFERRED_ACCOUNT_ID",
         ] {
             std::env::remove_var(k);
         }
+    }
+
+    /// 空闲超时默认不限（0）：上游思考阶段可静默数百秒，默认设超时会误杀健康请求。
+    /// 显式填 0 也必须被接受（表示不限），不能被当作非法值拒绝。
+    ///
+    /// 不在此处操作环境变量：apply_env 的环境变量是无作用域全局状态，与
+    /// apply_env_overrides_fields 并行执行会互相干扰。
+    #[test]
+    fn idle_timeouts_default_to_unlimited() {
+        let c = Config::default();
+        assert_eq!(c.stream_idle_timeout_secs, 0);
+        assert_eq!(c.nonstream_idle_timeout_secs, 0);
+
+        // 旧配置文件缺这两个字段时应回落到默认值（serde default）
+        let old: Config = serde_json::from_str(r#"{"port":3050}"#).unwrap();
+        assert_eq!(old.stream_idle_timeout_secs, 0);
+        assert_eq!(old.nonstream_idle_timeout_secs, 0);
+
+        // 0 是合法值（表示不限），不能被 validate 当作非法配置拒绝
+        let explicit = Config {
+            stream_idle_timeout_secs: 0,
+            nonstream_idle_timeout_secs: 0,
+            ..Config::default()
+        };
+        explicit.validate().unwrap();
     }
 
     /// 账户对象形态缺 user_id 时按 key 派生稳定占位。

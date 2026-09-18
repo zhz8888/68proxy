@@ -63,6 +63,8 @@ const DEFAULTS: Config = {
   zdr: false,
   max_body_mb: 10,
   client_drain_timeout_ms: 0,
+  stream_idle_timeout_secs: 0,
+  nonstream_idle_timeout_secs: 0,
   max_inflight: 32,
   theme: "system",
   language: "zh",
@@ -172,6 +174,14 @@ export function ConfigView() {
   const [retentionInput, setRetentionInput] = useState(
     String(DEFAULTS.usage_retention_days),
   );
+  // 上游空闲超时以字符串保存（同端口输入模式，两处）：0 是合法值（表示不限），
+  // 但清空输入时 Number("") 也得 0，会被误当成「不限」静默落库，须靠字符串中间态挡住
+  const [streamIdleInput, setStreamIdleInput] = useState(
+    String(DEFAULTS.stream_idle_timeout_secs),
+  );
+  const [nonstreamIdleInput, setNonstreamIdleInput] = useState(
+    String(DEFAULTS.nonstream_idle_timeout_secs),
+  );
   // 是否已完成一次成功的加载：用于跳过一次「加载后立即自动保存」
   const skipNextAutosave = useRef(true);
   // 本地转发 Key（sk-）的凭据状态
@@ -196,6 +206,8 @@ export function ConfigView() {
         setProxyPortInput(c.proxy_port > 0 ? String(c.proxy_port) : "");
         setRefreshInput(String(c.model_refresh_interval_secs));
         setRetentionInput(String(c.usage_retention_days));
+        setStreamIdleInput(String(c.stream_idle_timeout_secs));
+        setNonstreamIdleInput(String(c.nonstream_idle_timeout_secs));
         setLocalKey(k);
         setLoaded(true);
       })
@@ -250,6 +262,25 @@ export function ConfigView() {
     const n = Number(raw);
     if (raw.trim() !== "" && Number.isInteger(n) && n >= 0) {
       update("usage_retention_days", n);
+    }
+  }
+
+  /** 更新流式空闲超时输入：仅在非负整数时同步到配置（0 = 不限）。
+   *  清空输入时 Number("") === 0 会被当成「不限」，靠字符串中间态挡住静默落库。 */
+  function updateStreamIdle(raw: string) {
+    setStreamIdleInput(raw);
+    const n = Number(raw);
+    if (raw.trim() !== "" && Number.isInteger(n) && n >= 0) {
+      update("stream_idle_timeout_secs", n);
+    }
+  }
+
+  /** 更新非流式空闲超时输入：语义同 updateStreamIdle。 */
+  function updateNonstreamIdle(raw: string) {
+    setNonstreamIdleInput(raw);
+    const n = Number(raw);
+    if (raw.trim() !== "" && Number.isInteger(n) && n >= 0) {
+      update("nonstream_idle_timeout_secs", n);
     }
   }
 
@@ -448,6 +479,28 @@ export function ConfigView() {
               <Switch checked={cfg.zdr} onCheckedChange={(v) => update("zdr", v)} />
             </div>
             <p className="text-xs text-muted-foreground">{t("config.zdrHint")}</p>
+            <Field
+              label={t("config.streamIdleTimeout")}
+              hint={t("config.idleTimeoutHint")}
+            >
+              <Input
+                type="number"
+                min={0}
+                value={streamIdleInput}
+                onChange={(e) => updateStreamIdle(e.target.value)}
+              />
+            </Field>
+            <Field
+              label={t("config.nonstreamIdleTimeout")}
+              hint={t("config.idleTimeoutHint")}
+            >
+              <Input
+                type="number"
+                min={0}
+                value={nonstreamIdleInput}
+                onChange={(e) => updateNonstreamIdle(e.target.value)}
+              />
+            </Field>
           </Section>
 
           <Section title={t("config.outboundProxyTitle")} desc={t("config.outboundProxyDesc")}>

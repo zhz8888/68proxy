@@ -209,6 +209,8 @@ mod tests {
         }];
         cfg.local_api_key = "sk_local_key".into();
         cfg.language = "en".into();
+        cfg.stream_idle_timeout_secs = 45;
+        cfg.nonstream_idle_timeout_secs = 120;
         save_config(&conn, &cfg).unwrap();
 
         let got = load_config(&conn);
@@ -217,6 +219,9 @@ mod tests {
         assert!(got.zdr);
         // 语言项随配置一同往返（前端首屏防闪语言即依赖此项持久化）
         assert_eq!(got.language, "en");
+        // 空闲超时随配置往返（0 是合法值，非 0 值必须原样读写）
+        assert_eq!(got.stream_idle_timeout_secs, 45);
+        assert_eq!(got.nonstream_idle_timeout_secs, 120);
         assert_eq!(
             got.cc_accounts,
             vec![Account {

@@ -32,14 +32,50 @@ use super::state::{now_millis, now_secs, AppState, RequestInfo};
 use super::usage::UsageEntry;
 use crate::i18n;
 
-/// 流式响应两次上游数据之间的最大空闲时间，超时判定为 Timeout。
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-/// 非流式响应等待上游完整结果的最大空闲时间。
-const NONSTREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// 连续超时达到该阈值后，超时错误消息提示客户端缩减上下文长度。
 const TIMEOUT_REDUCE_CONTEXT_THRESHOLD: u32 = 3;
 /// Anthropic 流式静默超过该时长时主动发 ping 事件保活（覆盖上游排队/长思考窗口）。
 const ANTHROPIC_PING_IDLE: Duration = Duration::from_secs(15);
+
+/// 把配置里的「空闲超时秒数」转成 Duration，0 表示不限（禁用超时）。
+///
+/// 上游对思考型模型在思考阶段完全不发事件（实测静默 50~55 秒、长思考可达 395 秒以上），
+/// 官方 CLI 对上游不设任何 idle timeout，因此默认（0）不启用该兜底；`None` 表示调用方
+/// 应直接等待，不套 `tokio::time::timeout`。
+fn idle_timeout(secs: u64) -> Option<Duration> {
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// 上游读流的单步结果（把 `Option<Result<..>>` 与空闲超时统一成一种形状）。
+enum Chunk {
+    /// 读到一个数据块。
+    Data(Bytes),
+    /// 上游正常结束。
+    Eof,
+    /// 读流出错（连接中断、解码失败等），附错误文本。
+    ReadError(String),
+    /// 在配置的空闲超时内没有等到数据。
+    IdleTimeout,
+}
+
+/// 等待上游下一个数据块；`timeout` 为 `None` 时不限时长（永远只在流结束/出错时返回）。
+async fn next_chunk<S>(stream: &mut S, timeout: Option<Duration>) -> Chunk
+where
+    S: futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+{
+    let next = match timeout {
+        Some(d) => match tokio::time::timeout(d, stream.next()).await {
+            Ok(v) => v,
+            Err(_) => return Chunk::IdleTimeout,
+        },
+        None => stream.next().await,
+    };
+    match next {
+        Some(Ok(c)) => Chunk::Data(c),
+        Some(Err(e)) => Chunk::ReadError(e.to_string()),
+        None => Chunk::Eof,
+    }
+}
 
 /// 合法本地转发 Key 的正则（OnceLock 惰性编译一次，避免每次请求重复构建）。
 static KEY_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -233,13 +269,21 @@ pub async fn serve(
     // 启动状态打印：会话策略、配置开关、空闲超时、在途上限与请求体内存告警。
     {
         let cfg = state.config.read().unwrap().clone();
+        // 空闲超时 0 表示不限：上游思考期可能静默数百秒，默认不设兜底
+        let fmt_idle = |secs: u64| {
+            if secs > 0 {
+                format!("{secs}s")
+            } else {
+                "disabled".to_string()
+            }
+        };
         log::info(&format!(
-            "session: 12h + 1h jitter per API key | zdr: {} | emptySystemPlaceholder: {} | model refresh: {}s | stream idle: {}s | nonstream idle: {}s",
+            "session: 12h + 1h jitter per API key | zdr: {} | emptySystemPlaceholder: {} | model refresh: {}s | stream idle: {} | nonstream idle: {}",
             cfg.zdr,
             cfg.empty_system_placeholder,
             cfg.model_refresh_interval_secs,
-            STREAM_IDLE_TIMEOUT.as_secs(),
-            NONSTREAM_IDLE_TIMEOUT.as_secs(),
+            fmt_idle(cfg.stream_idle_timeout_secs),
+            fmt_idle(cfg.nonstream_idle_timeout_secs),
         ));
         if cfg.client_drain_timeout_ms > 0 {
             log::info(&format!(
@@ -1249,6 +1293,7 @@ async fn stream_openai(
     endpoint: &'static str,
 ) {
     let drain = Duration::from_millis(st.config.read().unwrap().client_drain_timeout_ms);
+    let idle = idle_timeout(st.config.read().unwrap().stream_idle_timeout_secs);
     let mut translator = OpenAiTranslator::new(&model, &completion_id);
     let mut stream = upstream.bytes_stream();
     let mut buffer: Vec<u8> = Vec::new();
@@ -1260,15 +1305,15 @@ async fn stream_openai(
             log::info("Client disconnected, aborting upstream");
             return;
         }
-        let chunk = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
-            Ok(Some(Ok(c))) => c,
-            Ok(Some(Err(e))) => {
+        let chunk = match next_chunk(&mut stream, idle).await {
+            Chunk::Data(c) => c,
+            Chunk::ReadError(e) => {
                 log::error(&format!("Stream read error: {e}"));
-                let _ = send_frame(&tx, Frame::Error { message: e.to_string(), retryable: true }, drain).await;
+                let _ = send_frame(&tx, Frame::Error { message: e, retryable: true }, drain).await;
                 return;
             }
-            Ok(None) => break,
-            Err(_) => {
+            Chunk::Eof => break,
+            Chunk::IdleTimeout => {
                 log::warn("Stream idle timeout");
                 let _ = send_frame(&tx, Frame::Timeout, drain).await;
                 return;
@@ -1364,6 +1409,7 @@ async fn stream_anthropic(
     endpoint: &'static str,
 ) {
     let drain = Duration::from_millis(st.config.read().unwrap().client_drain_timeout_ms);
+    let idle = idle_timeout(st.config.read().unwrap().stream_idle_timeout_secs);
     let mut translator = AnthropicTranslator::new(&model, &message_id);
     if !send_frame(&tx, Frame::Sse(translator.message_start()), drain).await {
         return;
@@ -1378,15 +1424,15 @@ async fn stream_anthropic(
             log::info("Client disconnected, aborting upstream");
             return;
         }
-        let chunk = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
-            Ok(Some(Ok(c))) => c,
-            Ok(Some(Err(e))) => {
+        let chunk = match next_chunk(&mut stream, idle).await {
+            Chunk::Data(c) => c,
+            Chunk::ReadError(e) => {
                 log::error(&format!("Stream read error: {e}"));
-                let _ = send_frame(&tx, Frame::Error { message: e.to_string(), retryable: true }, drain).await;
+                let _ = send_frame(&tx, Frame::Error { message: e, retryable: true }, drain).await;
                 return;
             }
-            Ok(None) => break,
-            Err(_) => {
+            Chunk::Eof => break,
+            Chunk::IdleTimeout => {
                 log::warn("Stream idle timeout");
                 let _ = send_frame(&tx, Frame::Timeout, drain).await;
                 return;
@@ -1471,6 +1517,7 @@ async fn stream_responses(
     endpoint: &'static str,
 ) {
     let drain = Duration::from_millis(st.config.read().unwrap().client_drain_timeout_ms);
+    let idle = idle_timeout(st.config.read().unwrap().stream_idle_timeout_secs);
     let mut translator = ResponsesTranslator::new(&model, &response_id);
     if !send_frame(&tx, Frame::Sse(translator.response_start()), drain).await {
         return;
@@ -1485,15 +1532,15 @@ async fn stream_responses(
             log::info("Client disconnected, aborting upstream");
             return;
         }
-        let chunk = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
-            Ok(Some(Ok(c))) => c,
-            Ok(Some(Err(e))) => {
+        let chunk = match next_chunk(&mut stream, idle).await {
+            Chunk::Data(c) => c,
+            Chunk::ReadError(e) => {
                 log::error(&format!("Stream read error: {e}"));
-                let _ = send_frame(&tx, Frame::Error { message: e.to_string(), retryable: true }, drain).await;
+                let _ = send_frame(&tx, Frame::Error { message: e, retryable: true }, drain).await;
                 return;
             }
-            Ok(None) => break,
-            Err(_) => {
+            Chunk::Eof => break,
+            Chunk::IdleTimeout => {
                 log::warn("Stream idle timeout");
                 let _ = send_frame(&tx, Frame::Timeout, drain).await;
                 return;
@@ -1661,6 +1708,7 @@ async fn handle_nonstream(
     ctx: ReqCtx,
     protocol: Protocol,
 ) -> axum::response::Response {
+    let idle = idle_timeout(st.config.read().unwrap().nonstream_idle_timeout_secs);
     let mut stream = upstream.bytes_stream();
     let mut buffer: Vec<u8> = Vec::new();
     let mut full_text = String::new();
@@ -1673,15 +1721,15 @@ async fn handle_nonstream(
     let mut saw_finish = false;
 
     loop {
-        let chunk = match tokio::time::timeout(NONSTREAM_IDLE_TIMEOUT, stream.next()).await {
-            Ok(Some(Ok(c))) => c,
-            Ok(Some(Err(e))) => {
+        let chunk = match next_chunk(&mut stream, idle).await {
+            Chunk::Data(c) => c,
+            Chunk::ReadError(e) => {
                 log::error(&format!("Non-stream read error: {e}"));
                 finish_request(&st, &ctx, "error");
                 return nonstream_error(protocol, 502, &format!("Upstream error: {e}"), Some(10));
             }
-            Ok(None) => break,
-            Err(_) => {
+            Chunk::Eof => break,
+            Chunk::IdleTimeout => {
                 log::warn("Non-stream idle timeout");
                 finish_request(&st, &ctx, "timeout");
                 let msg = timeout_message(&st);
