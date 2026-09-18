@@ -22,6 +22,9 @@ pub fn now_secs() -> u64 {
     now_millis() / 1000
 }
 
+/// 尚未成功拉到上游版本号时使用的占位 CLI 版本（仅用于请求头与界面展示）。
+pub const DEFAULT_CC_VERSION: &str = "0.32.3";
+
 /// 每个 API Key 对应的模拟 CLI 会话（会话 ID 带过期时间，过期后自动重建）。
 #[derive(Debug, Clone)]
 pub struct SessionEntry {
@@ -151,8 +154,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// 以给定配置构建全局状态（按代理配置构建 HTTP 客户端、默认 CLI 版本 0.32.3）。
-    /// client 构建失败时回退到不带代理的客户端。
+    /// 以给定配置构建全局状态（按代理配置构建 HTTP 客户端；CLI 版本号取配置里的本地缓存，
+    /// 缓存为空时回落到内置占位版本）。client 构建失败时回退到不带代理的客户端。
     pub fn new(config: Config) -> Arc<Self> {
         let client = build_client(&config).unwrap_or_else(|_| {
             reqwest::Client::builder()
@@ -160,6 +163,13 @@ impl AppState {
                 .build()
                 .expect("failed to build http client")
         });
+        // 启动时先用上次成功拉取的版本号：否则每次启动都显示内置占位版本，
+        // 要等 npm 拉取成功（最长 10s 超时，失败则一直不更新）才会变成真实值
+        let cc_version = if config.cc_version_cache.is_empty() {
+            DEFAULT_CC_VERSION.to_string()
+        } else {
+            config.cc_version_cache.clone()
+        };
         Arc::new(Self {
             config: RwLock::new(config),
             sessions: Mutex::new(HashMap::new()),
@@ -171,7 +181,7 @@ impl AppState {
             account_bindings: Mutex::new(HashMap::new()),
             quota_cache: Mutex::new(HashMap::new()),
             quota_inflight: Mutex::new(std::collections::HashSet::new()),
-            cc_version: RwLock::new("0.32.3".into()),
+            cc_version: RwLock::new(cc_version),
             consecutive_timeouts: AtomicU32::new(0),
             round_robin: AtomicUsize::new(0),
             inflight: AtomicU32::new(0),

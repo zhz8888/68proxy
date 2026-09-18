@@ -197,6 +197,12 @@ pub struct Config {
     /// 伪造的项目目录（留空则用内置的 C:\Users\dev\projects\app）；
     /// 与 x-project-slug 同源，供多实例区分项目。
     pub device_project_dir: String,
+    /// 上游 Command Code（npm 包 command-code）版本号的本地缓存。
+    ///
+    /// 上游版本只在运行时经 npm registry 拉取，成功一次即写入此处持久化；
+    /// 下次启动直接读该缓存，避免在拉到新版之前一直显示内置占位版本号。
+    /// 该字段由后端在刷新成功时维护，前端不编辑（见 cc_client::refresh_cc_version_from）。
+    pub cc_version_cache: String,
 }
 
 impl Default for Config {
@@ -246,6 +252,8 @@ impl Default for Config {
             cli_session_mode: "interactive".into(),
             fingerprint_salt: String::new(),
             device_project_dir: String::new(),
+            // 空表示尚未成功拉取过：首次请求前回落到内置占位版本号
+            cc_version_cache: String::new(),
         }
     }
 }

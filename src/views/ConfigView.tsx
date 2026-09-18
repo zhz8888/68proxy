@@ -78,6 +78,8 @@ const DEFAULTS: Config = {
   cli_session_mode: "interactive",
   fingerprint_salt: "",
   device_project_dir: "",
+  // 由后端维护（刷新上游版本时写入），前端只做保存时的空值占位
+  cc_version_cache: "",
 };
 
 /** 主题选项：值与 i18n key、图标（文案在组件内按当前语言取）。 */

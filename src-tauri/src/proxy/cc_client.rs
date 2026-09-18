@@ -329,6 +329,9 @@ pub async fn refresh_cc_version(state: &AppState) {
 }
 
 /// 从给定 registry URL 拉取最新版本号并写回状态（URL 可注入供测试）。
+///
+/// 版本号同样写回配置的本地缓存（只写该字段），使下次启动无需等待网络即可显示真实版本；
+/// 写入前比对旧值，未变化时不落库。
 pub(crate) async fn refresh_cc_version_from(state: &AppState, url: &str) {
     let res = tokio::time::timeout(Duration::from_secs(10), async {
         state.client().get(url).send().await
@@ -338,7 +341,14 @@ pub(crate) async fn refresh_cc_version_from(state: &AppState, url: &str) {
         Ok(Ok(r)) if r.status().is_success() => {
             if let Ok(pkg) = r.json::<Value>().await {
                 if let Some(v) = pkg.get("version").and_then(|v| v.as_str()) {
-                    *state.cc_version.write().unwrap() = v.to_string();
+                    let v = v.to_string();
+                    let changed = *state.cc_version.read().unwrap() != v;
+                    *state.cc_version.write().unwrap() = v.clone();
+                    // 只在版本号确实变化时写库，避免每 24h 的一次无谓写入
+                    if changed {
+                        state.config.write().unwrap().cc_version_cache = v.clone();
+                        persist_cc_version_cache(state);
+                    }
                     log::info(&format!(
                     "{} {v}",
                     crate::i18n::pick("已从 npm 刷新 Command Code 版本：", "Command Code version refreshed from npm:")
@@ -362,6 +372,29 @@ pub(crate) async fn refresh_cc_version_from(state: &AppState, url: &str) {
         "Command Code 版本获取失败，沿用当前值",
         "Command Code version fetch failed, using current",
     ));
+}
+
+/// 把当前内存中的版本号缓存写入 SQLite settings 表（单字段写入，不动其它配置）。
+///
+/// 用单字段写入而非整体 `save_config`：内存配置可能已被环境变量覆写，整体落库会把
+/// 仅应作用于本次运行的 env 值写成持久设置。写入失败只记日志——版本号缓存是尽力而为
+/// 的优化，写不进去不影响请求转发，下次启动回落到内置占位版本。
+///
+/// 只写 settings 表（配置主存）；config.json 是旧版的迁移/兜底源，会在用户下次保存
+/// 配置时由 `Config::save` 一并带上该字段，无需在此额外写盘。
+fn persist_cc_version_cache(state: &AppState) {
+    let version = state.cc_version.read().unwrap().clone();
+    let conn_guard = state.usage.lock().unwrap();
+    let Some(conn) = conn_guard.as_ref() else {
+        return;
+    };
+    // 与 settings 表其它行同格式：存 JSON 序列化值（字符串含引号），读回时按值类型解析
+    if let Err(e) = super::settings::save_setting(conn, "cc_version_cache", &json!(version).to_string()) {
+        log::warn(&format!(
+            "{}: {e}",
+            crate::i18n::pick("上游版本号缓存写入失败", "Failed to persist the upstream version cache")
+        ));
+    }
 }
 
 /// 模型列表：Provider 端点动态拉取（公开接口，按配置间隔缓存），成功后整表落库；

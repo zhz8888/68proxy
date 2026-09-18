@@ -92,6 +92,8 @@ fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Valu
     config.theme = stored.theme;
     // 语言由 language_set 专门管理，同样保留原值
     config.language = stored.language;
+    // 上游版本号缓存由后端刷新逻辑维护、前端表单不含该项，保留原值避免被空值覆盖
+    config.cc_version_cache = stored.cc_version_cache;
     // 校验放在保留字段之后：被保留的字段不应触发校验失败
     config.validate()?;
     // 主存 SQLite settings 表

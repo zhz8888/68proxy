@@ -64,6 +64,8 @@ export interface Config {
   fingerprint_salt: string;
   /** 伪造的项目目录（与 x-project-slug 同源；留空用内置默认）。 */
   device_project_dir: string;
+  /** 上游 Command Code 版本号的本地缓存（后端刷新时维护，前端不编辑）。 */
+  cc_version_cache: string;
 }
 
 /** 代理运行状态：是否运行、监听地址、OpenAI/Anthropic 接入 URL、上游版本与运行时长。 */

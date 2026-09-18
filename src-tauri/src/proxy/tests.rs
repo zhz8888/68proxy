@@ -3097,6 +3097,74 @@ async fn refresh_cc_version_parses_and_persists() {
     let _ = before;
 }
 
+/// 上游版本号必须缓存进配置并跨启动复用，而不是每次启动都回到内置占位版本。
+///
+/// 回归：版本号原先只存在于内存（`AppState::new` 恒以硬编码 `0.32.3` 起步），
+/// 每次启动首页都先显示占位版本，要等 npm 拉取成功才变成真实值；拉取失败
+/// （离线、registry 不可达）则整个进程生命周期都显示占位版本。
+#[tokio::test]
+async fn cc_version_cache_survives_restart() {
+    use axum::response::Response;
+    let router = Router::new().route(
+        "/command-code/latest",
+        axum::routing::get(|| async {
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"version":"1.56.1"}"#))
+                .unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    // 第一次运行：从空缓存起步 → 拉取成功 → 写回配置缓存并落库
+    let mut cfg = Config {
+        api_base: "http://127.0.0.1:1".into(),
+        ..Config::default()
+    };
+    assert_eq!(cfg.cc_version_cache, "", "新配置的版本缓存应为空");
+    let state = AppState::new(cfg.clone());
+    // 挂上真实设置库，验证刷新确实把版本号持久化了（而不只是改内存）
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    super::settings::init_settings_on(&conn).unwrap();
+    *state.usage.lock().unwrap() = Some(conn);
+    assert_eq!(
+        super::cc_client::cc_version(&state),
+        super::state::DEFAULT_CC_VERSION,
+        "空缓存时应回落到内置占位版本"
+    );
+    super::cc_client::refresh_cc_version_from(&state, &format!("http://{addr}/command-code/latest")).await;
+    assert_eq!(super::cc_client::cc_version(&state), "1.56.1");
+    cfg.cc_version_cache = state.config.read().unwrap().cc_version_cache.clone();
+    assert_eq!(cfg.cc_version_cache, "1.56.1", "拉取成功后应写回配置缓存");
+    // 落库校验：从设置库读回的配置应带同一版本号
+    {
+        let guard = state.usage.lock().unwrap();
+        let loaded = super::settings::load_config(guard.as_ref().unwrap());
+        assert_eq!(
+            loaded.cc_version_cache, "1.56.1",
+            "版本号应写入本地设置库缓存，供下次启动复用"
+        );
+    }
+
+    // 模拟重启：用带缓存的配置新建状态，即使网络不可达也应显示上次的版本号
+    let offline = AppState::new(Config {
+        api_base: "http://127.0.0.1:1".into(),
+        ..cfg.clone()
+    });
+    assert_eq!(
+        super::cc_client::cc_version(&offline),
+        "1.56.1",
+        "重启后应直接复用缓存的版本号，而非回到占位版本"
+    );
+    // 拉取失败不覆盖缓存
+    super::cc_client::refresh_cc_version_from(&offline, "http://127.0.0.1:1/command-code/latest").await;
+    assert_eq!(super::cc_client::cc_version(&offline), "1.56.1");
+}
+
 /// 数据库文件损坏（非 SQLite 格式）时：初始化报错而非 panic（models/settings/usage 各表）。
 #[test]
 fn init_tables_on_garbage_db_file_is_error() {

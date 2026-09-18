@@ -45,6 +45,21 @@ pub fn save_config(conn: &Connection, cfg: &Config) -> Result<(), String> {
         .map_err(|e| i18n::err_args("settings_commit_failed", &[&e.to_string()]))
 }
 
+/// 只写入单个配置项（key/value UPSERT），其余字段不动。
+///
+/// 供后端自行维护的字段使用（目前是上游版本号缓存）：这些字段在内存里可能已被环境变量
+/// 覆写，若走 `save_config` 会连同 env 值一起落库、下次启动被当作普通设置读回并永久生效
+/// （与 setup 中「镜像只用未叠加 env 的副本」同一考虑）。环境变量只应作用于单次运行。
+pub fn save_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .map_err(|e| i18n::err_args("settings_write_failed", &[key, &e.to_string()]))?;
+    Ok(())
+}
+
 /// 从 settings 表读取配置；表为空或某字段缺失时由 `#[serde(default)]` 兜底。
 ///
 /// 兼容旧版：若表内仍存在旧字段 `api_key` 的行，读取后作为首个 Command Code 账户迁入。
@@ -256,6 +271,47 @@ mod tests {
             .unwrap();
         assert_eq!(cnt, 1);
         assert_eq!(load_config(&conn).port, 2000);
+    }
+
+    /// 版本号缓存随配置持久化与读回：写入后新构造的配置能读到上次拉取的版本，
+    /// 这是「重启后不再显示内置占位版本号」的关键。
+    #[test]
+    fn cc_version_cache_roundtrip() {
+        let conn = temp_conn();
+        // 默认即空（尚未成功拉取过）
+        assert_eq!(load_config(&conn).cc_version_cache, "");
+
+        save_setting(&conn, "cc_version_cache", &serde_json::json!("1.56.1").to_string()).unwrap();
+        assert_eq!(load_config(&conn).cc_version_cache, "1.56.1");
+
+        // 再次写入按 key UPSERT，覆盖为新版本
+        save_setting(&conn, "cc_version_cache", &serde_json::json!("1.57.0").to_string()).unwrap();
+        assert_eq!(load_config(&conn).cc_version_cache, "1.57.0");
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM settings WHERE key='cc_version_cache'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 1, "同 key 不应产生重复行");
+    }
+
+    /// 单字段写入不得触碰其它配置：内存配置可能已被环境变量覆写，
+    /// 若此处整体落库会把仅应作用于单次运行的 env 值写成持久设置。
+    #[test]
+    fn save_setting_leaves_other_fields_untouched() {
+        let conn = temp_conn();
+        let cfg = Config {
+            port: 3999,
+            host: "10.0.0.1".into(),
+            ..Config::default()
+        };
+        save_config(&conn, &cfg).unwrap();
+
+        save_setting(&conn, "cc_version_cache", &serde_json::json!("9.9.9").to_string()).unwrap();
+
+        let got = load_config(&conn);
+        assert_eq!(got.cc_version_cache, "9.9.9");
+        // 其余字段保持写入前的值
+        assert_eq!(got.port, 3999);
+        assert_eq!(got.host, "10.0.0.1");
     }
 
     /// 旧版 api_key 行读取时迁入账户，purge 后不再复活。
