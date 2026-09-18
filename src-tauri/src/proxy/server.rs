@@ -657,6 +657,22 @@ async fn send_frame(tx: &mpsc::Sender<Frame>, frame: Frame, drain_timeout: Durat
 /// （slowloris）在鉴权前长期占用连接与在途名额。
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// 就地把请求体的模型名补齐为上游要求的完整 ID；缺失或无法解析时保持不变。
+///
+/// 上游只认带厂商前缀的完整 ID（裸名返回 403 `Model/provider not recognized`），
+/// 而部分 agent 工具对模型名长度有上限，写不下 `deepseek/deepseek-v4.1-flash`
+/// 这类长 ID。解析规则见 models::resolve_model_id；无法解析时原样透传，
+/// 由上游给出明确错误，代理不擅自猜测模型。
+fn resolve_model_in_place(st: &AppState, req: &mut Value) {
+    let Some(raw) = req.get("model").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let resolved = super::models::resolve_model_for(st, raw);
+    if resolved != raw {
+        req["model"] = json!(resolved);
+    }
+}
+
 /// 流式读取请求体为 JSON。超过 `max_size` 时返回 413——剩余请求体交由
 /// hyper 自动排空（丢弃未读数据），使连接保持 keep-alive 可复用，
 /// 客户端收到明确的 413 而非 Connection reset。整体读取时限见 `BODY_READ_TIMEOUT`。
@@ -776,7 +792,7 @@ async fn chat_completions(
         );
     }
     let max_body = (st.config.read().unwrap().max_body_mb as usize) * 1024 * 1024;
-    let req = match read_json_body(body, max_body).await {
+    let mut req = match read_json_body(body, max_body).await {
         Ok(v) => v,
         Err((status, err_type, msg)) => {
             return json_response(
@@ -786,6 +802,10 @@ async fn chat_completions(
             )
         }
     };
+    // 把模型名补齐为上游要求的完整 ID（详见 models::resolve_model_id）：
+    // 就地改写请求体，使后续所有读取点（build_cc_request、转换器、响应回显）
+    // 拿到的是同一个已解析名称，避免上游与回显各持一种写法
+    resolve_model_in_place(&st, &mut req);
     // 先取请求体里的 prompt_cache_key（兼作账户粘滞的路由键候选），再据此选账户
     let prompt_cache_key = req
         .get("prompt_cache_key")
@@ -894,7 +914,7 @@ async fn messages(
         );
     }
     let max_body = (st.config.read().unwrap().max_body_mb as usize) * 1024 * 1024;
-    let req = match read_json_body(body, max_body).await {
+    let mut req = match read_json_body(body, max_body).await {
         Ok(v) => v,
         Err((status, err_type, msg)) => {
             return json_response(
@@ -904,6 +924,8 @@ async fn messages(
             )
         }
     };
+    // 补齐模型名为完整 ID（就地改写，理由见 chat_completions 同处注释）
+    resolve_model_in_place(&st, &mut req);
     let session_key = route_session_key(&headers, None);
     let (api_key, user_id) = match api_key_or_401(&st, &headers, session_key.as_deref()).await {
         Ok(k) => k,
@@ -1016,7 +1038,7 @@ async fn responses(
         );
     }
     let max_body = (st.config.read().unwrap().max_body_mb as usize) * 1024 * 1024;
-    let req = match read_json_body(body, max_body).await {
+    let mut req = match read_json_body(body, max_body).await {
         Ok(v) => v,
         Err((status, err_type, msg)) => {
             return json_response(
@@ -1026,6 +1048,8 @@ async fn responses(
             )
         }
     };
+    // 补齐模型名为完整 ID（就地改写，理由见 chat_completions 同处注释）
+    resolve_model_in_place(&st, &mut req);
     // 先取 prompt_cache_key（Codex 用它标识会话且通常不带 x-session-id），再据此选账户，
     // 否则同一会话每轮都会重新选账户，破坏账户粘滞并降低上游前缀缓存命中率。
     let prompt_cache_key = req

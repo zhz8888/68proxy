@@ -238,6 +238,9 @@ fn pricing_from_record(rec: &FullModelRecord) -> ModelPricing {
 }
 
 /// 内置列表文件里按 `pricing::find_pricing` 同款口径（精确 → 短名 → 最长前缀）查找条目。
+///
+/// 用于给 Provider 端点拉回的记录补齐厂商/能力等元数据：匹配偏宽松，
+/// 最坏情况只是元数据不准，不影响请求路由。
 fn builtin_list_entry_for(model: &str) -> Option<ModelInfo> {
     let target = model.to_ascii_lowercase();
     let entries = builtin_list_entries();
@@ -254,6 +257,56 @@ fn builtin_list_entry_for(model: &str) -> Option<ModelInfo> {
         })
     };
     hit.cloned()
+}
+
+/// 在给定模型列表中解析用户输入的模型名，返回条目。
+///
+/// 上游要求带厂商前缀的完整 ID（裸名会被拒：`Model/provider not recognized`），
+/// 而部分 agent 工具对模型名长度有上限，写不下 `deepseek/deepseek-v4.1-flash`
+/// 这类长 ID。故按「精确 → 短名唯一匹配」解析：
+///
+/// 1. 精确匹配（忽略大小写）——用户写了完整 ID 时原样命中；
+/// 2. 短名匹配——把输入与各条目都去掉 `vendor/` 前缀后比对，
+///    使 `deepseek-v4.1-flash` 命中 `deepseek/deepseek-v4.1-flash`；本身无前缀的
+///    条目（如 `claude-sonnet-4-6`）也在这一步自然命中。
+///
+/// **刻意不做前缀/后缀模糊匹配**（与 `builtin_list_entry_for` 的宽松口径不同）：
+/// 解析结果会作为模型 ID 发往上游，把 `deepseek-v4.1-flashx` 这类拼写错误
+/// 模糊成 `deepseek-v4.1-flash` 会静默调用到另一个模型，代价远高于让上游报错。
+/// 短名有歧义（多厂商同名）时同样放弃解析。
+fn find_entry_in<'a>(entries: &'a [ModelInfo], model: &str) -> Option<&'a ModelInfo> {
+    let target = model.trim().to_ascii_lowercase();
+    if target.is_empty() {
+        return None;
+    }
+    // 1) 完整 ID 精确匹配
+    if let Some(m) = entries.iter().find(|m| m.id.to_ascii_lowercase() == target) {
+        return Some(m);
+    }
+    // 2) 裸名（无 `vendor/` 前缀）→ 按短名唯一匹配
+    if !target.contains('/') {
+        let mut hits = entries
+            .iter()
+            .filter(|m| m.id.rsplit('/').next().unwrap_or(&m.id).to_ascii_lowercase() == target);
+        let first = hits.next()?;
+        // 短名在多个厂商下重复时不猜：宁可让上游报错，也不要路由到错误模型
+        if hits.next().is_some() {
+            return None;
+        }
+        return Some(first);
+    }
+    None
+}
+
+/// 把用户输入的模型名规范化为上游要求的完整 ID；无法解析时原样返回。
+///
+/// 解析依据运行时模型注册表（Provider 拉取后整表替换，含内置表兜底），
+/// 匹配口径见 `find_entry_in`。
+pub fn resolve_model_id(entries: &[ModelInfo], model: &str) -> String {
+    match find_entry_in(entries, model) {
+        Some(m) => m.id.clone(),
+        None => model.to_string(),
+    }
 }
 
 /// 按模型 ID 前缀推导厂商显示名：Provider 端点不带厂商字段，前缀即归属；
@@ -289,6 +342,23 @@ pub fn provider_from_id(id: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// 把用户输入的模型名规范化为上游要求的完整 ID（运行时注册表版本）。
+///
+/// 供请求处理路径调用：直接从模型列表缓存取表，缓存为空时回退内置表，
+/// 与 `/v1/models` 的取数口径一致（见 `load_models_for`）。
+pub fn resolve_model_for(state: &AppState, model: &str) -> String {
+    let entries = {
+        let cache = state.models.read().unwrap();
+        if cache.models.is_empty() {
+            None
+        } else {
+            Some(cache.models.clone())
+        }
+    };
+    let entries = entries.unwrap_or_else(builtin_entries);
+    resolve_model_id(&entries, model)
 }
 
 /// Provider 模型列表端点的单条记录（OpenAI list 格式，字段为上游原样）。
@@ -925,6 +995,75 @@ mod tests {
         assert_eq!(provider_from_id("gpt-5.5"), Some("OpenAI"));
         assert_eq!(provider_from_id("unknown-vendor/thing"), None);
         assert_eq!(provider_from_id("mystery-model"), None);
+    }
+
+    /// 模型名解析：裸名补齐厂商前缀，完整 ID 原样保留，拼错/歧义不猜。
+    #[test]
+    fn resolve_model_id_fills_vendor_prefix() {
+        let entries = builtin_entries();
+        // 裸名 → 补上厂商前缀（上游只认完整 ID）
+        assert_eq!(
+            resolve_model_id(&entries, "deepseek-v4.1-flash"),
+            "deepseek/deepseek-v4.1-flash"
+        );
+        assert_eq!(
+            resolve_model_id(&entries, "muse-spark-1.3-contributor"),
+            "meta/muse-spark-1.3-contributor"
+        );
+        assert_eq!(
+            resolve_model_id(&entries, "Kimi-K3"),
+            "moonshotai/Kimi-K3"
+        );
+        // 完整 ID 原样保留（含大小写差异，匹配不区分大小写但输出取注册表写法）
+        assert_eq!(
+            resolve_model_id(&entries, "deepseek/deepseek-v4.1-flash"),
+            "deepseek/deepseek-v4.1-flash"
+        );
+        // 本身无前缀的模型：裸名即完整 ID
+        assert_eq!(resolve_model_id(&entries, "claude-sonnet-4-6"), "claude-sonnet-4-6");
+        // 首尾空白容忍
+        assert_eq!(
+            resolve_model_id(&entries, "  deepseek-v4.1-flash  "),
+            "deepseek/deepseek-v4.1-flash"
+        );
+
+        // 未收录的模型原样返回，交由上游报错（不猜测、不模糊匹配）
+        assert_eq!(
+            resolve_model_id(&entries, "deepseek-v4.1-flashX"),
+            "deepseek-v4.1-flashX",
+            "拼写相近但不是已知模型时不得模糊成另一个模型"
+        );
+        assert_eq!(resolve_model_id(&entries, "totally-unknown"), "totally-unknown");
+        assert_eq!(resolve_model_id(&entries, ""), "");
+    }
+
+    /// 短名在多个厂商下重复时必须放弃解析，避免静默路由到错误厂商。
+    #[test]
+    fn resolve_model_id_refuses_ambiguous_short_name() {
+        let entries = vec![
+            ModelInfo {
+                id: "vendor-a/shared-name".into(),
+                name: "A".into(),
+                provider: None,
+                context_length: None,
+                caps: ModelCaps::default(),
+            },
+            ModelInfo {
+                id: "vendor-b/shared-name".into(),
+                name: "B".into(),
+                provider: None,
+                context_length: None,
+                caps: ModelCaps::default(),
+            },
+        ];
+        assert_eq!(
+            resolve_model_id(&entries, "shared-name"),
+            "shared-name",
+            "歧义短名应原样透传而非任选一个"
+        );
+        // 写全 ID 时两个都能正确命中
+        assert_eq!(resolve_model_id(&entries, "vendor-a/shared-name"), "vendor-a/shared-name");
+        assert_eq!(resolve_model_id(&entries, "vendor-b/shared-name"), "vendor-b/shared-name");
     }
 
     /// 端点记录补全：厂商取前缀推导，能力/上下文回退内置表，缺失名称回退 ID。

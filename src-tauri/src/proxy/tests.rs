@@ -1167,6 +1167,107 @@ async fn chat_completions_streaming() {
     state.mark_stopped();
 }
 
+/// 端到端：客户端可用不带厂商前缀的短模型名，代理补齐为上游要求的完整 ID。
+///
+/// 回归：上游只认带厂商前缀的完整 ID，裸名返回 403 `Model/provider not recognized`
+/// （经代理表现为 401）。而部分 agent 工具对模型名长度有上限，写不下
+/// `deepseek/deepseek-v4.1-flash`、`meta/muse-spark-1.3-contributor` 这类长 ID。
+/// 三条协议入口都要支持，且发给上游的必须是补全后的 ID。
+#[tokio::test]
+async fn short_model_name_is_expanded_to_full_id() {
+    let captured = Arc::new(Mutex::new(json!({})));
+    let (base, state) = start_proxy_with_capture(Some(captured.clone())).await;
+    // 内置表在测试环境即为模型来源，无需依赖 Provider 拉取
+    state.models.write().unwrap().models.clear();
+
+    let client = reqwest::Client::new();
+    let cases: [(&str, Value, &str); 3] = [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "deepseek-v4.1-flash",
+                "messages": [{ "role": "user", "content": "hi" }],
+                "stream": true,
+            }),
+            "deepseek/deepseek-v4.1-flash",
+        ),
+        (
+            "/v1/messages",
+            json!({
+                "model": "muse-spark-1.3-contributor",
+                "messages": [{ "role": "user", "content": "hi" }],
+                "stream": true,
+            }),
+            "meta/muse-spark-1.3-contributor",
+        ),
+        (
+            "/v1/responses",
+            json!({
+                "model": "Kimi-K3",
+                "input": [{ "role": "user", "content": [{ "type": "input_text", "text": "hi" }] }],
+                "stream": true,
+            }),
+            "moonshotai/Kimi-K3",
+        ),
+    ];
+    for (path, body, expected_upstream) in cases {
+        let res = client
+            .post(format!("{base}{path}"))
+            .header("Authorization", "Bearer sk-test-local-key-123")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200, "{path} 短名应被解析而非报错");
+        let sent = captured.lock().unwrap()["body"]["params"]["model"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(
+            sent, expected_upstream,
+            "{path} 发给上游的必须是补齐后的完整 ID"
+        );
+        // 响应回显同一份已解析名称，便于客户端确认实际调用的模型
+        let text = res.text().await.unwrap();
+        assert!(
+            text.contains(expected_upstream),
+            "{path} 响应应回显完整 ID，实际: {text}"
+        );
+    }
+    state.mark_stopped();
+}
+
+/// 端到端：未收录的模型名原样透传给上游（不猜测、不模糊匹配邻近模型）。
+#[tokio::test]
+async fn unknown_model_name_is_passed_through_unchanged() {
+    let captured = Arc::new(Mutex::new(json!({})));
+    let (base, state) = start_proxy_with_capture(Some(captured.clone())).await;
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            // 与 deepseek-v4.1-flash 仅差一个字符：不得被模糊匹配成它
+            "model": "deepseek-v4.1-flashX",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let sent = captured.lock().unwrap()["body"]["params"]["model"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(
+        sent, "deepseek-v4.1-flashX",
+        "未收录名称应原样透传，交由上游给出明确错误"
+    );
+    state.mark_stopped();
+}
+
 /// 端到端：上游思考阶段长时间静默（不发任何字节）不应被空闲超时误杀。
 ///
 /// 回归：上游对思考型模型（如 meta/muse-spark-1.3-contributor）在思考阶段完全不下发
