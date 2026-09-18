@@ -157,6 +157,77 @@ fn build_cc_request_tool_alias_and_output_join() {
     assert_eq!(cc["params"]["messages"][2]["content"][0]["output"]["value"], "第一行\n第二行");
 }
 
+/// reasoning_effort 白名单：仅上游枚举内的档位放行，非法值丢弃且不下发该字段。
+///
+/// 回归：客户端传生态里的其它写法（none / default / minimal / 数字等）时，
+/// 原实现原样透传给上游，上游以
+/// `Invalid option: expected one of "low"|"medium"|"high"|"xhigh"|"max" at "params.reasoning_effort"`
+/// 拒绝整个请求（deepseek/deepseek-v4-flash 等报「连接失败」即由此而来）。
+#[test]
+fn reasoning_effort_is_validated_against_upstream_enum() {
+    // 纯函数：合法档位（含大小写/空白差异）归一化，非法与空值返回 None
+    for ok in ["low", "medium", "high", "xhigh", "max"] {
+        assert_eq!(convert::normalize_reasoning_effort(ok), Some(ok));
+    }
+    assert_eq!(convert::normalize_reasoning_effort("HIGH"), Some("high"));
+    assert_eq!(convert::normalize_reasoning_effort("  high  "), Some("high"));
+    for bad in ["none", "default", "minimal", "", "very-high", "1"] {
+        assert_eq!(convert::normalize_reasoning_effort(bad), None, "{bad} 应被拒绝");
+    }
+
+    // 端到端：非法档位不下发该字段，请求仍能正常构建
+    let req = json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "reasoning_effort": "none",
+    });
+    let cc = build_cc(&req, true);
+    assert!(
+        cc["params"].get("reasoning_effort").is_none(),
+        "非法档位不应下发: {}",
+        cc["params"]
+    );
+    // 合法档位照常下发
+    let req = json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "reasoning_effort": "high",
+    });
+    let cc = build_cc(&req, true);
+    assert_eq!(cc["params"]["reasoning_effort"], "high");
+}
+
+/// Anthropic thinking.effort 同样受白名单约束（原实现直接透传，非法值会 400）。
+///
+/// 该折算发生在 Anthropic → OpenAI 转换中，故测试需先经 convert_anthropic_to_openai。
+#[test]
+fn anthropic_thinking_effort_is_validated() {
+    // 非法 effort：不下发 reasoning_effort
+    let req = json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 64,
+        "thinking": { "type": "adaptive", "effort": "none" },
+    });
+    let openai = convert::convert_anthropic_to_openai(&req);
+    let cc = build_cc(&openai, true);
+    assert!(
+        cc["params"].get("reasoning_effort").is_none(),
+        "非法 thinking.effort 不应下发: {}",
+        cc["params"]
+    );
+    // 合法 effort：归一化后下发
+    let req = json!({
+        "model": "deepseek/deepseek-v4-flash",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 64,
+        "thinking": { "type": "adaptive", "effort": "max" },
+    });
+    let openai = convert::convert_anthropic_to_openai(&req);
+    let cc = build_cc(&openai, true);
+    assert_eq!(cc["params"]["reasoning_effort"], "max");
+}
+
 /// 验证无 system 时 params.system 发非空占位（开关开启），关闭时缺省字段。
 #[test]
 fn build_cc_request_empty_system_placeholder() {

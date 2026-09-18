@@ -333,8 +333,24 @@ pub fn build_cc_request(
     if let Some(t) = openai_req.get("temperature") {
         params.insert("temperature".into(), t.clone());
     }
-    if let Some(r) = openai_req.get("reasoning_effort") {
-        params.insert("reasoning_effort".into(), r.clone());
+    // reasoning_effort 只放行上游枚举内的档位：客户端常传生态里的其它写法
+    // （none / default / minimal 等），原样透传会被上游 400 拒绝整个请求；
+    // 非法值直接不下发该字段（与 CLI 的 isReasoningEffort 校验一致）。
+    if let Some(r) = openai_req.get("reasoning_effort").and_then(|v| v.as_str()) {
+        match normalize_reasoning_effort(r) {
+            Some(norm) => {
+                params.insert("reasoning_effort".into(), json!(norm));
+            }
+            None => {
+                super::log::warn(&format!(
+                    "{}: {r}",
+                    crate::i18n::pick(
+                        "reasoning_effort 取值不在上游枚举内，已忽略该参数",
+                        "reasoning_effort is not one of the upstream enum values; parameter ignored"
+                    )
+                ));
+            }
+        }
     }
     // CLI 总是下发 tools（没有工具时是空数组）—— 空数组与缺键在 wire 上可观测，这里对齐。
     // CLI 的 toWireTools：只有 name / description / input_schema，没有 type 字段。
@@ -1014,7 +1030,10 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
                 .get("effort")
                 .and_then(|v| v.as_str())
                 .unwrap_or("medium");
-            openai_req["reasoning_effort"] = json!(effort);
+            // 必须是上游枚举内的值：非法档位原样透传会被上游 400 拒绝
+            if let Some(norm) = normalize_reasoning_effort(effort) {
+                openai_req["reasoning_effort"] = json!(norm);
+            }
         } else if let Some(budget) = thinking.get("budget_tokens").and_then(|v| v.as_u64()) {
             let effort = if budget >= 10_000 {
                 "high"
@@ -1028,6 +1047,23 @@ pub fn convert_anthropic_to_openai(anthropic_req: &Value) -> Value {
     }
 
     openai_req
+}
+
+/// 归一化 reasoning_effort：仅接受上游枚举内的档位，其余（含大小写与空白差异）返回 None。
+///
+/// 上游对 `params.reasoning_effort` 做严格校验，枚举外的值直接 400
+/// （`Invalid option: expected one of "low"|"medium"|"high"|"xhigh"|"max"`）。
+/// 客户端常传 OpenAI/Anthropic 生态里的其它写法（`none` / `default` / `minimal` 等），
+/// 原样透传会让整个请求失败；对齐 CLI 的 isReasoningEffort 校验，非法值直接不下发该字段。
+pub fn normalize_reasoning_effort(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_lowercase().as_str() {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
+        _ => None,
+    }
 }
 
 /// Command Code finishReason → 本代理内部规范化取值。
