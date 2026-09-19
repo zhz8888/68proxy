@@ -69,8 +69,8 @@ const NAV: Array<{ id: View; labelKey: string; icon: LucideIcon }> = [
 /** 侧栏版本号展示：dev 模式与 CI 短哈希构建显示纯标识（无 v 前缀），正式版保留 v 前缀。 */
 function displayVersion(version: string): string {
   if (version === "dev") return version;
-  // CI 构建版本为 0.0.0-<短哈希>（Tauri 要求 semver），显示层只取短哈希
-  const ciPrefix = "0.0.0-";
+  // CI 构建版本为 0.0.0-ci-<短哈希>（Tauri 要求合法 semver），显示层只取短哈希
+  const ciPrefix = "0.0.0-ci-";
   if (version.startsWith(ciPrefix)) {
     return version.slice(ciPrefix.length) || version;
   }

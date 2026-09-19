@@ -56,14 +56,17 @@ jobs:
 
       # CI 构建产物版本号用提交短哈希（semver 预发布格式），避免写死的 1.0.0
       # 混入测试包；tauri.conf.json 的 version 引用 package.json，构建后应用内
-      # getVersion() 即返回 0.0.0-<sha>（侧栏显示 v0.0.0-<sha>）。
+      # getVersion() 即返回 0.0.0-ci-<sha>（侧栏只显示 <sha>）。
       # 不能用纯哈希：Tauri CLI 要求 version 为合法 semver 字符串。
+      # 预发布标识加 `ci` 前缀而非直接接哈希：哈希「全为数字且首位为 0」时
+      # （如 0442883，概率约 0.4%）是非法 semver——纯数字标识不得有前导零，
+      # Tauri 会以 `must be a semver string` 拒绝解析配置而终止构建。
       - name: Sync app version from commit SHA
         shell: bash
         run: |
           set -euo pipefail
           SHORT_SHA="$(git rev-parse --short HEAD)"
-          npm pkg set version="0.0.0-${SHORT_SHA}"
+          npm pkg set version="0.0.0-ci-${SHORT_SHA}"
           echo "CI 构建版本：$(node -p "require('./package.json').version")"
 
       - name: Frontend typecheck
