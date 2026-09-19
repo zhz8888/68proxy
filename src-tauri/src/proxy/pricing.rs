@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn free_models_cost_zero() {
         // 免费模型（deal.free 且费率为 0）计费应为 0
-        for id in ["laguna-s-2.1-free", "longcat-2.0:free"] {
+        for id in ["laguna-s-2.1-free", "ling-3.0-flash-sante:free"] {
             let c = calculate_cost(id, 1_000_000, 1_000_000, 0, 0, 0);
             assert_eq!(c, 0.0, "{id} 应为免费");
             let models = all_models();

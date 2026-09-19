@@ -110,6 +110,17 @@
     }
   },
   {
+    "id": "Qwen/Qwen3.8-Omni-Flash",
+    "name": "Qwen 3.8 Omni Flash",
+    "provider": "Alibaba",
+    "contextLength": 1000000,
+    "caps": {
+      "text": true,
+      "vision": true,
+      "reasoning": true
+    }
+  },
+  {
     "id": "Qwen/Qwen3.8-Max",
     "name": "Qwen 3.8 Max",
     "provider": "Alibaba",
@@ -429,7 +440,7 @@
     }
   },
   {
-    "id": "meituan/LongCat-2.0:free",
+    "id": "meituan/LongCat-2.0",
     "name": "LongCat 2.0",
     "provider": "Meituan",
     "contextLength": 1048576,
@@ -697,6 +708,17 @@
     "name": "GLM-5.3 Flash",
     "provider": "Z.ai",
     "contextLength": 1048576,
+    "caps": {
+      "text": true,
+      "vision": true,
+      "reasoning": true
+    }
+  },
+  {
+    "id": "z-ai/glm-5.3-flashx",
+    "name": "GLM-5.3 FlashX",
+    "provider": "Z.ai",
+    "contextLength": 1000000,
     "caps": {
       "text": true,
       "vision": true,

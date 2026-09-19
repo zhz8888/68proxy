@@ -1614,6 +1614,46 @@ async fn stream_error_event_is_propagated_not_masked_as_zero_output() {
         "Anthropic 错误体应含上游消息"
     );
 
+    // Anthropic 流式：上游以 200 开流、下发 error 事件且未产出任何内容时，
+    // 零输出回退必须优先透传该错误，而不是塌成「未正常 finish」的 502
+    let res = client
+        .post(format!("{base}/v1/messages"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "stream-error",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_tokens": 16,
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 503, "Anthropic 流式应透传上游状态码");
+    let body: Value = res.json().await.unwrap();
+    assert!(
+        body["error"]["message"].as_str().unwrap_or("").contains("No available providers"),
+        "Anthropic 流式应透传上游原始消息: {body}"
+    );
+
+    // Responses 流式：同场景，此前会丢失上游消息只报「no finish event」
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "stream-error",
+            "input": "hi",
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 503, "Responses 流式应透传上游状态码");
+    let body: Value = res.json().await.unwrap();
+    assert!(
+        body["error"]["message"].as_str().unwrap_or("").contains("No available providers"),
+        "Responses 流式应透传上游原始消息: {body}"
+    );
+
     state.mark_stopped();
 }
 

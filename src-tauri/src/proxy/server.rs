@@ -1492,13 +1492,16 @@ async fn stream_anthropic(
     if !translator.produced_content && translator.output_tokens == 0 {
         // 未产出任何内容：message_start 仍缓存在首帧前缀中未下发，
         // 直接以 ZeroOutput 让首帧循环回退为 JSON 错误响应（携带上游真实错误）。
-        // 未正常走完 finish 时优先报「没有完成信号」，而非误报空响应 429。
-        let err = match translator.incomplete_detail() {
-            Some(detail) => {
+        // 优先级：上游 error 事件 > 未正常走完 finish > 空响应 429——error 事件是
+        // 上游明确告知的根因（provider 不可用、参数被拒等），而「没有完成信号」
+        // 在收到 error 事件时必然也成立（上游报错后不会再发 finish），若排在前
+        // 面就会把具体原因换成笼统的 502「no finish event」。
+        let err = match translator.stream_error.clone() {
+            Some(e) => Some(e),
+            None => translator.incomplete_detail().map(|detail| {
                 log::warn(&format!("Upstream stream incomplete (Anthropic): {detail}"));
-                Some(super::sse::StreamError::incomplete(detail))
-            }
-            None => translator.stream_error.clone(),
+                super::sse::StreamError::incomplete(detail)
+            }),
         };
         let _ = send_frame(&tx, Frame::ZeroOutput(err), drain).await;
         return;
@@ -1600,13 +1603,14 @@ async fn stream_responses(
     if !translator.produced_content() && translator.output_tokens == 0 {
         // 未产出任何内容：response.created 仍缓存在首帧前缀中未下发，
         // 直接以 ZeroOutput 让首帧循环回退为 JSON 错误响应（携带上游真实错误）。
-        // 未正常走完 finish 时优先报「没有完成信号」，而非误报空响应 429。
-        let err = match translator.incomplete_detail() {
-            Some(detail) => {
+        // 优先级同 stream_anthropic：上游 error 事件优先于「未正常走完 finish」，
+        // 否则具体原因会被笼统的 502「no finish event」取代。
+        let err = match translator.stream_error.clone() {
+            Some(e) => Some(e),
+            None => translator.incomplete_detail().map(|detail| {
                 log::warn(&format!("Upstream stream incomplete (Responses): {detail}"));
-                Some(super::sse::StreamError::incomplete(detail))
-            }
-            None => translator.stream_error.clone(),
+                super::sse::StreamError::incomplete(detail)
+            }),
         };
         let _ = send_frame(&tx, Frame::ZeroOutput(err), drain).await;
         return;

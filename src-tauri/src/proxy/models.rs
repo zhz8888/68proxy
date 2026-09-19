@@ -1071,7 +1071,7 @@ mod tests {
     fn enrich_remote_fills_provider_and_caps() {
         // 带前缀的已知模型：厂商取前缀，能力与上下文回退内置表
         let e = enrich_remote(RemoteModel {
-            id: "meituan/LongCat-2.0:free".into(),
+            id: "meituan/LongCat-2.0".into(),
             name: "LongCat 2.0".into(),
             context_length: None,
         });
