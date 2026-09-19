@@ -10,11 +10,6 @@ on:
         description: "Version tag (e.g. v1.0.0)"
         required: true
         type: string
-      draft:
-        description: 'Create as draft release'
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: write
@@ -280,7 +275,7 @@ jobs:
         with:
           tag_name: ${{ needs.validate.outputs.tag }}
           name: ${{ needs.validate.outputs.tag }}
-          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || true }}
+          draft: false
           prerelease: false
           generate_release_notes: true
           body: ${{ steps.release_notes.outputs.body }}
