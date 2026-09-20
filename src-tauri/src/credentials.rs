@@ -126,6 +126,18 @@ pub fn remove_account_at(conn: &Connection, index: usize) -> Result<Vec<Account>
     Ok(accounts)
 }
 
+/// 按 userId 移除 Command Code 账户（幂等：不存在时不报错，直接返回现列表）。
+/// 返回更新后的账户列表（调用方负责同步到 AppState.config）。
+pub fn remove_account_by_id(conn: &Connection, user_id: &str) -> Result<Vec<Account>, String> {
+    let mut accounts = load_accounts(conn)?;
+    let before = accounts.len();
+    accounts.retain(|a| a.user_id != user_id);
+    if accounts.len() != before {
+        save_accounts(conn, &accounts)?;
+    }
+    Ok(accounts)
+}
+
 /// 更新指定 userId 账户的自定义显示名；未找到时返回错误。
 /// 返回更新后的账户列表（调用方负责同步到 AppState.config）。
 pub fn rename_account(conn: &Connection, user_id: &str, user_name: &str) -> Result<Vec<Account>, String> {

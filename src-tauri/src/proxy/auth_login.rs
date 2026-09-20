@@ -437,6 +437,10 @@ pub fn cancel_auth_login(state: &AppState) {
 /// 查询当前登录结果（供前端轮询）。返回 JSON：`{status, account?}`。
 ///
 /// 超过 `LOGIN_TTL_MS` 仍未收到回调时判定超时并置为 failed（同时关停旧服务器）。
+///
+/// 成功结果只消费一次：调用方（`auth_login_poll` 命令）在落库后调用
+/// `take_auth_login_success` 取走并关闭会话，避免每次轮询重复返回明文 key、
+/// 重复落库，以及用户删号后被下一次轮询“复活”。
 pub fn poll_auth_login(state: &AppState) -> serde_json::Value {
     let mut session = state.auth_login.lock().unwrap();
     let Some(s) = session.as_mut() else {
@@ -457,6 +461,23 @@ pub fn poll_auth_login(state: &AppState) -> serde_json::Value {
         }),
         Some(LoginResult::Denied) => json!({ "status": "denied" }),
         Some(LoginResult::Failed(msg)) => json!({ "status": "failed", "error": msg }),
+    }
+}
+
+/// 取走成功结果并关闭登录会话（一次性消费）。
+///
+/// 返回 `Some((key, user_id, user_name))` 时调用方负责落库；取走后会话置 idle、
+/// loopback 服务器随之关停，`state` 令牌即刻失效不可重放。
+pub fn take_auth_login_success(state: &AppState) -> Option<(String, String, String)> {
+    let mut session = state.auth_login.lock().unwrap();
+    let s = session.as_mut()?;
+    match s.result.clone() {
+        Some(LoginResult::Success { api_key, user_id, user_name }) => {
+            drop(session);
+            cancel_auth_login(state);
+            Some((api_key, user_id, user_name))
+        }
+        _ => None,
     }
 }
 

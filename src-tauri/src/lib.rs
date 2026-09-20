@@ -80,28 +80,31 @@ fn config_get(app: AppHandle) -> proxy::config::Config {
 #[tauri::command]
 fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
-    // 本地转发 Key 与 Command Code 账户由 local_key_* / account_* 管理，config_save 不接收，
-    // 保存前保留原值
-    let stored = ctx.proxy_state.config.read().unwrap().clone();
-    config.local_api_key = stored.local_api_key;
-    config.cc_accounts = stored.cc_accounts;
-    // 账户使用规则由 account_routing_set 专门管理，此处保留原值避免被前端默认值覆盖
-    config.account_strategy = stored.account_strategy;
-    config.preferred_account_id = stored.preferred_account_id;
-    // 主题由 theme_set 专门管理，同样保留原值
-    config.theme = stored.theme;
-    // 语言由 language_set 专门管理，同样保留原值
-    config.language = stored.language;
-    // 上游版本号缓存由后端刷新逻辑维护、前端表单不含该项，保留原值避免被空值覆盖
-    config.cc_version_cache = stored.cc_version_cache;
+    // 主存 SQLite settings 表。保留字段（凭据/路由/主题/语言/版本缓存）
+    // 在持有 usage 锁后从库重读合并，避免用锁外陈旧内存快照覆盖
+    // account_add / local_key_* / routing 并发写入（last-writer-wins 丢数据）。
+    let guard = ctx.proxy_state.usage.lock().unwrap();
+    let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
+    {
+        let stored = proxy::settings::load_config(conn);
+        // 本地转发 Key 与 Command Code 账户由 local_key_* / account_* 管理，
+        // config_save 不接收，保存前保留库中现值
+        config.local_api_key = stored.local_api_key;
+        config.cc_accounts = stored.cc_accounts;
+        // 账户使用规则由 account_routing_set 专门管理，此处保留库中现值
+        config.account_strategy = stored.account_strategy;
+        config.preferred_account_id = stored.preferred_account_id;
+        // 主题由 theme_set 专门管理，同样保留库中现值
+        config.theme = stored.theme;
+        // 语言由 language_set 专门管理，同样保留库中现值
+        config.language = stored.language;
+        // 上游版本号缓存由后端刷新逻辑维护、前端表单不含该项，保留现值
+        config.cc_version_cache = stored.cc_version_cache;
+    }
     // 校验放在保留字段之后：被保留的字段不应触发校验失败
     config.validate()?;
-    // 主存 SQLite settings 表
-    {
-        let guard = ctx.proxy_state.usage.lock().unwrap();
-        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
-        proxy::settings::save_config(conn, &config)?;
-    }
+    proxy::settings::save_config(conn, &config)?;
+    drop(guard);
     // 镜像到 config.json（兜底），失败仅记 warn 不阻断保存
     if let Err(e) = config.save(&ctx.config_path) {
         proxy::log::warn(&format!(
@@ -286,6 +289,22 @@ fn account_remove(app: AppHandle, index: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// 按 userId 移除 Command Code 账户（幂等：不存在即成功）；落库后同步内存配置。
+///
+/// 下标删除在“渲染快照 → 点击”之间列表变化时会错位删错账户，
+/// 前端删除应优先使用本命令。
+#[tauri::command]
+fn account_remove_by_id(app: AppHandle, #[allow(non_snake_case)] userId: String) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let removed = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
+        credentials::remove_account_by_id(conn, &userId)?
+    };
+    ctx.proxy_state.config.write().unwrap().cc_accounts = removed;
+    Ok(json!({ "removed": true }))
+}
+
 /// 启动浏览器授权登录：后端起 loopback 回调服务器，返回授权 URL 供前端打开浏览器。
 #[tauri::command]
 async fn auth_login_start(app: AppHandle) -> Result<Value, String> {
@@ -303,32 +322,41 @@ async fn auth_login_start(app: AppHandle) -> Result<Value, String> {
 }
 
 /// 查询浏览器授权登录结果：`pending`（等待中）/ `success`（含账户信息）/ `denied` / `failed` / `idle`。
-/// success 时按 userId 去重入库并同步内存配置。
+///
+/// 成功只消费一次：首次 `success` 落库并返回账户信息，随后会话关闭、后续
+/// 轮询返回 `idle`。避免重复返回明文 key、重复落库，以及用户删号后被复活。
 #[tauri::command]
 async fn auth_login_poll(app: AppHandle) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
     let value = proxy::auth_login::poll_auth_login(&ctx.proxy_state);
-    if value.get("status").and_then(|v| v.as_str()) == Some("success") {
-        let api_key = value["account"]["key"].as_str().unwrap_or("").to_string();
-        let user_id = value["account"]["userId"].as_str().unwrap_or("").to_string();
-        let user_name = value["account"]["userName"].as_str().unwrap_or("").to_string();
-        let accounts = {
-            let guard = ctx.proxy_state.usage.lock().unwrap();
-            let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
-            credentials::add_account(
-                conn,
-                &proxy::config::Account {
-                    key: api_key,
-                    user_id: user_id.clone(),
-                    user_name,
-                    source: "oauth".into(),
-                    added_at: proxy::state::now_secs(),
-                },
-            )?
-        };
-        ctx.proxy_state.config.write().unwrap().cc_accounts = accounts;
+    if value.get("status").and_then(|v| v.as_str()) != Some("success") {
+        return Ok(value);
     }
-    Ok(value)
+    // 一次性取走成功结果（取走后会话即关闭，不可重放）
+    let Some((api_key, user_id, user_name)) =
+        proxy::auth_login::take_auth_login_success(&ctx.proxy_state)
+    else {
+        return Ok(serde_json::json!({ "status": "idle" }));
+    };
+    let accounts = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        let conn = guard.as_ref().ok_or_else(|| i18n::err("settings_store_uninitialized"))?;
+        credentials::add_account(
+            conn,
+            &proxy::config::Account {
+                key: api_key.clone(),
+                user_id: user_id.clone(),
+                user_name: user_name.clone(),
+                source: "oauth".into(),
+                added_at: proxy::state::now_secs(),
+            },
+        )?
+    };
+    ctx.proxy_state.config.write().unwrap().cc_accounts = accounts;
+    Ok(serde_json::json!({
+        "status": "success",
+        "account": { "key": api_key, "userId": user_id, "userName": user_name },
+    }))
 }
 
 /// 取消进行中的浏览器授权登录。
@@ -396,14 +424,46 @@ fn models_catalog_update(
 /// 获取当前 Command Code 账户的套餐信息与各模型准入结果（标注模型页的可用性）。
 ///
 /// `force` 为 true 时跳过 5 分钟缓存，强制重新拉取上游套餐数据。
+///
+/// 多账户时按“剩余额度最多（未耗尽优先）”的账户查套餐，而非固定首个账户：
+/// 首账户可能是 GO，而主力账户是 Max，固定首账户会把全量模型误标为不可用。
 #[tauri::command]
 async fn plan_status(app: AppHandle, force: bool) -> Result<Value, String> {
     let ctx = app.state::<AppCtx>();
-    let account_key = credentials::accounts_from_state(&ctx.proxy_state)
-        .first()
-        .map(|a| a.key.clone());
+    let accounts = credentials::accounts_from_state(&ctx.proxy_state);
+    let account_key = pick_plan_account(&ctx.proxy_state, &accounts).map(|a| a.key.clone());
     let plan = proxy::plans::plan_context(&ctx.proxy_state, account_key.as_deref(), force).await;
     Ok(proxy::plans::plan_status_json(&plan))
+}
+
+/// 为套餐查询挑选代表账户：未耗尽优先、其中剩余额度最多者；无缓存时首账户。
+fn pick_plan_account(
+    st: &proxy::state::AppState,
+    accounts: &[proxy::config::Account],
+) -> Option<proxy::config::Account> {
+    if accounts.is_empty() {
+        return None;
+    }
+    let cache = st.quota_cache.lock().unwrap();
+    let mut best: Option<(&proxy::config::Account, bool, f64)> = None;
+    for a in accounts {
+        let (exhausted, score) = cache
+            .get(&a.user_id)
+            .map(|(q, _)| (proxy::quota::is_exhausted(q), proxy::quota::remaining_score(q)))
+            .unwrap_or((false, f64::NEG_INFINITY));
+        let better = match &best {
+            None => true,
+            Some((_, best_ex, best_score)) => match (exhausted, *best_ex) {
+                (false, true) => true,
+                (true, false) => false,
+                _ => score > *best_score,
+            },
+        };
+        if better {
+            best = Some((a, exhausted, score));
+        }
+    }
+    best.map(|(a, _, _)| a.clone()).or_else(|| accounts.first().cloned())
 }
 
 /// 获取全部 Command Code 账户的额度快照（套餐、月/购买/赠送余额、5 小时与周窗口限额、组织限额）。
@@ -1081,6 +1141,7 @@ pub fn run() {
             account_add,
             account_rename,
             account_remove,
+            account_remove_by_id,
             auth_login_start,
             auth_login_poll,
             auth_login_cancel,
