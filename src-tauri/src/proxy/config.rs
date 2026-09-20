@@ -734,11 +734,14 @@ mod tests {
     }
 
     /// 环境变量覆写：合法值生效，非法值被忽略（回退配置原值）。
+    ///
+    /// 注意：`CC_API_BASE` 同样受 allowlist 约束（测试用的 `env.example.com`
+    /// 是非法上游，会被回退默认值），此处改用回环地址演示合法覆写。
     #[test]
     fn apply_env_overrides_fields() {
         std::env::set_var("PORT", "4050");
         std::env::set_var("HOST", "127.0.0.1");
-        std::env::set_var("CC_API_BASE", "https://env.example.com");
+        std::env::set_var("CC_API_BASE", "http://127.0.0.1:18080");
         std::env::set_var("PROJECT_SLUG", "env-slug");
         std::env::set_var("LOG_FILE", "/tmp/env.log");
         std::env::set_var("CC_USE_PROVIDER_MODELS", "false");
@@ -755,7 +758,7 @@ mod tests {
         c.apply_env();
         assert_eq!(c.port, 4050);
         assert_eq!(c.host, "127.0.0.1");
-        assert_eq!(c.api_base, "https://env.example.com");
+        assert_eq!(c.api_base, "http://127.0.0.1:18080");
         assert_eq!(c.project_slug, "env-slug");
         assert_eq!(c.log_file, "/tmp/env.log");
         assert!(!c.use_provider_models);
@@ -771,6 +774,7 @@ mod tests {
 
         // 非法值不生效
         std::env::set_var("PORT", "not-a-port");
+        std::env::set_var("CC_API_BASE", "https://env.example.com"); // 非官方域名，回退默认
         std::env::set_var("CC_MAX_BODY_MB", "0");
         std::env::set_var("CC_STREAM_IDLE_SECS", "not-a-number");
         std::env::set_var("CC_NONSTREAM_IDLE_SECS", "not-a-number");
@@ -779,6 +783,7 @@ mod tests {
         let mut c2 = Config::default();
         c2.apply_env();
         assert_ne!(c2.port, 0);
+        assert_eq!(c2.api_base, Config::default().api_base); // 非法上游回退默认
         assert_eq!(c2.max_body_mb, 10); // 0 被拒，保持默认
         assert_eq!(c2.stream_idle_timeout_secs, 0); // 非法值被忽略，保持默认不限
         assert_eq!(c2.nonstream_idle_timeout_secs, 0);
@@ -819,6 +824,32 @@ mod tests {
             ..Config::default()
         };
         explicit.validate().unwrap();
+    }
+
+    /// 上游地址 allowlist：userinfo 与非官方主机一律拒绝。
+    #[test]
+    fn api_base_rejects_userinfo_and_offbrand_hosts() {
+        let mut c = Config::default();
+        // 正常官方域名与回环放行
+        c.api_base = "https://api.commandcode.ai".into();
+        assert!(c.api_base_allowed());
+        c.api_base = "http://127.0.0.1:18080".into();
+        assert!(c.api_base_allowed());
+        // userinfo 绕过：解析 host 是 commandcode.ai，实际目标是 evil.com
+        for bad in [
+            "https://commandcode.ai:443@evil.com/",
+            "https://user:pass@api.commandcode.ai/",
+            "https://api.commandcode.ai@evil.com/",
+        ] {
+            c.api_base = bad.into();
+            assert!(!c.api_base_allowed(), "{bad} 必须被拒绝");
+            assert!(c.validate().is_err());
+        }
+        // 非官方域名拒绝（含大小写变体）
+        c.api_base = "https://evil.example.com".into();
+        assert!(!c.api_base_allowed());
+        c.api_base = "https://API.COMMANDCODE.AI.evil.com".into();
+        assert!(!c.api_base_allowed());
     }
 
     /// 账户对象形态缺 user_id 时按 key 派生稳定占位。
