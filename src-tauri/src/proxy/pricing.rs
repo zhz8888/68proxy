@@ -182,6 +182,30 @@ fn compact(s: &str) -> String {
 /// 兜底单价（兜底值本身可被察觉），故逐条显式登记。
 const PRICING_ALIASES: &[(&str, &str)] = &[("qwen36maxpreview", "qwen-3.6-max")];
 
+/// 剥离尾部 8 位日期后缀（`-20251001` / `@20251001` / 紧凑残留 `20251001`）。
+///
+/// 上游 ID 常带日期版本（`claude-haiku-4-5-20251001`、`Qwen3.7-Max-20260101`），
+/// 定价表键无日期。剥离必须在紧凑比对之前，否则 `qwen37max20260101` 与
+/// `qwen37max` 逐字符不等而 miss；前缀回退同样因连字符错位 miss。
+fn strip_date_suffix(s: &str) -> &str {
+    let b = s.as_bytes();
+    // `-YYYYMMDD` / `@YYYYMMDD`
+    if b.len() > 9 {
+        let sep = b[b.len() - 9];
+        if (sep == b'-' || sep == b'@') && b[b.len() - 8..].iter().all(|c| c.is_ascii_digit()) {
+            return &s[..s.len() - 9];
+        }
+    }
+    // 紧凑后的 `…YYYYMMDD`（连字符已被去掉）：至少保留 4 个非数字前缀
+    if b.len() > 12 && b[b.len() - 8..].iter().all(|c| c.is_ascii_digit()) {
+        let prefix = &s[..s.len() - 8];
+        if prefix.chars().any(|c| !c.is_ascii_digit()) && prefix.len() >= 4 {
+            return prefix;
+        }
+    }
+    s
+}
+
 /// 查找模型计费信息：精确 → 去 provider 前缀的短名 → 紧凑形式 → 别名 → 最长前缀。
 ///
 /// 上游模型 ID 可能带 provider 前缀（`deepseek/deepseek-v4-flash`）或日期后缀
@@ -199,18 +223,21 @@ pub fn find_pricing<'a>(models: &'a [ModelPricing], model: &str) -> Option<&'a M
     if let Some(m) = models.iter().find(|m| m.id.to_ascii_lowercase() == target) {
         return Some(m);
     }
-    // 2) 去掉 provider 前缀后的短名精确匹配
-    let short = target.rsplit('/').next().unwrap_or(&target);
+    // 2) 去掉 provider 前缀后的短名精确匹配（含日期后缀剥离）
+    let short_raw = target.rsplit('/').next().unwrap_or(&target);
+    let short = strip_date_suffix(short_raw);
     if let Some(m) = models.iter().find(|m| m.id.to_ascii_lowercase() == short) {
         return Some(m);
     }
-    // 3) 紧凑形式精确匹配（去连字符与点）
-    let short_compact = compact(short);
-    if let Some(m) = models
+    // 3) 紧凑形式精确匹配（去连字符与点；日期后缀已在上一步剥离，
+    //    此处对紧凑残留再剥一次，兜住 `Qwen3.7-Max-20260101` 这类）
+    let short_compact = strip_date_suffix(&compact(short)).to_string();
+    if let Some(hit) = models
         .iter()
-        .find(|m| compact(&m.id.to_ascii_lowercase()) == short_compact)
+        .filter(|m| compact(&m.id.to_ascii_lowercase()) == short_compact)
+        .max_by_key(|m| m.id.len())
     {
-        return Some(m);
+        return Some(hit);
     }
     // 4) 显式别名（紧凑形式比对无法覆盖的名称差异）
     if let Some((_, pricing_id)) = PRICING_ALIASES.iter().find(|(k, _)| *k == short_compact) {
@@ -219,11 +246,21 @@ pub fn find_pricing<'a>(models: &'a [ModelPricing], model: &str) -> Option<&'a M
             return Some(m);
         }
     }
-    // 5) 最长前缀匹配，避免短前缀（如 gpt-5）抢走更具体的档位
+    // 5) 最长前缀匹配，避免短前缀（如 gpt-5）抢走更具体的档位。
+    //    原始与紧凑两种形态同时比，取最长命中（`qwen3.7-max-extra` 对
+    //    `qwen-3.7-max`：原始因连字符错位 miss，紧凑可命中）。
     models
         .iter()
-        .filter(|m| short.starts_with(&m.id.to_ascii_lowercase()))
-        .max_by_key(|m| m.id.len())
+        .filter_map(|m| {
+            let id_lower = m.id.to_ascii_lowercase();
+            let raw_hit = short.starts_with(&id_lower).then(|| id_lower.len());
+            let compact_hit = short_compact
+                .starts_with(&compact(&id_lower))
+                .then(|| id_lower.len() + 10000);
+            raw_hit.or(compact_hit).map(|score| (score, m))
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, m)| m)
 }
 
 /// 判断给定时刻是否落在忙时窗口内（UTC，窗口定义来自模型自身的 `timeOfDay`）。
@@ -385,6 +422,26 @@ mod tests {
         assert!((p.input - 0.2).abs() < 1e-9);
         let p2 = price_for_at("claude-haiku-4-5-20251001", 1000, 0);
         assert!((p2.input - 1.0).abs() < 1e-9);
+        // 紧凑命名 + 日期后缀：此前紧凑 miss、别名无、前缀因连字符错位 miss，
+        // 会静默落兜底单价
+        let models = all_models();
+        let m = find_pricing(&models, "Qwen/Qwen3.7-Max-20260101");
+        assert_eq!(m.map(|m| m.id.as_str()), Some("qwen-3.7-max"));
+        // 紧凑命名 + 长尾后缀：前缀回退靠紧凑形态命中
+        let m2 = find_pricing(&models, "Qwen/Qwen3.7-Max-Extra");
+        assert_eq!(m2.map(|m| m.id.as_str()), Some("qwen-3.7-max"));
+    }
+
+    /// 别名值缺失时回退：别名命中但定价表无该条目，不 panic，按前缀/None 继续。
+    #[test]
+    fn alias_missing_value_falls_back() {
+        let models = all_models();
+        // 别名键命中但表内无对应值时（用空表模拟），应返回 None 而非 panic
+        let empty: Vec<ModelPricing> = Vec::new();
+        assert!(find_pricing(&empty, "Qwen/Qwen3.6-Max-Preview").is_none());
+        // 正常表仍命中
+        let m = find_pricing(&models, "Qwen/Qwen3.6-Max-Preview");
+        assert_eq!(m.map(|m| m.id.as_str()), Some("qwen-3.6-max"));
     }
 
     /// 分档计费：按上下文长度落入对应档位。

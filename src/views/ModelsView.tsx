@@ -125,6 +125,21 @@ function compactId(id: string): string {
   return id.replace(/[-.]/g, "");
 }
 
+/** 剥离尾部 8 位日期后缀（`-20251001` / `@20251001` / 紧凑残留 `20251001`），与后端同口径。 */
+function stripDateSuffix(s: string): string {
+  if (s.length > 9) {
+    const sep = s[s.length - 9];
+    if ((sep === "-" || sep === "@") && /^\d{8}$/.test(s.slice(-8))) {
+      return s.slice(0, -9);
+    }
+  }
+  if (s.length > 12 && /^\d{8}$/.test(s.slice(-8))) {
+    const prefix = s.slice(0, -8);
+    if (prefix.length >= 4 && /[^0-9]/.test(prefix)) return prefix;
+  }
+  return s;
+}
+
 /**
  * 上游注册表 ID（紧凑形式）→ 定价表 ID：两处数据源的个例别名。
  * 定价页会省略 `Preview` 这类营销后缀，紧凑比对要求逐字符相等，覆盖不到。
@@ -135,29 +150,51 @@ const PRICING_ALIASES: Record<string, string> = {
 
 /**
  * 把上游模型 ID 解析为计费表/准入表的键，口径与后端 `pricing::find_pricing` 一致：
- * 精确 → 去 provider 前缀的短名 → 紧凑形式 → 显式别名 → 最长前缀。
+ * 精确 → 去 provider 前缀的短名（含日期剥离）→ 紧凑形式 → 显式别名 → 最长前缀
+ * （原始与紧凑双形态）。
  *
  * 命名风格在两处数据源间并不统一：上游注册表写 `Qwen/Qwen3.7-Max`（驼峰无连字符），
  * 定价页写 `qwen-3.7-max`（全小写带连字符），只去前缀无法互相命中。
- * @param keys 候选键（与后端注册表同源，均为小写）
+ * @param keys 候选键（计费表已小写；准入表键同样小写，与后端注册表同源）
  * @param id 上游返回的模型 ID（可能带前缀/日期后缀、大小写不一）
  */
 function resolveCatalogKey(keys: Iterable<string>, id: string): string | undefined {
   const keySet = keys instanceof Set ? keys : new Set(keys);
   const target = id.toLowerCase();
   if (keySet.has(target)) return target;
-  const short = target.split("/").pop() ?? target;
+  const short = stripDateSuffix(target.split("/").pop() ?? target);
   if (keySet.has(short)) return short;
-  const compact = compactId(short);
+  // 候选键同样小写后再紧凑：准入表键若含大写也不 miss（与后端两侧 lower 一致）
+  const compact = stripDateSuffix(compactId(short));
+  let compactBest: string | undefined;
   for (const key of keySet) {
-    if (compactId(key) === compact) return key;
+    if (compactId(key.toLowerCase()) === compact) {
+      if (!compactBest || key.length > compactBest.length) compactBest = key;
+    }
   }
+  if (compactBest) return compactBest;
   const aliasId = PRICING_ALIASES[compact];
   if (aliasId && keySet.has(aliasId)) return aliasId;
-  // 最长前缀匹配，避免短前缀（如 gpt-5）抢走更具体的档位
+  // 最长前缀匹配，避免短前缀（如 gpt-5）抢走更具体的档位；
+  // 原始与紧凑双形态同时比（紧凑命中加权，优先于更短的原始命中）
   let best: string | undefined;
+  let bestScore = -1;
   for (const key of keySet) {
-    if (short.startsWith(key) && (!best || key.length > best.length)) best = key;
+    const lower = key.toLowerCase();
+    if (short.startsWith(lower)) {
+      const score = lower.length;
+      if (score > bestScore) {
+        best = key;
+        bestScore = score;
+      }
+    }
+    if (compact.startsWith(compactId(lower))) {
+      const score = lower.length + 10000;
+      if (score > bestScore) {
+        best = key;
+        bestScore = score;
+      }
+    }
   }
   return best;
 }
