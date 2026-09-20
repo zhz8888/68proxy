@@ -43,8 +43,8 @@ export function RecentRequestsCard({ limit = 20 }: { limit?: number }) {
     };
   }, [refresh]);
 
-  // 兜底轮询：窗口隐藏时暂停，重新可见时立即刷一次
-  useVisiblePolling(refresh, 3000);
+  // 兜底轮询：窗口隐藏时暂停；首刷由上方 useEffect 完成，此处不再立即执行
+  useVisiblePolling(refresh, 3000, false);
 
   /** 双行 token 单元格：上行文字描述（输入/输出/缓存），下行数值。 */
   function TokenCell({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
@@ -78,7 +78,7 @@ export function RecentRequestsCard({ limit = 20 }: { limit?: number }) {
           <div className="space-y-1">
             {rows.map((r) => (
               <div
-                key={`${r.ts}-${r.model}-${r.endpoint}`}
+                key={r.id}
                 className="flex items-center gap-3 rounded-md border border-border/70 bg-secondary/30 px-3 py-2"
               >
                 <ModelLogo model={r.model} size={16} className="!p-0.5" />

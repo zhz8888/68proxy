@@ -203,8 +203,9 @@ export function StatsView() {
     };
   }, [period, refresh, refreshQuota]);
 
-  // 兜底轮询（重量级 SQL 聚合）：窗口隐藏时暂停，重新可见时立即刷一次
-  useVisiblePolling(() => refresh(period), 3000);
+  // 兜底轮询（重量级 SQL 聚合）：窗口隐藏时暂停，重新可见时立即刷一次。
+  // 挂载首刷由上方 useEffect 完成，此处 immediate=false 避免双刷
+  useVisiblePolling(() => refresh(period), 3000, false);
 
   /** 清空统计：确认后调用后端并刷新。 */
   async function clearAll() {

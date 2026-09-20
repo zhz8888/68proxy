@@ -86,13 +86,13 @@ function UsageCell({ label, pct, title }: { label: string; pct: number | null; t
 }
 
 /**
- * 取账户对应的额度快照。
+ * 取账户对应的额度快照：按稳定唯一键 `user_id` 配对。
  *
- * 后端 `accounts_quota` 按账户列表同一顺序并发返回，故优先按顺序对应；
- * 掩码相等时直接采信（防止两侧列表短暂不一致时错位）。
+ * 掩码仅前 5+后 4 字符、短 key 统一打点，不可作匹配键；下标在两次请求
+ * 之间列表变化时同样错位。后端快照已带 `user_id`，直接精确配对。
  */
-function quotaFor(quotas: AccountQuota[], a: AccountEntry, index: number): AccountQuota | undefined {
-  return quotas.find((q) => q.masked_key === a.masked) ?? quotas[index];
+function quotaFor(quotas: AccountQuota[], a: AccountEntry): AccountQuota | undefined {
+  return quotas.find((q) => q.user_id === a.userId);
 }
 
 /**
@@ -216,10 +216,13 @@ export function AccountsView() {
     }
   }
 
-  /** 按下标删除一个 Command Code 账户并刷新列表。 */
-  async function removeAccount(index: number) {
+  /**
+   * 按 userId 删除账户（幂等）：下标在“渲染快照 → 点击”之间列表变化时
+   * 易错位删错账户，且删除不可逆，故不再使用下标删除。
+   */
+  async function removeAccount(a: AccountEntry) {
     try {
-      await api.accountRemove(index);
+      await api.accountRemoveById(a.userId);
       await reloadAccounts();
       toast.success(t("accounts.removed"));
       reloadQuotas();
@@ -342,8 +345,10 @@ export function AccountsView() {
       setLoginStatus("denied");
       return;
     }
-    // 统一存为 err: 前缀的消息码，渲染时用 errText 翻译；无码时回退通用失败文案
-    setLoginError(`err:${snap.error || "auth_callback_params_missing"}`);
+    // 仅消息码（`^[a-z0-9_]+$`）走 err: 通道；上游自由文本（含冒号/空格）直接
+    // 存原文，避免 msgText 参数解析失败时把 `err:` 前缀裸露给用户。
+    const raw = snap.error || "auth_callback_params_missing";
+    setLoginError(/^[a-z0-9_]+$/.test(raw) ? `err:${raw}` : raw);
     setLoginStatus("failed");
   };
   useEffect(() => {
@@ -452,8 +457,8 @@ export function AccountsView() {
             </p>
           ) : (
             <ul className="space-y-2">
-              {accounts.map((a, i) => {
-                const q = quotaFor(quotas, a, i);
+              {accounts.map((a) => {
+                const q = quotaFor(quotas, a);
                 const planName = q?.plan_name ? q.plan_name : null;
                 return (
                   <li key={a.userId || a.index} className="space-y-2 rounded-md border px-3 py-2">
@@ -523,7 +528,12 @@ export function AccountsView() {
                         <Button variant="ghost" size="sm" onClick={() => openAccountDetail(a)}>
                           {t("accounts.quotaDetail")}
                         </Button>
-                        <Button variant="destructive-ghost" size="sm" onClick={() => removeAccount(a.index)}>
+                        <Button variant="destructive-ghost" size="sm" onClick={() => {
+                          // 删除不可逆：按行内 userId 二次确认后执行，避免误触
+                          if (window.confirm(t("accounts.removeConfirm", { p0: a.userName || a.masked }))) {
+                            removeAccount(a);
+                          }
+                        }}>
                           <Trash2 />
                           {t("accounts.remove")}
                         </Button>

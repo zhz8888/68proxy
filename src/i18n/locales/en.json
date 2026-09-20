@@ -15,7 +15,8 @@
     "noData": "No data",
     "noSubscription": "No subscription",
     "unknown": "Unknown",
-    "fileFilterName": "Files"
+    "fileFilterName": "Files",
+    "copyFailed": "Copy failed, please try again"
   },
   "time": {
     "uptimeMinutes": "{{p0}}m {{p1}}s",
@@ -339,7 +340,8 @@
       "fiveHourDisabled": "The 5-hour window limit is not enabled for this account",
       "weeklyDisabled": "The weekly window limit is not enabled for this account",
       "remainingOfPool": "Remaining {{p0}} / total pool {{p1}}"
-    }
+    },
+    "removeConfirm": "Remove account {p0}? This cannot be undone."
   },
   "about": {
     "intro": "A ready-to-use local reverse-proxy desktop tool that wraps Command Code's private API into OpenAI / Anthropic compatible endpoints, so Cursor, OpenCode, Cherry Studio, and in-house tools can connect directly without any SDK adaptation. API keys are stored in plaintext in the local config file: configure once, reuse everywhere.",

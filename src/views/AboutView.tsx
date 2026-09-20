@@ -45,7 +45,7 @@ async function openLink(url: string) {
 
 // 作者署名与本 fork 仓库链接；label 由组件内的 t() 提供
 const LINKS: Array<{ icon: typeof FaGithub; labelKey: string; value: string; href: string }> = [
-  { icon: FaGithub, labelKey: "about.originalAuthor", value: "6ix8ight", href: "https://github.com/evanfu0110" },
+  { icon: FaGithub, labelKey: "about.originalAuthor", value: "evanfu0110", href: "https://github.com/evanfu0110" },
   { icon: FaGithub, labelKey: "about.forkMaintainer", value: "zhz8888", href: "https://github.com/zhz8888/68proxy" },
 ];
 

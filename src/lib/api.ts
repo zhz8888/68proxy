@@ -158,6 +158,8 @@ export interface UsageGroupRow {
 
 /** 最近请求用量明细行。 */
 export interface UsageRecentRow {
+  /** 明细行 id（后端主键，同毫秒突发不再撞键）。 */
+  id: number;
   ts: number;
   model: string;
   endpoint: string;
@@ -298,6 +300,8 @@ export interface AccountRouting {
 
 /** 单个账户的额度快照（来自上游 whoami/subscriptions/credits/summary）。 */
 export interface AccountQuota {
+  /** 账户唯一标识（后端新增，前端按此键配对，不再用掩码/下标）。 */
+  user_id: string;
   user_name: string;
   masked_key: string;
   plan_id: string | null;
@@ -336,13 +340,16 @@ export const api = {
   localKeySet: (key: string) => invoke<void>("local_key_set", { key }),
   localKeyGenerate: () => invoke<{ key: string; masked: string }>("local_key_generate"),
   localKeyDelete: () => invoke<void>("local_key_delete"),
-  // Command Code 账户：列表 / 新增（whoami 验证补全，可选自定义显示名）/ 重命名 / 按下标删除
+  // Command Code 账户：列表 / 新增（whoami 验证补全，可选自定义显示名）/ 重命名 / 删除
   accountList: () => invoke<{ accounts: AccountEntry[] }>("account_list"),
   accountAdd: (key: string, userName?: string) =>
     invoke<void>("account_add", { key, userName }),
   accountRename: (userId: string, userName: string) =>
     invoke<void>("account_rename", { userId, userName }),
   accountRemove: (index: number) => invoke<void>("account_remove", { index }),
+  // 按 userId 删除（幂等）：下标在列表并发变更时易错位，删除优先用此命令
+  accountRemoveById: (userId: string) =>
+    invoke<{ removed: boolean }>("account_remove_by_id", { userId }),
   // 浏览器授权登录：启动（返回授权 URL）/ 轮询结果 / 取消 / 打开授权页（支持隐私模式）
   authLoginStart: () => invoke<{ url: string; port: number }>("auth_login_start"),
   authLoginPoll: () => invoke<AuthLoginPoll>("auth_login_poll"),

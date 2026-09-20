@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Check, Copy, Eye, RefreshCw, Search, Sparkles } from "lucide-react";
+import { toast } from "sonner";
 
 import { ModelLogo, providerForModel } from "@/components/ModelLogo";
 import { Badge } from "@/components/ui/badge";
@@ -330,6 +331,8 @@ export function ModelsView() {
       setCopiedId(id);
       // 带身份判断：连续复制 A→B 时，A 的旧定时器不应提前清掉 B 的提示
       setTimeout(() => setCopiedId((cur) => (cur === id ? "" : cur)), 1400);
+    } else {
+      toast.error(t("common.copyFailed"));
     }
   }
 

@@ -15,7 +15,8 @@
     "noData": "暂无数据",
     "noSubscription": "无订阅",
     "unknown": "未知",
-    "fileFilterName": "文件"
+    "fileFilterName": "文件",
+    "copyFailed": "复制失败，请重试"
   },
   "time": {
     "uptimeMinutes": "{{p0}}分{{p1}}秒",
@@ -339,7 +340,8 @@
       "fiveHourDisabled": "该账户未启用 5 小时窗口限额",
       "weeklyDisabled": "该账户未启用周窗口限额",
       "remainingOfPool": "剩余 {{p0}} / 总池 {{p1}}"
-    }
+    },
+    "removeConfirm": "确定移除账户 {p0} 吗？此操作不可撤销。"
   },
   "about": {
     "intro": "一款开箱即用的本地反向代理桌面工具：把 Command Code 的私有 API 包装成 OpenAI / Anthropic 兼容接口，让 Cursor、OpenCode、Cherry Studio 以及自研工具无需任何 SDK 适配即可直接接入。API Key 明文保存在本地配置文件中，一次配置、全局复用。",

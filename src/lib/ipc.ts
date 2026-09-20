@@ -73,10 +73,16 @@ export async function listen<T>(
   return () => {
     bag.delete(fn);
     if (bag.size === 0) bridgeHandlers.delete(event);
-    // 已无任何订阅：取消待重连，避免空跑
-    if (bridgeHandlers.size === 0 && bridgeReconnect) {
-      clearTimeout(bridgeReconnect);
-      bridgeReconnect = null;
+    // 已无任何订阅：关闭共享 SSE 连接并取消待重连，避免空连接一直挂着
+    if (bridgeHandlers.size === 0) {
+      if (bridgeReconnect) {
+        clearTimeout(bridgeReconnect);
+        bridgeReconnect = null;
+      }
+      if (bridgeStream) {
+        bridgeStream.close();
+        bridgeStream = null;
+      }
     }
   };
 }

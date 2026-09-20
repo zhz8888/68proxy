@@ -38,9 +38,11 @@ export function RelayView() {
         return next.slice(0, 500);
       }),
     );
-    // 代理停止时后端会丢弃记录，前端同步清空列表
+    // 代理停止时后端会丢弃记录，前端同步清空列表。
+    // 注意：启动失败同样广播 running=false，但后端记录保留，此时不清
+    // （否则列表闪烁清空、下次挂载重拉又全部回来，与后端矛盾）。
     const offStatus = onStatus((s) => {
-      if (!s.running) setRelay([]);
+      if (!s.running && !s.error) setRelay([]);
     });
     return () => {
       offReq.then((f) => f());

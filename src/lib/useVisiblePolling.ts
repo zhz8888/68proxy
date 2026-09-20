@@ -8,8 +8,10 @@ import { useEffect, useRef } from "react";
  *
  * @param fn 每次触发执行的函数（内部自行处理错误）；用 ref 持有，无需调用方 memo 化。
  * @param intervalMs 可见时的轮询间隔（毫秒）。
+ * @param immediate 挂载时是否立即执行一次。调用方 useEffect 已首刷时传 false，
+ *   避免挂载双刷（统计页等于双倍重量级 SQL 聚合）。
  */
-export function useVisiblePolling(fn: () => void, intervalMs: number) {
+export function useVisiblePolling(fn: () => void, intervalMs: number, immediate = true) {
   const fnRef = useRef(fn);
   fnRef.current = fn;
 
@@ -18,7 +20,7 @@ export function useVisiblePolling(fn: () => void, intervalMs: number) {
 
     const start = () => {
       if (timer !== null) return;
-      fnRef.current();
+      if (immediate) fnRef.current();
       timer = setInterval(() => {
         if (document.hidden) return;
         fnRef.current();
@@ -43,5 +45,5 @@ export function useVisiblePolling(fn: () => void, intervalMs: number) {
       document.removeEventListener("visibilitychange", onVisibility);
       stop();
     };
-  }, [intervalMs]);
+  }, [intervalMs, immediate]);
 }

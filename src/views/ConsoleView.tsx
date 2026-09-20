@@ -71,6 +71,40 @@ export function ConsoleView() {
 
   // 状态兜底轮询：窗口隐藏时暂停，重新可见时立即刷一次
   useVisiblePolling(refreshStatus, 3000);
+  // 请求列表低频自愈：终止事件丢失时 streaming 会永久卡死，
+  // 每 10s 重拉一次合并（与事件增量同去重口径），丢失即自愈。
+  useVisiblePolling(
+    useCallback(async () => {
+      try {
+        const snapshot = await api.requestsGet(30);
+        if (mounted.current) {
+          setRequests((prev) => {
+            const byId = new Map(snapshot.map((x) => [x.id, x]));
+            for (const r of prev) {
+              if (r.status === "streaming" && !byId.has(r.id)) {
+                // 快照无此 id：若已开始超过 10 分钟，视为事件丢失，降级为 disconnect
+                if (Date.now() - r.started_at > 10 * 60 * 1000) {
+                  byId.set(r.id, { ...r, status: "disconnect" });
+                  continue;
+                }
+              }
+              if (!byId.has(r.id)) byId.set(r.id, r);
+              else {
+                // 快照优先（携带终止态），本地 streaming 行被覆盖即自愈
+                const cur = byId.get(r.id)!;
+                if (cur.status !== "streaming") byId.set(r.id, cur);
+                else byId.set(r.id, r.status === "streaming" ? cur : r);
+              }
+            }
+            return [...byId.values()].sort((a, b) => b.started_at - a.started_at).slice(0, 30);
+          });
+        }
+      } catch {
+        /* 忽略轮询错误 */
+      }
+    }, []),
+    10000,
+  );
 
   /** 执行启动/停止/重启操作，执行期间通过 busy 禁用按钮并反馈结果。 */
   async function run(action: "start" | "stop" | "restart") {

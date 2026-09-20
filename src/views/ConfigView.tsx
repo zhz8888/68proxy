@@ -309,7 +309,13 @@ export function ConfigView() {
     setFreeing(true);
     try {
       const r = await api.portFree(cfg.port);
-      toast.success(msgText(r.message));
+      // 非 Windows 返回 killed:[] + unsupported 提示：用 warning 而非 success，
+      // 避免用户以为已释放；同时给出手动指引
+      if (r.killed.length === 0) {
+        toast.warning(msgText(r.message));
+      } else {
+        toast.success(msgText(r.message));
+      }
       const check = await api.portCheck(cfg.port);
       setPortInUse(check);
     } catch (e) {
@@ -376,6 +382,8 @@ export function ConfigView() {
       if (await copyText(key)) {
         setCopiedKey(true);
         setTimeout(() => setCopiedKey(false), 1400);
+      } else {
+        toast.error(t("common.copyFailed"));
       }
     } catch (e) {
       toast.error(errText(e));
