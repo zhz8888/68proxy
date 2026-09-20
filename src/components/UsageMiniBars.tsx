@@ -12,8 +12,7 @@ export function UsageMiniBars({ buckets }: { buckets: UsageMinuteBucket[] }) {
   // 空数据（含全零）时展示占位
   const hasData = buckets.some(
     (b) => b.prompt_tokens + b.completion_tokens > 0 || b.requests > 0,
-  );
-  if (buckets.length === 0 || !hasData) {
+  );  if (buckets.length === 0 || !hasData) {
     return (
       <div className="flex h-24 items-center justify-center text-xs text-muted-foreground">
         {t("usageMiniBars.empty")}

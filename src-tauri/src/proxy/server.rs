@@ -233,6 +233,7 @@ async fn origin_guard(
 /// 不能在中件件里用 `next.run()` 返回后立即递减：流式响应的 body 在那之后
 /// 还要持续传输数分钟，提前递减会让 `max_inflight` 对流式请求形同虚设。
 struct InflightGuard {
+    /// 共享代理状态（drop 时递减其在途计数）。
     st: Arc<AppState>,
 }
 
@@ -719,6 +720,7 @@ async fn read_json_body(
     }
 }
 
+/// 分块读取请求体的内部实现（带大小上限，超限返回 413）。
 async fn read_json_body_inner(
     body: axum::body::Body,
     max_size: usize,
@@ -2015,6 +2017,7 @@ fn summarize_upstream_error(text: &str) -> String {
     }
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let flat = flat.trim();
+    /// 摘要截断上限（字符数），避免异常大的 body 刷爆日志。
     const LIMIT: usize = 500;
     let chars: Vec<char> = flat.chars().collect();
     if chars.len() > LIMIT {

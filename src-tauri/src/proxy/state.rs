@@ -98,7 +98,8 @@ pub struct RequestInfo {
     pub model: String,
     /// 是否流式请求。
     pub stream: bool,
-    pub status: String, // streaming / ok / error / timeout / disconnect
+    /// 请求状态：streaming（进行中）/ ok / error / timeout / disconnect。
+    pub status: String,
     /// 请求开始时间（Unix 毫秒）。
     pub started_at: u64,
     /// 端到端耗时（毫秒），请求结束时回填。

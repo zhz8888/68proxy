@@ -156,7 +156,9 @@ function Field({
  *  Command Code 上游账户由独立的账户视图管理（见 AccountsView）。 */
 export function ConfigView() {
   const { t } = useTranslation();
+  /** 当前编辑中的配置（加载后与后端一致，改动后自动保存）。 */
   const [cfg, setCfg] = useState<Config>(DEFAULTS);
+  /** 是否已完成首次加载（未完成前禁用自动保存）。 */
   const [loaded, setLoaded] = useState(false);
   // 加载失败提示（加载失败时禁用自动保存，避免用默认值覆盖后端配置）
   const [loadError, setLoadError] = useState("");
@@ -181,6 +183,7 @@ export function ConfigView() {
   const [streamIdleInput, setStreamIdleInput] = useState(
     String(DEFAULTS.stream_idle_timeout_secs),
   );
+  // 非流式上游空闲超时输入（同上：字符串中间态，清空期间不同步到配置）
   const [nonstreamIdleInput, setNonstreamIdleInput] = useState(
     String(DEFAULTS.nonstream_idle_timeout_secs),
   );
@@ -188,14 +191,18 @@ export function ConfigView() {
   const skipNextAutosave = useRef(true);
   // 本地转发 Key（sk-）的凭据状态
   const [localKey, setLocalKey] = useState<ApiKeyState>({ has_key: false, masked: "" });
+  /** 本地 Key 输入框内容（新建/替换时使用）。 */
   const [localKeyInput, setLocalKeyInput] = useState("");
+  /** 是否明文展示本地 Key 输入。 */
   const [showLocalKey, setShowLocalKey] = useState(false);
   // 是否刚复制过完整 Key（短暂显示「已复制」图标）
   const [copiedKey, setCopiedKey] = useState(false);
+  /** 端口占用检测结果（含占用进程 pid，Windows 可结束）。 */
   const [portInUse, setPortInUse] = useState<{ in_use: boolean; pid: number | null }>({
     in_use: false,
     pid: null,
   });
+  /** 是否正在释放被占用的端口。 */
   const [freeing, setFreeing] = useState(false);
 
   // 挂载时并行加载配置与本地 Key，loaded 用于区分“初始加载完成”

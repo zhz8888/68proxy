@@ -83,7 +83,9 @@ impl AccessInfo {
 
 /// 套餐准入规则：允许的模型分类 + 额外屏蔽的模型（已归一化）。
 struct PlanRule {
+    /// 允许的模型分类集合（如 premium / opensource）。
     categories: &'static [&'static str],
+    /// 额外屏蔽的模型名（已归一化，逐条显式登记）。
     blocked: &'static [&'static str],
 }
 
@@ -111,6 +113,7 @@ fn plan_rule(plan_id: &str) -> Option<PlanRule> {
         "fugu-ultra",
     ];
     const ALL: &[&str] = &[CAT_PREMIUM, CAT_OSS];
+    /// 仅开源模型可用时的分类集合（Go / GOAT 套餐用）。
     const OSS: &[&str] = &[CAT_OSS];
     Some(match plan_id {
         "individual-go" => PlanRule { categories: OSS, blocked: GO_BLOCKED },

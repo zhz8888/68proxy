@@ -56,16 +56,23 @@ impl<'de> Deserialize<'de> for Account {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Raw {
+            /// 旧版形态：纯字符串 key。
             Str(String),
+            /// 新版形态：完整账户对象。
             Obj {
+                /// 上游 API key（user_ 开头）。
                 key: String,
                 #[serde(default)]
+                /// 账户唯一标识（缺省时按 key 派生占位）。
                 user_id: String,
                 #[serde(default)]
+                /// 显示名（可自定义）。
                 user_name: String,
                 #[serde(default = "default_source")]
+                /// 来源：oauth / manual。
                 source: String,
                 #[serde(default)]
+                /// 添加时间（Unix 秒）。
                 added_at: u64,
             },
         }

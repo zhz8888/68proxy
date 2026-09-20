@@ -28,8 +28,11 @@ use tauri_plugin_autostart::ManagerExt;
 
 /// Tauri 托管状态：配置路径 + 代理共享状态。
 struct AppCtx {
+    /// config.json 路径（迁移/兜底源）。
     config_path: PathBuf,
+    /// usage.sqlite 路径（设置/用量/模型库）。
     usage_path: PathBuf,
+    /// 代理全局共享状态。
     proxy_state: Arc<proxy::state::AppState>,
     /// 代理启停串行锁：start 判定 `is_running` 与 `bind`/`mark_started` 之间存在窗口，
     /// 并发 start（托盘、setup 自动启动、前端按钮）会各自 bind 一次并互相报错。

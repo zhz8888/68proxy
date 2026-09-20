@@ -26,12 +26,16 @@ use serde::{Deserialize, Serialize};
 /// 单档费率（输入 / 输出 / 缓存命中 / 缓存写入，$/1M tokens）。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Rates {
+    /// 输入单价。
     #[serde(default)]
     pub input: f64,
+    /// 输出单价。
     #[serde(default)]
     pub output: f64,
+    /// 缓存命中单价。
     #[serde(default, rename = "cacheRead")]
     pub cached: f64,
+    /// 缓存写入单价。
     #[serde(default, rename = "cacheWrite")]
     pub cache_write: f64,
 }
@@ -39,10 +43,13 @@ pub struct Rates {
 /// 模型能力标记（文本输入 / 视觉 / 思考）。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ModelCaps {
+    /// 是否支持文本输入。
     #[serde(default)]
     pub text: bool,
+    /// 是否支持视觉输入（图片）。
     #[serde(default)]
     pub vision: bool,
+    /// 是否支持思考/推理输出。
     #[serde(default)]
     pub reasoning: bool,
 }
@@ -50,8 +57,10 @@ pub struct ModelCaps {
 /// 一个价格档位：`max_context` 为该档覆盖的最大输入 token（None 表示最高档、无上限）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tier {
+    /// 该档覆盖的最大输入 token（None 表示最高档、无上限）。
     #[serde(default, rename = "maxContext")]
     pub max_context: Option<u64>,
+    /// 该档费率。
     pub rates: Rates,
     /// 该档的标牌价（未打折；仅部分促销模型提供），仅供展示。
     #[serde(default, rename = "listRates", skip_serializing_if = "Option::is_none")]
@@ -61,6 +70,7 @@ pub struct Tier {
 /// 闲时/忙时费率：`peak` 为忙时价，其余时间用档位价（即闲时价）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeOfDay {
+    /// 忙时费率。
     pub peak: Rates,
     /// 忙时窗口，UTC 小时区间 [start, end)。
     #[serde(default, rename = "peakRanges")]
@@ -76,13 +86,16 @@ pub struct TimeOfDay {
 /// 促销信息：`discount_percent` 为折扣百分比，`free` 表示限时免费。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Deal {
+    /// 折扣百分比（rates 已是折后有效价，此字段仅展示）。
     #[serde(default, rename = "discountPercent")]
     pub discount_percent: u8,
+    /// 是否限时免费（为真时不产生成本）。
     #[serde(default)]
     pub free: bool,
     /// 促销结束日期（YYYY-MM-DD），存在时仅作展示。
     #[serde(default)]
     pub expires: Option<String>,
+    /// 促销结束条件描述，存在时仅作展示。
     #[serde(default, rename = "endsWhen")]
     pub ends_when: Option<String>,
 }
@@ -93,11 +106,15 @@ pub struct Deal {
 /// `state::ModelInfo`；两者按模型 ID 关联（匹配口径见 `find_pricing`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPricing {
+    /// 模型 ID（价格表归一化键）。
     pub id: String,
+    /// 促销信息（无促销时为 None）。
     #[serde(default)]
     pub deal: Option<Deal>,
+    /// 闲时/忙时费率（仅 DeepSeek 系列）。
     #[serde(default, rename = "timeOfDay")]
     pub time_of_day: Option<TimeOfDay>,
+    /// 分档费率（至少一档）。
     #[serde(default)]
     pub tiers: Vec<Tier>,
 }
@@ -108,19 +125,27 @@ pub struct ModelPricing {
 /// 运行时数据分属 `models` 与 `model_pricing` 两张表，见 models 模块）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct FullModelRecord {
+    /// 模型 ID。
     pub id: String,
+    /// 展示名。
     #[serde(default)]
     pub name: String,
+    /// 厂商显示名。
     #[serde(default)]
     pub provider: Option<String>,
+    /// 上下文长度（token）。
     #[serde(default, rename = "contextWindow")]
     pub context_window: Option<u64>,
+    /// 能力标记。
     #[serde(default)]
     pub caps: ModelCaps,
+    /// 促销信息。
     #[serde(default)]
     pub deal: Option<Deal>,
+    /// 闲时/忙时费率。
     #[serde(default, rename = "timeOfDay")]
     pub time_of_day: Option<TimeOfDay>,
+    /// 分档费率。
     #[serde(default)]
     pub tiers: Vec<Tier>,
 }
@@ -164,6 +189,7 @@ pub fn all_models() -> Arc<Vec<ModelPricing>> {
         return models.clone();
     }
     static FALLBACK: OnceLock<Arc<Vec<ModelPricing>>> = OnceLock::new();
+    /// 兜底表（进程内只解析一次）：注册表未载入时使用，避免每次调用重复解析。
     FALLBACK
         .get_or_init(|| Arc::new(builtin_pricing()))
         .clone()

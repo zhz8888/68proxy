@@ -13,6 +13,7 @@ import { lampForStatus, statusLabel } from "@/lib/status";
 /** 中继视图：实时展示代理启动以来每一次请求的中继记录。 */
 export function RelayView() {
   const { t } = useTranslation();
+  /** 中继记录（新在前，上限 500 条）。 */
   const [relay, setRelay] = useState<RequestInfo[]>([]);
 
   // 挂载时加载历史记录并订阅请求/状态事件，卸载时取消订阅

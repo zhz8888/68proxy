@@ -106,7 +106,7 @@ const PROVIDER_ICONS: Record<string, BrandAvatar> = {
   hunyuan: Hunyuan.Avatar,
 };
 
-// 模型 ID 前缀 → 供应商标识的映射表，用于挑选对应的品牌图标
+/** 模型 ID 前缀 → 供应商标识的映射表，用于挑选对应的品牌图标。 */
 const PROVIDER_BY_PREFIX: Array<[RegExp, string]> = [
   [/^deepseek\//, "deepseek"],
   [/^claude-/, "anthropic"],

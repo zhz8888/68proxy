@@ -19,8 +19,11 @@ import { cn } from "@/lib/utils";
 /** 控制台视图：展示代理运行状态、监听端口与代理地址，并提供启动/停止/重启及健康检查操作。 */
 export function ConsoleView() {
   const { t } = useTranslation();
+  /** 最新代理运行状态（null 表示尚未加载）。 */
   const [status, setStatus] = useState<ProxyStatus | null>(null);
+  /** 最近中继请求摘要（新在前）。 */
   const [requests, setRequests] = useState<RequestInfo[]>([]);
+  /** 启停进行中的操作（防重复点击，null 表示空闲）。 */
   const [busy, setBusy] = useState<"start" | "stop" | "restart" | null>(null);
   const mounted = useRef(true); // 组件是否仍挂载，避免卸载后的异步回调再 setState
 

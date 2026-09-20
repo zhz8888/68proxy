@@ -68,16 +68,24 @@ function buildRemovePrompt(t: TFunction, port: number, toolName: string): string
 /** 工具接入视图：生成接入/移除本地代理的 AI 提示词，用户复制后发给目标工具的 AI 助手完成配置。 */
 export function ToolsView() {
   const { t } = useTranslation();
+  /** 最新代理状态（端口未就绪时回退默认端口）。 */
   const [status, setStatus] = useState<ProxyStatus | null>(null);
+  /** 可选模型列表（用于弹窗中指定模型子集）。 */
   const [models, setModels] = useState<ModelInfo[]>([]);
+  /** 模型范围模式：upstream（全部上游模型）/ specified（指定子集）。 */
   const [mode, setMode] = useState<ModelMode>("upstream");
+  /** 已选模型 ID 列表（specified 模式生效）。 */
   const [selected, setSelected] = useState<string[]>([]);
+  /** 目标工具名（拼入提示词，可选）。 */
   const [toolName, setToolName] = useState("");
+  /** 接入提示词是否刚复制过（短暂显示「已复制」图标）。 */
   const [copied, setCopied] = useState(false);
+  /** 移除提示词是否刚复制过。 */
   const [removeCopied, setRemoveCopied] = useState(false);
   // 两个“已复制”提示的复位定时器句柄（重复点击时需先清旧定时器）
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const removeCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 模型选择弹窗是否打开。 */
   const [dialogOpen, setDialogOpen] = useState(false);
   // draftMode/draftSelected 是弹窗中的临时选择，点“确定”后才应用到 mode/selected
   const [draftMode, setDraftMode] = useState<ModelMode>("upstream");

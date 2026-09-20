@@ -67,10 +67,15 @@ pub struct UsageEntry {
 /// 汇总统计结果（对应 9router 的 getUsageStats 返回结构）。
 #[derive(Debug, Serialize)]
 pub struct UsageStats {
+    /// 总请求数。
     pub total_requests: u64,
+    /// 总输入 token（含缓存命中与写入）。
     pub total_prompt_tokens: u64,
+    /// 总输出 token。
     pub total_completion_tokens: u64,
+    /// 总缓存命中 token。
     pub total_cached_tokens: u64,
+    /// 总估算成本（美元）。
     pub total_cost: f64,
     /// 按模型分组（含请求数、各 token 列与成本）。
     pub by_model: Vec<GroupRow>,
@@ -85,21 +90,32 @@ pub struct UsageStats {
 /// 分组统计行。
 #[derive(Debug, Serialize)]
 pub struct GroupRow {
+    /// 分组键：模型名或端点路径。
     pub key: String,
+    /// 请求数。
     pub requests: u64,
+    /// 输入 token。
     pub prompt_tokens: u64,
+    /// 输出 token。
     pub completion_tokens: u64,
+    /// 缓存命中 token。
     pub cached_tokens: u64,
+    /// 输入+输出合计 token。
     pub total_tokens: u64,
+    /// 估算成本（美元）。
     pub cost: f64,
 }
 
 /// 分钟桶。
 #[derive(Debug, Serialize)]
 pub struct MinuteBucket {
+    /// 该分钟内的请求数。
     pub requests: u64,
+    /// 该分钟内的输入 token。
     pub prompt_tokens: u64,
+    /// 该分钟内的输出 token。
     pub completion_tokens: u64,
+    /// 该分钟内的估算成本（美元）。
     pub cost: f64,
 }
 
@@ -108,15 +124,25 @@ pub struct MinuteBucket {
 pub struct RecentRow {
     /// 明细行 id（`usage_history` 主键，前端作列表 key 用，同毫秒突发不再撞键）。
     pub id: i64,
+    /// 请求开始时间（Unix 毫秒）。
     pub ts: u64,
+    /// 请求的模型名。
     pub model: String,
+    /// 入口端点（/v1/chat/completions 等）。
     pub endpoint: String,
+    /// 请求状态：ok / error / timeout / disconnect。
     pub status: String,
+    /// 输入 token。
     pub prompt_tokens: u64,
+    /// 输出 token。
     pub completion_tokens: u64,
+    /// 命中缓存的输入 token 数（prompt 子集）。
     pub cached_tokens: u64,
+    /// 写入缓存的输入 token 数（prompt 子集）。
     pub cache_write_tokens: u64,
+    /// 估算成本（美元）。
     pub cost: f64,
+    /// 端到端耗时（毫秒）。
     pub elapsed_ms: u64,
 }
 
@@ -125,18 +151,26 @@ pub struct RecentRow {
 pub struct ChartPoint {
     /// 桶标签：小时桶为 "HH:00"，天桶为 "MM-DD"。
     pub label: String,
+    /// 该桶输入 token。
     pub prompt_tokens: u64,
+    /// 该桶输出 token。
     pub completion_tokens: u64,
+    /// 该桶估算成本（美元）。
     pub cost: f64,
 }
 
 /// 按天预聚合的 JSON 结构（usage_daily.data）。
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct DayAgg {
+    /// 当天请求数。
     requests: u64,
+    /// 当天输入 token。
     prompt_tokens: u64,
+    /// 当天输出 token。
     completion_tokens: u64,
+    /// 当天缓存命中 token。
     cached_tokens: u64,
+    /// 当天估算成本（美元）。
     cost: f64,
     /// 模型ID -> 聚合行。
     by_model: HashMap<String, DayRow>,
@@ -147,10 +181,15 @@ struct DayAgg {
 /// 分组维度在 DayAgg 中的聚合行。
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct DayRow {
+    /// 请求数。
     requests: u64,
+    /// 输入 token。
     prompt_tokens: u64,
+    /// 输出 token。
     completion_tokens: u64,
+    /// 缓存命中 token。
     cached_tokens: u64,
+    /// 估算成本（美元）。
     cost: f64,
 }
 
@@ -798,12 +837,19 @@ fn chart_all(conn: &Connection) -> Result<Vec<ChartPoint>, String> {
 /// 不读取存储的 `cost`：实时统计按明细的 token 与时刻用当前价目重算，
 /// 使分档计费与闲/忙时费率能正确生效。
 struct Row {
+    /// 请求开始时间（Unix 毫秒）。
     ts: u64,
+    /// 请求的模型名。
     model: String,
+    /// 入口端点。
     endpoint: String,
+    /// 输入 token。
     prompt_tokens: u64,
+    /// 输出 token。
     completion_tokens: u64,
+    /// 缓存命中 token。
     cached_tokens: u64,
+    /// 缓存写入 token。
     cache_write_tokens: u64,
 }
 

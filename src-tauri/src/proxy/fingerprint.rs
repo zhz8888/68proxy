@@ -69,9 +69,13 @@ const FP_SALT: &str = "command-code:device-fingerprint:v1";
 /// 共用同一份，避免「指纹说 win32、环境说 linux」这类自相矛盾，也避免把宿主机真实
 /// 信息（平台、cwd）交给上游。
 pub struct DeviceProfile {
+    /// 伪装平台（与 CLI DEVICE_PROFILE 一致）。
     pub platform: &'static str,
+    /// 伪装架构。
     pub arch: &'static str,
+    /// 伪装系统版本。
     pub os_release: &'static str,
+    /// 是否容器环境（固定 false）。
     pub is_container: bool,
     /// 伪造的项目目录：与 x-project-slug 同源（真机里 slug = slugify(workingDir)）。
     pub project_dir: String,

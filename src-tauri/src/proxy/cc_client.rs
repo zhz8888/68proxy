@@ -245,6 +245,9 @@ fn refresh_key_state_fingerprint(state: &AppState, user_id: &str) {
     }
 }
 
+/// 执行一次初始化预请求（上报指纹 + 上报 CLI 会话存活事件）。
+///
+/// 由 `ensure_initialized` 调度（带节流），失败仅记日志不阻断主流程。
 async fn ensure_initialized_inner(state: &AppState, api_key: &str, user_id: &str, now: u64) {
     let cfg = state.config.read().unwrap().clone();
     let mut headers = base_headers(state, api_key);

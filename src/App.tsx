@@ -80,10 +80,15 @@ function displayVersion(version: string): string {
 /** 应用主框架：左侧导航栏 + 顶部状态栏 + 按当前视图切换的内容区。 */
 function App() {
   const { t } = useTranslation();
+  /** 当前选中的主视图（左侧导航切换）。 */
   const [view, setView] = useState<View>("console");
+  /** 最新代理运行状态（null 表示尚未加载）。 */
   const [status, setStatus] = useState<ProxyStatus | null>(null);
+  /** 启停进行中的方向（防重复点击，null 表示空闲）。 */
   const [busy, setBusy] = useState<"start" | "stop" | null>(null);
+  /** 窗口是否已最大化（用于切换最大化/还原按钮提示）。 */
   const [maximized, setMaximized] = useState(false);
+  /** 应用版本号（浏览器调试环境下为空串，界面省略显示）。 */
   const [version, setVersion] = useState("");
 
   useEffect(() => {

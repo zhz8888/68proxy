@@ -74,6 +74,7 @@ function PriceLines({ pricing, free }: { pricing?: ModelPricing; free: boolean }
   if (free) {
     return <span className="text-signal-success">{t("models.freeLimited")}</span>;
   }
+  /** 单档费率 →「输入价 / 输出价（每百万 token）」展示文本。 */
   const perM = (r: ModelRates) =>
     t("models.pricePerM", { p0: formatPrice(r.input), p1: formatPrice(r.output) });
 
@@ -223,16 +224,27 @@ function matchAccess(access: Record<string, ModelAccessInfo>, id: string): Model
 /** 模型视图：展示可用模型列表及其能力与价格，支持搜索、能力筛选、复制与手动刷新。 */
 export function ModelsView() {
   const { t } = useTranslation();
+  /** 模型列表（展示用，含厂商/能力/上下文长度）。 */
   const [models, setModels] = useState<ModelInfo[]>([]);
+  /** 计费表（模型 ID → 价格条目）。 */
   const [catalog, setCatalog] = useState<Map<string, ModelPricing>>(new Map());
+  /** 是否使用了兜底列表（上游拉取失败时为 true）。 */
   const [fallback, setFallback] = useState(false);
+  /** 当前账户套餐上下文（null 表示尚未加载）。 */
   const [plan, setPlan] = useState<PlanContext | null>(null);
+  /** 各模型在当前套餐下的准入结果（键为模型 ID）。 */
   const [access, setAccess] = useState<Record<string, ModelAccessInfo>>({});
+  /** 列表是否加载中。 */
   const [loading, setLoading] = useState(true);
+  /** 加载失败提示原文（渲染时再翻译）。 */
   const [error, setError] = useState("");
+  /** 搜索关键字（匹配模型 ID/名称）。 */
   const [search, setSearch] = useState("");
+  /** 能力/价格筛选维度。 */
   const [filter, setFilter] = useState<Filter>("all");
+  /** 厂商筛选（ALL_PROVIDERS 表示全部厂商）。 */
   const [providerFilter, setProviderFilter] = useState(ALL_PROVIDERS);
+  /** 刚复制过的模型 ID（用于短暂显示「已复制」图标）。 */
   const [copiedId, setCopiedId] = useState("");
 
   /** 拉取模型列表、内置计费表与套餐准入结果。

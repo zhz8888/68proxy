@@ -17,6 +17,7 @@ export function UrlRow({
   className?: string;
 }) {
   const { t } = useTranslation();
+  /** 是否刚复制过（短暂显示「已复制」图标）。 */
   const [copied, setCopied] = useState(false);
   // 复位定时器句柄：重复点击时先清旧定时器，避免提示被提前清掉
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);

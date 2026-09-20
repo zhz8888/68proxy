@@ -13,15 +13,14 @@ import { Separator } from "@/components/ui/separator";
 import { errText } from "@/lib/messages";
 import { openExternal } from "@/lib/platform";
 
-// 代理实现逻辑的四个步骤，按顺序展示；标题与说明由组件内的 t() 提供
-const LOGIC_STEPS = [
-  { titleKey: "about.logic.step1Title", descKey: "about.logic.step1Desc" },
+// 代理实现逻辑的四个步骤（按顺序展示）；标题与说明的 i18n key 由组件内 t() 解析
+const LOGIC_STEPS = [  { titleKey: "about.logic.step1Title", descKey: "about.logic.step1Desc" },
   { titleKey: "about.logic.step2Title", descKey: "about.logic.step2Desc" },
   { titleKey: "about.logic.step3Title", descKey: "about.logic.step3Desc" },
   { titleKey: "about.logic.step4Title", descKey: "about.logic.step4Desc" },
 ];
 
-// 技术栈条目：图标、名称与简介；技术栈名保持原文，仅名称/简介中的自然语言走 t()
+// 技术栈条目：图标、名称与简介 key；技术栈名保持原文，仅自然语言简介走 t()
 const TECH_STACK: Array<{
   icons: IconType[];
   name?: string;
@@ -43,7 +42,7 @@ async function openLink(url: string) {
   }
 }
 
-// 作者署名与本 fork 仓库链接；label 由组件内的 t() 提供
+// 作者署名与本 fork 仓库链接；展示文案 label 由组件内 t() 解析
 const LINKS: Array<{ icon: typeof FaGithub; labelKey: string; value: string; href: string }> = [
   { icon: FaGithub, labelKey: "about.originalAuthor", value: "evanfu0110", href: "https://github.com/evanfu0110" },
   { icon: FaGithub, labelKey: "about.forkMaintainer", value: "zhz8888", href: "https://github.com/zhz8888/68proxy" },

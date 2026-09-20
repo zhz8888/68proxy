@@ -22,7 +22,9 @@ import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+/** 官方 pricing-limits 文档地址（RSC 页面，含价格行 JSON 岛）。 */
 const PAGE_URL = "https://commandcode.ai/docs/resources/pricing-limits";
+/** 输出文件：随程序打包的价格域 JSON（首次启动播种进 SQLite）。 */
 const OUT_FILE = join(dirname(fileURLToPath(import.meta.url)), "../src-tauri/src/proxy/pricing.json");
 
 /** 把 RSC 文本流里的 `{"rows":...}` JSON 岛按括号配对完整截出。 */
@@ -69,21 +71,27 @@ function normalizeRates(r) {
   };
 }
 
+/** 官方文档页 HTML（内含 RSC 文本流）。 */
 const html = await (await fetch(PAGE_URL)).text();
 
 // 1) 拼接 RSC 文本流：每段 push 的第二个元素是 JS 字符串字面量，用 JSON.parse 正确解码
+/** RSC 文本流片段（每段 push 的第二个元素解码后拼接）。 */
 const chunks = [...html.matchAll(/self\.__next_f\.push\(\[1,\s*"((?:[^"\\]|\\.)*)"\]\)/g)].map(
   (m) => JSON.parse(`"${m[1]}"`),
 );
+/** 拼接后的完整 RSC 文本流。 */
 const stream = chunks.join("");
 
 // 2) 截出价格行 JSON 岛
+/** 价格行 JSON 岛在文本流中的起始位置。 */
 const anchor = stream.indexOf('{"rows":');
 if (anchor < 0) throw new Error("页面中未找到价格数据（rows），页面结构可能已变化");
+/** 价格行原始数组（RSC 引用尚未解开）。 */
 const rows = JSON.parse(extractBalanced(stream, anchor)).rows;
 
 // 3) 解析 RSC 引用："$30:props:rows:17:tiers:0:listRates" → 引用组件 props 根下的
 //    rows[17].tiers[0].listRates（路径含 "rows" 前缀，故从 props 根开始导航）
+/** 解开 RSC 引用串（如 "$30:props:rows:…"），非引用值原样返回。 */
 function resolve(value) {
   if (typeof value !== "string") return value;
   const m = /^\$[0-9a-f]+:props:(.+)$/.exec(value);
@@ -96,6 +104,7 @@ function resolve(value) {
 }
 
 // 4) 格式化为价格域条目
+/** 格式化后的价格域条目数组（按 id 排序后写入文件）。 */
 const entries = rows.map((r) => ({
   id: r.id,
   ...(r.deal
@@ -118,6 +127,7 @@ const entries = rows.map((r) => ({
       }
     : {}),
   tiers: (r.tiers ?? []).map((t) => {
+    /** 该档的标牌价（RSC 引用需解开；缺省时不输出该字段）。 */
     const listRates = t.listRates ? resolve(t.listRates) : undefined;
     return {
       maxContext: parseContextCap(t.context),
@@ -129,10 +139,15 @@ const entries = rows.map((r) => ({
 entries.sort((a, b) => a.id.localeCompare(b.id));
 
 // 5) 写文件，并输出与现有文件的差异摘要
+/** 写文件前的旧数据（不存在时为空数组，用于差异摘要）。 */
 const before = existsSync(OUT_FILE) ? JSON.parse(readFileSync(OUT_FILE, "utf-8")) : [];
+/** 旧数据按 id 索引（用于逐条比对变更）。 */
 const beforeById = new Map(before.map((e) => [e.id, e]));
+/** 内容发生变化的条目数。 */
 const changed = entries.filter((e) => JSON.stringify(e) !== JSON.stringify(beforeById.get(e.id))).length;
+/** 新增的模型 id 列表。 */
 const added = entries.filter((e) => !beforeById.has(e.id)).map((e) => e.id);
+/** 移除的模型 id 列表。 */
 const removed = before.filter((e) => !entries.some((n) => n.id === e.id)).map((e) => e.id);
 
 writeFileSync(OUT_FILE, JSON.stringify(entries, null, 2) + "\n", "utf-8");

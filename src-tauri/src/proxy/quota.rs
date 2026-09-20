@@ -80,6 +80,7 @@ impl LimitWindow {
 /// 组织级消费限额行（来自 `whoami.orgLimits`）。
 #[derive(Debug, Clone, Serialize)]
 pub struct OrgLimit {
+    /// 限额项展示名。
     pub label: String,
     /// 已用百分比（0-100）。
     pub pct: f64,
@@ -98,15 +99,19 @@ pub struct AccountQuota {
     pub masked_key: String,
     /// 套餐 ID 与展示名；无订阅时为 null / 空字符串（文案由前端按语言渲染）。
     pub plan_id: Option<String>,
+    /// 套餐展示名；无订阅时为空字符串。
     pub plan_name: String,
     /// 订阅状态（active / trialing / past_due …）。
     pub status: Option<String>,
     /// 三类剩余额度（美元）。
     pub monthly_remaining: f64,
+    /// 购买剩余额度（美元）。
     pub purchased_remaining: f64,
+    /// 赠送剩余额度（美元）。
     pub free_remaining: f64,
-    /// 总剩余与总池（美元）。
+    /// 总剩余（美元）。
     pub total_remaining: f64,
+    /// 总池（美元）= 月额度 + 购买 + 赠送。
     pub total_pool: f64,
     /// 本计费周期内上游统计的实际消耗（美元）。
     pub total_spent: f64,
@@ -118,6 +123,7 @@ pub struct AccountQuota {
     pub days_left: Option<i64>,
     /// 周期起止（Unix 毫秒）。
     pub period_start: Option<u64>,
+    /// 周期终点（Unix 毫秒）。
     pub period_end: Option<u64>,
     /// 5 小时窗口限额。
     pub five_hour: Option<LimitWindow>,

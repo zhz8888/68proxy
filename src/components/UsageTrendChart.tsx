@@ -50,6 +50,7 @@ export function UsageTrendChart({
   );
   const max = Math.max(...values, 1) * 1.1;
   const stepX = innerW / Math.max(points.length - 1, 1);
+  /** 数值 → SVG 纵坐标：按最大值归一化到绘图区内（越大越靠上）。 */
   const y = (v: number) => PAD.top + innerH - (v / max) * innerH;
 
   // 面积路径：折线 + 底部闭合

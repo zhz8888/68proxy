@@ -35,9 +35,13 @@ const LEVEL_DOT: Record<string, string> = {
 /** 日志视图：实时展示代理运行日志，支持按级别与关键词过滤、自动滚动和导出。 */
 export function LogsView() {
   const { t } = useTranslation();
+  /** 已展示的日志条目（历史快照 + 实时事件合并去重）。 */
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  /** 级别过滤：all（全部）/ info / warn / error。 */
   const [level, setLevel] = useState<Level>("all");
+  /** 关键词过滤（匹配正文，大小写不敏感）。 */
   const [keyword, setKeyword] = useState("");
+  /** 新日志到达时是否自动滚动到底部。 */
   const [autoscroll, setAutoscroll] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
 

@@ -17,8 +17,11 @@ type Listener = (snap: LoginSnapshot) => void;
 /** 轮询间隔（毫秒）。 */
 const POLL_INTERVAL_MS = 1000;
 
+/** 当前登录快照（模块级单例，视图只读订阅）。 */
 let snapshot: LoginSnapshot = { status: "idle" };
+/** 后台轮询定时器句柄（null 表示未在轮询）。 */
 let timer: ReturnType<typeof setInterval> | null = null;
+/** 登录状态订阅者集合（视图挂载时注册、卸载时移除）。 */
 const listeners = new Set<Listener>();
 
 /** 通知所有订阅者当前快照。 */

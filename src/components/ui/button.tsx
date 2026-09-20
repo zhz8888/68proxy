@@ -40,6 +40,7 @@ const buttonVariants = cva(
 export interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
+  /** 为 true 时经 Slot 把样式渲染到子元素上（而非原生 button）。 */
   asChild?: boolean;
 }
 

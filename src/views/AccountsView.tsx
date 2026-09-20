@@ -103,28 +103,41 @@ function quotaFor(quotas: AccountQuota[], a: AccountEntry): AccountQuota | undef
  */
 export function AccountsView() {
   const { t } = useTranslation();
+  /** Command Code 账户列表。 */
   const [accounts, setAccounts] = useState<AccountEntry[]>([]);
+  /** 账户列表是否已完成首次加载。 */
   const [loaded, setLoaded] = useState(false);
+  /** 列表加载失败提示原文（渲染时再翻译）。 */
   const [loadError, setLoadError] = useState("");
+  /** 手动添加账户的 Key 输入框内容。 */
   const [accountInput, setAccountInput] = useState("");
+  /** 是否展开手动添加输入框。 */
   const [showAccountInput, setShowAccountInput] = useState(false);
   // 各账户额度快照（套餐类型与 5 小时/周/月用量），与账户列表同序返回
   const [quotas, setQuotas] = useState<AccountQuota[]>([]);
+  /** 额度是否加载中。 */
   const [quotaLoading, setQuotaLoading] = useState(false);
   // 浏览器授权登录弹窗状态
   const [loginOpen, setLoginOpen] = useState(false);
+  /** 浏览器授权登录 URL（弹窗内展示/打开）。 */
   const [loginUrl, setLoginUrl] = useState("");
+  /** 浏览器授权登录状态（与后端轮询快照同步）。 */
   const [loginStatus, setLoginStatus] = useState<"idle" | "pending" | "success" | "denied" | "failed">("idle");
+  /** 登录失败提示原文。 */
   const [loginError, setLoginError] = useState("");
   // 是否以隐私模式打开授权页（避免与浏览器中已登录的账号冲突）
   const [loginPrivate, setLoginPrivate] = useState(false);
   // 账户改名状态（renameId 为正在改名的 userId）
   const [renameId, setRenameId] = useState<string | null>(null);
+  /** 改名输入框内容。 */
   const [renameValue, setRenameValue] = useState("");
   // 账户详情弹窗（展示该账户完整额度）
   const [detailAccount, setDetailAccount] = useState<AccountEntry | null>(null);
+  /** 详情弹窗中的额度快照。 */
   const [detailQuota, setDetailQuota] = useState<AccountQuota | null>(null);
+  /** 详情额度是否加载中。 */
   const [detailLoading, setDetailLoading] = useState(false);
+  /** 详情加载失败提示原文。 */
   const [detailError, setDetailError] = useState("");
   // 详情请求序号：用于丢弃乱序到达的过期响应（见 openAccountDetail）
   const detailReqSeq = useRef(0);
@@ -135,6 +148,7 @@ export function AccountsView() {
     strategy: "round_robin",
     preferred_account_id: "",
   });
+  /** 使用规则是否保存中（防重复提交）。 */
   const [routingSaving, setRoutingSaving] = useState(false);
 
   /** 保存账户使用规则（策略或优先账户变更时调用）；失败时回滚乐观更新。 */

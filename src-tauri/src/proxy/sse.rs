@@ -140,6 +140,7 @@ pub struct OpenAiTranslator {
     completion_id: String,
     /// 响应创建时间（Unix 秒）。
     created: u64,
+    /// 下游响应体的模型名（跨帧保持不变）。
     model: String,
     /// 已输出的 chunk 计数，首帧需额外携带 role 字段。
     chunk_index: u32,
@@ -360,6 +361,7 @@ pub struct ResponsesTranslator {
     response_id: String,
     /// 响应创建时间（Unix 秒）。
     created_at: u64,
+    /// 下游响应体的模型名（跨事件保持不变）。
     model: String,
     /// 每个事件的递增序号（Responses 规范要求 sequence_number）。
     seq: u32,
@@ -810,6 +812,7 @@ impl ResponsesTranslator {
 pub struct AnthropicTranslator {
     /// 下游响应体的 message id（跨事件保持不变）。
     message_id: String,
+    /// 下游响应体的模型名（透传自上游请求）。
     model: String,
     /// 下一个 content block 的 index（text 与 tool_use 共享编号）。
     next_block_index: u32,

@@ -152,7 +152,9 @@ async fn bridge_guard(req: axum::extract::Request, next: axum::middleware::Next)
 /// RPC 请求体。
 #[derive(Deserialize)]
 struct RpcRequest {
+    /// 后端命令名（与 Tauri IPC 命令同名）。
     cmd: String,
+    /// 命令参数（缺省为空对象）。
     #[serde(default)]
     args: Value,
 }

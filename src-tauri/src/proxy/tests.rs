@@ -2432,6 +2432,7 @@ async fn spawn_billing_mock(counter: Arc<std::sync::atomic::AtomicUsize>) -> Str
     format!("http://{addr}")
 }
 
+/// 构造指向指定上游基址的最小测试状态（其余配置取默认值）。
 fn plain_state(api_base: &str) -> Arc<AppState> {
     let cfg = Config { api_base: api_base.into(), ..Config::default() };
     AppState::new(cfg)
@@ -3210,6 +3211,7 @@ async fn refresh_cc_version_parses_and_persists() {
     let state = plain_state("http://127.0.0.1:1");
     let before = super::cc_client::cc_version(&state);
 
+    /// 启动一个返回指定 body/状态的版本注册表 mock（返回其基址）。
     async fn spawn_registry(body: &'static str, status: u16) -> String {
         let router = Router::new().route("/command-code/latest", axum::routing::get(move || {
             async move {

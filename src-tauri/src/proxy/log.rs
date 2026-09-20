@@ -18,8 +18,11 @@ pub struct LogEntry {
 
 /// 线程安全的日志环形缓冲区：超过容量 `max` 时从头部丢弃最旧条目。
 pub struct LogBuffer {
+    /// 缓冲中的日志条目（新在尾）。
     entries: Mutex<VecDeque<LogEntry>>,
+    /// 全局自增序号计数器。
     seq: Mutex<u64>,
+    /// 最大保留条数。
     max: usize,
 }
 

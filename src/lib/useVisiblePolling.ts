@@ -18,6 +18,7 @@ export function useVisiblePolling(fn: () => void, intervalMs: number, immediate 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;
 
+    /** 启动轮询（幂等）：可见时先立即执行一次，再按间隔周期执行。 */
     const start = () => {
       if (timer !== null) return;
       if (immediate) fnRef.current();
@@ -26,6 +27,7 @@ export function useVisiblePolling(fn: () => void, intervalMs: number, immediate 
         fnRef.current();
       }, intervalMs);
     };
+    /** 停止轮询并释放定时器（窗口隐藏/组件卸载时调用）。 */
     const stop = () => {
       if (timer !== null) {
         clearInterval(timer);

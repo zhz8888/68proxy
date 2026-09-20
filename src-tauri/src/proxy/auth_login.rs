@@ -181,7 +181,9 @@ fn urlencoding(s: &str) -> String {
 
 /// 回调服务器共享状态：AppState + 本次登录的 state（防 CSRF）。
 struct CallbackCtx {
+    /// 代理共享状态（读写登录会话）。
     state: Arc<AppState>,
+    /// 本次登录的随机 state（回调参数必须一致，否则拒绝）。
     expected_state: String,
 }
 

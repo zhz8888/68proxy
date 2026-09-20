@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 /** 最近请求卡片：展示最近成功计费请求的 token 用量，随统计事件实时刷新。 */
 export function RecentRequestsCard({ limit = 20 }: { limit?: number }) {
   const { t } = useTranslation();
+  /** 最近请求明细行（新在前）。 */
   const [rows, setRows] = useState<UsageRecentRow[]>([]);
   const mounted = useRef(true);
 

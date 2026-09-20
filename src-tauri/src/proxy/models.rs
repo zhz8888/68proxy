@@ -364,9 +364,12 @@ pub fn resolve_model_for(state: &AppState, model: &str) -> String {
 /// Provider 模型列表端点的单条记录（OpenAI list 格式，字段为上游原样）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct RemoteModel {
+    /// 模型 ID（请求时使用的名称，上游原样）。
     pub id: String,
+    /// 展示名（缺省时用 id 补齐）。
     #[serde(default)]
     pub name: String,
+    /// 上下文长度（端点可能缺失，缺失时回退内置表）。
     #[serde(default)]
     pub context_length: Option<u64>,
 }

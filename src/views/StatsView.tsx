@@ -131,12 +131,19 @@ function QuotaRow({ q }: { q: AccountQuota }) {
 /** 用量统计视图：汇总卡片、趋势图、按模型/端点分组表与最近请求明细。 */
 export function StatsView() {
   const { t } = useTranslation();
+  /** 当前统计时间范围。 */
   const [period, setPeriod] = useState<UsagePeriod>("7d");
+  /** 当前时间范围的汇总统计（null 表示尚未加载）。 */
   const [stats, setStats] = useState<UsageStats | null>(null);
+  /** 当前时间范围的趋势图数据点。 */
   const [chart, setChart] = useState<UsageChartPoint[]>([]);
+  /** 趋势图模式：tokens（用量）/ cost（成本）。 */
   const [chartMode, setChartMode] = useState<"tokens" | "cost">("tokens");
+  /** 分组表维度：按模型 / 按端点。 */
   const [groupBy, setGroupBy] = useState<"model" | "endpoint">("model");
+  /** 是否处于「确认清空」二次确认态。 */
   const [confirmClear, setConfirmClear] = useState(false);
+  /** 加载失败提示原文（渲染时再翻译，切换语言后自动更新）。 */
   const [loadError, setLoadError] = useState("");
   // 账户额度快照（全部 Command Code 账户）
   const [quotas, setQuotas] = useState<AccountQuota[]>([]);
