@@ -1000,6 +1000,11 @@ impl AnthropicTranslator {
             }
             "text-delta" => {
                 let text = event.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                // 空文本不产出内容：与 OpenAI 侧 text-delta / reasoning-delta 一致，
+                // 避免空帧翻转零输出判定并虚增 output_tokens。
+                if text.is_empty() {
+                    return out;
+                }
                 self.produced_content = true;
                 let start_block = self.start_text_block();
                 if !start_block.is_empty() {

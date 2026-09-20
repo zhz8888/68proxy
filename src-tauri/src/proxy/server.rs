@@ -744,15 +744,21 @@ async fn read_json_body_inner(
 ///
 /// 与 cc_client::get_session_id 的候选顺序一致，但只取「下游显式提供」的标识，
 /// 不生成随机会话（否则每次请求都视为新会话，粘滞失效）。均无时返回 None。
+///
+/// 键口径与转发侧 `get_session_id` 一致：长度 ≥8 且为可见 ASCII（`is_header_safe`），
+/// 长度上限 256。中文等非 ASCII 键会被转发侧回退为随机会话，若此处采信则
+/// 「绑定一个会话、转发另一个会话」，故两端必须同口径。
 fn route_session_key(headers: &HeaderMap, prompt_cache_key: Option<&str>) -> Option<String> {
     for name in ["x-session-id", "x-claude-code-session-id", "session_id"] {
         if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok()) {
-            if v.len() >= 8 {
+            if v.len() >= 8 && v.len() <= 256 && super::cc_client::is_header_safe_pub(v) {
                 return Some(v.to_string());
             }
         }
     }
-    prompt_cache_key.filter(|k| k.len() >= 8).map(|k| k.to_string())
+    prompt_cache_key
+        .filter(|k| k.len() >= 8 && k.len() <= 256 && super::cc_client::is_header_safe_pub(k))
+        .map(|k| k.to_string())
 }
 
 /// 校验本地转发 Key（不含账户路由）：在读取请求体**之前**调用，避免未认证客户端
@@ -981,7 +987,13 @@ async fn messages(
     };
     // 补齐模型名为完整 ID（就地改写，理由见 chat_completions 同处注释）
     resolve_model_in_place(&st, &mut req);
-    let session_key = route_session_key(&headers, None);
+    // Anthropic 入口同样传入 prompt_cache_key：否则该入口的会话粘滞恒退化，
+    // 同一会话每轮换账户，破坏上游前缀缓存（与 chat_completions 对齐）。
+    let prompt_cache_key = req
+        .get("prompt_cache_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let session_key = route_session_key(&headers, prompt_cache_key);
     let (api_key, user_id) = match api_key_or_401(&st, &headers, session_key.as_deref()).await {
         Ok(k) => k,
         Err((status, msg)) => {
@@ -1436,8 +1448,13 @@ async fn stream_openai(
     // 上游回报了输出 token（output_tokens > 0）时不算零输出——部分模型在 max_tokens
     // 截断时只回 usage 元数据（如 meta/muse-spark 系列只给 outputTokenDetails），
     // 内容事件并未下发，按内容判定会误杀。
+    //
+    // 记账必须在 error / incomplete 判定之后：上游发过 error 事件或没走完 finish
+    // 时，即使已产出部分内容也不能按成功计入（与 Anthropic/Responses 的
+    // `ok = !has_error` 口径一致，见 record_usage_entry 的保存约定）。
     let produced = translator.produced_content() || translator.output_tokens > 0;
-    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true, produced);
+    let failed = translator.stream_error.is_some() || translator.incomplete_detail().is_some();
+    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true, produced && !failed);
     // 上游发过 error 事件时以错误收尾（即使已产出部分内容）：错误优先，
     // 否则下游会拿到一个被静默截断的「正常完成」。与 CLI 对 error 事件抛异常一致。
     if let Some(e) = &translator.stream_error {
@@ -1887,16 +1904,12 @@ async fn handle_nonstream(
     // （如 meta/muse-spark-1.3-contributor）在 max_tokens 截断（finishReason=length）
     // 时只回 usage 元数据（含 outputTokenDetails.textTokens/reasoningTokens），
     // 不下发任何 text-delta/reasoning-delta 内容事件；此时按聚合内容判定会误杀。
+    //
+    // 注意：上游 error 已在上方无条件处理并 return，落到此处时 stream_error
+    // 必为 None，此处不再重复透传（避免不可达的死分支）。
     let empty = full_text.is_empty() && reasoning.is_empty() && tool_calls.is_empty() && output == 0;
     if empty {
         finish_request(&st, &ctx, "error");
-        // 上游已下发 error 事件时透传其真实原因与状态码：否则 provider 不可用、
-        // 参数被拒等业务错误会被「空响应 429」掩盖，下游无法区分该换模型还是重试。
-        if let Some(e) = stream_error {
-            let (status, etype) = e.mapped();
-            let retry_after = e.retryable.then_some(10);
-            return nonstream_error_typed(protocol, status, etype, &e.message, retry_after);
-        }
         return nonstream_error(
             protocol,
             429,

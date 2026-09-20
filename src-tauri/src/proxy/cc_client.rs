@@ -54,6 +54,11 @@ fn is_header_safe(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
 }
 
+/// `is_header_safe` 的跨模块版本（路由键口径与转发侧保持一致用）。
+pub fn is_header_safe_pub(s: &str) -> bool {
+    is_header_safe(s)
+}
+
 /// 会话 ID 是否为合法 UUID（v4 形状）：CLI 的 toWireThreadId 只有合法 UUID 才放进
 /// 信封 threadId 字段，否则整键省略。
 fn is_uuid(s: &str) -> bool {
