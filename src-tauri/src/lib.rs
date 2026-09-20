@@ -581,7 +581,7 @@ async fn account_quota(app: AppHandle, #[allow(non_snake_case)] userId: String) 
     let name = if a.user_name.is_empty() { a.user_id.clone() } else { a.user_name.clone() };
     let masked = credentials::mask_key(&a.key);
     let quota =
-        proxy::quota::fetch_account_quota(&ctx.proxy_state, &name, &masked, &a.key).await;
+        proxy::quota::fetch_account_quota(&ctx.proxy_state, &a.user_id, &name, &masked, &a.key).await;
     Ok(serde_json::to_value(quota)
         .map_err(|e| i18n::err_args("serialize_failed", &[&e.to_string()]))?)
 }

@@ -2442,7 +2442,7 @@ fn plain_state(api_base: &str) -> Arc<AppState> {
 async fn quota_fetch_full_flow() {
     let base = spawn_billing_mock(Arc::new(std::sync::atomic::AtomicUsize::new(0))).await;
     let state = plain_state(&base);
-    let q = super::quota::fetch_account_quota(&state, "Tester", "user_…1", "user_k").await;
+    let q = super::quota::fetch_account_quota(&state, "uid-t", "Tester", "user_…1", "user_k").await;
     assert_eq!(q.error, None);
     assert_eq!(q.plan_id.as_deref(), Some("individual-pro"));
     assert_eq!(q.plan_name, "Pro");
@@ -2503,7 +2503,7 @@ async fn quota_fetch_go_subscription() {
     tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
 
     let state = plain_state(&format!("http://{addr}"));
-    let q = super::quota::fetch_account_quota(&state, "GoUser", "user_…go", "user_k").await;
+    let q = super::quota::fetch_account_quota(&state, "uid-go", "GoUser", "user_…go", "user_k").await;
     assert_eq!(q.error, None);
     assert_eq!(q.plan_id.as_deref(), Some("individual-go"));
     assert_eq!(q.plan_name, "Go");
@@ -2567,7 +2567,7 @@ async fn quota_fetch_personal_account_no_org() {
     tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
 
     let state = plain_state(&format!("http://{addr}"));
-    let q = super::quota::fetch_account_quota(&state, "zhz8888", "user_…", "user_k").await;
+    let q = super::quota::fetch_account_quota(&state, "uid-z", "zhz8888", "user_…", "user_k").await;
     assert_eq!(q.error, None);
     assert_eq!(q.plan_id.as_deref(), Some("individual-go"));
     assert_eq!(q.plan_name, "Go");
@@ -2637,7 +2637,7 @@ async fn quota_fetch_plan_fallback_from_credits() {
     tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
 
     let state = plain_state(&format!("http://{addr}"));
-    let q = super::quota::fetch_account_quota(&state, "Fallback", "user_…f", "user_k").await;
+    let q = super::quota::fetch_account_quota(&state, "uid-f", "Fallback", "user_…f", "user_k").await;
     assert_eq!(q.error, None);
     // plan 从 credits.planId 兜底
     assert_eq!(q.plan_id.as_deref(), Some("individual-go"));
@@ -2652,7 +2652,7 @@ async fn quota_fetch_plan_fallback_from_credits() {
 async fn quota_fetch_whoami_failed_degrades() {
     // 指向未监听端口
     let state = plain_state("http://127.0.0.1:1");
-    let q = super::quota::fetch_account_quota(&state, "N", "user_…x", "user_k").await;
+    let q = super::quota::fetch_account_quota(&state, "uid-n", "N", "user_…x", "user_k").await;
     assert_eq!(q.error.as_deref(), Some("whoami_failed"));
     assert!(!q.has_billing);
     assert_eq!(q.total_pool, 0.0);
@@ -2712,6 +2712,7 @@ async fn quota_snapshot_uses_cache() {
 async fn quota_mark_exhausted_updates_cache_and_bindings() {
     let state = plain_state("http://127.0.0.1:1");
     let q = super::quota::AccountQuota {
+        user_id: "a".into(),
         user_name: "a".into(), masked_key: "user_…a".into(),
         plan_id: None, plan_name: String::new(), status: None,
         monthly_remaining: 0.0, purchased_remaining: 0.0, free_remaining: 0.0,
@@ -2744,6 +2745,7 @@ async fn quota_mark_exhausted_without_windows_or_pool() {
 
     let state = plain_state("http://127.0.0.1:1");
     let q = AccountQuota {
+        user_id: "a".into(),
         user_name: "a".into(), masked_key: "user_…a".into(),
         plan_id: None, plan_name: String::new(), status: None,
         monthly_remaining: 0.0, purchased_remaining: 0.0, free_remaining: 0.0,

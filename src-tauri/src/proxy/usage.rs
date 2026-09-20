@@ -106,6 +106,8 @@ pub struct MinuteBucket {
 /// 最近请求明细行。
 #[derive(Debug, Serialize)]
 pub struct RecentRow {
+    /// 明细行 id（`usage_history` 主键，前端作列表 key 用，同毫秒突发不再撞键）。
+    pub id: i64,
     pub ts: u64,
     pub model: String,
     pub endpoint: String,
@@ -277,11 +279,19 @@ pub fn init_usage_on(conn: &Connection) -> Result<(), String> {
 }
 
 /// 打开已存在的用量数据库（只读查询用）；文件缺失时返回错误。
+///
+/// 查询连接同样设置 WAL / NORMAL / busy_timeout：写入由代理热路径的长持
+/// 连接完成，查询连接只读但仍会与写事务短暂竞争，无 busy_timeout 会随机
+/// 报 `database is locked`。
 pub fn open_usage(path: &Path) -> Result<Connection, String> {
-    Connection::open(path).map_err(|e| {
+    let conn = Connection::open(path).map_err(|e| {
         let e = e.to_string();
         i18n::err_args("open_usage_db_failed", &[&e])
-    })
+    })?;
+    conn.pragma_update(None, "journal_mode", "WAL").ok();
+    conn.pragma_update(None, "synchronous", "NORMAL").ok();
+    conn.pragma_update(None, "busy_timeout", 3000).ok();
+    Ok(conn)
 }
 
 /// 把 Unix 毫秒时间戳转为本地时区的天键（YYYY-MM-DD）。
@@ -838,8 +848,8 @@ fn query_rows(conn: &Connection, from_ts: u64, to_ts: u64) -> Result<Vec<Row>, S
 pub fn query_recent(conn: &Connection, limit: usize) -> Result<Vec<RecentRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT ts, model, endpoint, status, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, cost
-             FROM usage_history ORDER BY ts DESC LIMIT ?1",
+            "SELECT id, ts, model, endpoint, status, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, cost
+             FROM usage_history ORDER BY id DESC LIMIT ?1",
         )
         .map_err(|e| {
             let e = e.to_string();
@@ -848,15 +858,16 @@ pub fn query_recent(conn: &Connection, limit: usize) -> Result<Vec<RecentRow>, S
     let rows = stmt
         .query_map(params![limit as i64], |r| {
             Ok(RecentRow {
-                ts: r.get::<_, i64>(0)? as u64,
-                model: r.get(1)?,
-                endpoint: r.get(2)?,
-                status: r.get(3)?,
-                prompt_tokens: r.get::<_, i64>(4)? as u64,
-                completion_tokens: r.get::<_, i64>(5)? as u64,
-                cached_tokens: r.get::<_, i64>(6)? as u64,
-                cache_write_tokens: r.get::<_, i64>(7)? as u64,
-                cost: r.get(8)?,
+                id: r.get(0)?,
+                ts: r.get::<_, i64>(1)? as u64,
+                model: r.get(2)?,
+                endpoint: r.get(3)?,
+                status: r.get(4)?,
+                prompt_tokens: r.get::<_, i64>(5)? as u64,
+                completion_tokens: r.get::<_, i64>(6)? as u64,
+                cached_tokens: r.get::<_, i64>(7)? as u64,
+                cache_write_tokens: r.get::<_, i64>(8)? as u64,
+                cost: r.get(9)?,
                 elapsed_ms: 0,
             })
         })

@@ -363,6 +363,8 @@ pub async fn serve(
                     sessions.retain(|_, e| now < e.expires_at);
                     let cleaned = sessions.len() != before;
                     drop(sessions);
+                    // 会话粘滞绑定同样按 TTL 清理（否则下游可控键使表无界增长）
+                    crate::credentials::prune_bindings(&st);
                     if cleaned {
                         log::info("Session cleanup done");
                     }
@@ -1784,15 +1786,40 @@ fn record_usage_entry(
         cache_write_tokens: cache_write,
         stream,
     });
-    // 保留策略：按天清理超期明细（0 表示永久保留，不执行）
+    // 保留清理节流为最多每小时一次：每成功请求做一次 DELETE 是写放大，
+    // 高频下每次请求多一次写事务并持 usage 锁阻塞记账/查询。
+    maybe_prune_usage(st);
+}
+
+/// 按保留天数清理的节流包装（进程内最多每小时执行一次）。
+fn maybe_prune_usage(st: &AppState) {
+    static LAST_PRUNE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let retention = st.config.read().unwrap().usage_retention_days;
-    if retention > 0 {
-        if let Err(e) = st.prune_usage(retention) {
-            log::warn(&format!(
-                "{}: {e}",
-                i18n::pick("清理过期用量失败", "Failed to prune expired usage")
-            ));
-        }
+    if retention == 0 {
+        return;
+    }
+    let now = now_millis();
+    let last = LAST_PRUNE.load(std::sync::atomic::Ordering::Relaxed);
+    if now.saturating_sub(last) < 60 * 60 * 1000 {
+        return;
+    }
+    // CAS 抢执行权：只有一个请求真正执行清理，其余跳过
+    if LAST_PRUNE
+        .compare_exchange(
+            last,
+            now,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+    if let Err(e) = st.prune_usage(retention) {
+        log::warn(&format!(
+            "{}: {e}",
+            i18n::pick("清理过期用量失败", "Failed to prune expired usage")
+        ));
     }
 }
 

@@ -671,6 +671,9 @@ pub fn init_and_load(conn: &Connection) -> Result<Vec<ModelPricing>, String> {
 // ── AppState 便捷入口（供 cc_client 在拉取流程中落库 / 兜底） ──
 
 /// 从应用状态读取模型列表；库未初始化时回退内置表。
+///
+/// 锁内只取连接引用做短查询：`load_models` 内部只有一次 prepare + 遍历，
+/// 即查即放，不跨 await，不会长期占用 usage 锁。
 pub fn load_models_for(state: &AppState) -> Vec<ModelInfo> {
     let guard = state.usage.lock().unwrap();
     match guard.as_ref() {
@@ -680,6 +683,9 @@ pub fn load_models_for(state: &AppState) -> Vec<ModelInfo> {
 }
 
 /// 把拉取到的模型列表整表落库（source=remote）；库不可用时仅告警，不影响返回。
+///
+/// `replace_models` 的 DELETE + N INSERT 在库事务内完成，原子且快速
+/// （模型表仅百行级）；锁临界区即该事务本身，不跨 await。
 pub fn persist_models_for(state: &AppState, entries: &[ModelInfo]) {
     let guard = state.usage.lock().unwrap();
     if let Some(conn) = guard.as_ref() {

@@ -90,9 +90,11 @@ pub struct OrgLimit {
 /// 单个账户的额度快照（对应 CLI `projectUsageView` 的结果）。
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountQuota {
+    /// 账户唯一标识（whoami 的 user.id），前端按此键配对账户与额度。
+    pub user_id: String,
     /// 账户显示名。
     pub user_name: String,
-    /// 掩码 Key（避免前端暴露完整凭据）。
+    /// 掩码 Key（避免前端暴露完整凭据，仅展示用，不可作匹配键）。
     pub masked_key: String,
     /// 套餐 ID 与展示名；无订阅时为 null / 空字符串（文案由前端按语言渲染）。
     pub plan_id: Option<String>,
@@ -132,8 +134,9 @@ pub struct AccountQuota {
 
 impl AccountQuota {
     /// 构造一个失败占位的额度快照。`error` 为错误码（如 `whoami_failed`），由前端翻译。
-    fn failed(user_name: String, masked_key: String, error: String) -> Self {
+    fn failed(user_id: String, user_name: String, masked_key: String, error: String) -> Self {
         Self {
+            user_id,
             user_name,
             masked_key,
             plan_id: None,
@@ -266,7 +269,7 @@ pub async fn refresh_all_caches(state: &std::sync::Arc<AppState>, force: bool) {
         async move {
             let name = if a.user_name.is_empty() { a.user_id.clone() } else { a.user_name.clone() };
             let masked = crate::credentials::mask_key(&a.key);
-            let quota = fetch_account_quota(&st, &name, &masked, &a.key).await;
+            let quota = fetch_account_quota(&st, &a.user_id, &name, &masked, &a.key).await;
             // 上游 402 置位的耗尽标记跨刷新保留：只有在新的快照确实还有余额时才解除，
             // 否则零额度账户会在 60 秒后被重新选中并再次收到 402。
             let mut cache = st.quota_cache.lock().unwrap();
@@ -288,36 +291,106 @@ pub async fn refresh_all_caches(state: &std::sync::Arc<AppState>, force: bool) {
 
 /// 取全部账户的额度快照供前端展示：优先用缓存，未命中时实时拉取并回填。
 ///
-/// 返回顺序与账户列表一致（前端按下标对齐）。
+/// 与 `refresh_all_caches` 同口径：复用同一 `quota_inflight` 单飞集合，
+/// 写入前保留旧 `exhausted` 标记（否则会把 `mark_exhausted` 洗掉，
+/// 零余额账户在 TTL 内被重新选中、再收 402，来回抖动）。
+/// 返回顺序与账户列表一致（前端按 `user_id` 配对，不依赖顺序）。
 pub async fn snapshot_all(state: &std::sync::Arc<AppState>) -> Vec<AccountQuota> {
     use futures_util::future::join_all;
 
     let accounts = crate::credentials::accounts_from_state(state);
-    let futs = accounts.into_iter().map(|a| {
+    // 先登记单飞：已在途的账户直接复用缓存（即便过期），避免惊群上游
+    let to_fetch: Vec<crate::proxy::config::Account> = {
+        let cache = state.quota_cache.lock().unwrap();
+        let mut inflight = state.quota_inflight.lock().unwrap();
+        let mut out = Vec::new();
+        for a in &accounts {
+            if let Some((q, at)) = cache.get(&a.user_id) {
+                if now_millis().saturating_sub(*at) < CACHE_TTL_MS {
+                    continue;
+                }
+                // 缓存过期但已有拉取在途：复用旧快照，不再并发打上游
+                if inflight.contains(&a.user_id) {
+                    continue;
+                }
+                let _ = q;
+            }
+            if inflight.insert(a.user_id.clone()) {
+                out.push(a.clone());
+            }
+        }
+        out
+    };
+    // 缓存命中的直接返回
+    let cached: std::collections::HashMap<String, AccountQuota> = {
+        let cache = state.quota_cache.lock().unwrap();
+        accounts
+            .iter()
+            .filter_map(|a| {
+                cache.get(&a.user_id).and_then(|(q, at)| {
+                    (now_millis().saturating_sub(*at) < CACHE_TTL_MS).then(|| (a.user_id.clone(), q.clone()))
+                })
+            })
+            .collect()
+    };
+    // 在途复用旧快照的（过期但有人在拉）：直接返回旧值
+    let stale: std::collections::HashMap<String, AccountQuota> = {
+        let cache = state.quota_cache.lock().unwrap();
+        to_fetch
+            .iter()
+            .filter_map(|a| {
+                if cached.contains_key(&a.user_id) {
+                    None
+                } else {
+                    cache.get(&a.user_id).map(|(q, _)| (a.user_id.clone(), q.clone()))
+                }
+            })
+            .collect()
+    };
+    let _ = stale;
+    let futs = to_fetch.into_iter().map(|a| {
         let st = state.clone();
         async move {
+            // 上方已登记单飞；若此处发现已有缓存（竞态中被他人回填），直接复用
+            if let Some((q, at)) = st.quota_cache.lock().unwrap().get(&a.user_id).cloned() {
+                if now_millis().saturating_sub(at) < CACHE_TTL_MS {
+                    st.quota_inflight.lock().unwrap().remove(&a.user_id);
+                    return q;
+                }
+            }
             let name = if a.user_name.is_empty() { a.user_id.clone() } else { a.user_name.clone() };
             let masked = crate::credentials::mask_key(&a.key);
-            // 命中未过期缓存则直接复用，避免每次进页面都打上游
-            let cached = st
-                .quota_cache
-                .lock()
-                .unwrap()
+            let quota = fetch_account_quota(&st, &a.user_id, &name, &masked, &a.key).await;
+            let mut cache = st.quota_cache.lock().unwrap();
+            let keep_exhausted = cache
                 .get(&a.user_id)
-                .filter(|(_, at)| now_millis().saturating_sub(*at) < CACHE_TTL_MS)
-                .map(|(q, _)| q.clone());
-            if let Some(q) = cached {
-                return q;
+                .map(|(old, _)| old.exhausted)
+                .unwrap_or(false);
+            let mut quota = quota;
+            if keep_exhausted && quota.error.is_none() && quota.total_remaining <= 0.0 {
+                quota.exhausted = true;
             }
-            let q = fetch_account_quota(&st, &name, &masked, &a.key).await;
-            st.quota_cache
-                .lock()
-                .unwrap()
-                .insert(a.user_id.clone(), (q.clone(), now_millis()));
-            q
+            cache.insert(a.user_id.clone(), (quota.clone(), now_millis()));
+            drop(cache);
+            st.quota_inflight.lock().unwrap().remove(&a.user_id);
+            quota
         }
     });
-    join_all(futs).await
+    let fetched: Vec<AccountQuota> = join_all(futs).await;
+    let fetched_map: std::collections::HashMap<String, AccountQuota> =
+        fetched.into_iter().map(|q| (q.user_id.clone(), q)).collect();
+    // 按账户列表顺序组装，缺失（在途复用旧快照）的回填旧值
+    let cache = state.quota_cache.lock().unwrap();
+    accounts
+        .into_iter()
+        .filter_map(|a| {
+            fetched_map
+                .get(&a.user_id)
+                .cloned()
+                .or_else(|| cached.get(&a.user_id).cloned())
+                .or_else(|| cache.get(&a.user_id).map(|(q, _)| q.clone()))
+        })
+        .collect()
 }
 
 /// 判定上游错误是否表示「当前账户额度耗尽」，用于即时失效该账户的路由绑定。
@@ -404,6 +477,7 @@ fn iso_to_millis(s: &str) -> Option<u64> {
 /// 拉取单个账户的额度快照。
 pub async fn fetch_account_quota(
     state: &AppState,
+    user_id: &str,
     user_name: &str,
     masked_key: &str,
     api_key: &str,
@@ -415,7 +489,12 @@ pub async fn fetch_account_quota(
     let whoami = match whoami {
         Some(v) => v,
         None => {
-            return AccountQuota::failed(user_name.into(), masked_key.into(), "whoami_failed".into())
+            return AccountQuota::failed(
+                user_id.into(),
+                user_name.into(),
+                masked_key.into(),
+                "whoami_failed".into(),
+            )
         }
     };
     // 组织 ID 只取 whoami.org.id；个人账户 org 为 null 时保持 None（不带 orgId 参数）。
@@ -560,6 +639,7 @@ pub async fn fetch_account_quota(
     };
 
     AccountQuota {
+        user_id: user_id.to_string(),
         user_name: user_name.to_string(),
         masked_key: masked_key.to_string(),
         plan_name: plan_id.as_deref().map(plan_name).unwrap_or_default(),
@@ -642,6 +722,7 @@ mod tests {
     fn quota_with(five: Option<(f64, f64)>, weekly: Option<(f64, f64)>, pool: f64, remaining: f64) -> AccountQuota {
         let win = |(u, c): (f64, f64)| LimitWindow { used: u, cap: c, reset_at: None };
         AccountQuota {
+            user_id: "uid-test".into(),
             user_name: "u".into(),
             masked_key: "user_…x".into(),
             plan_id: None,

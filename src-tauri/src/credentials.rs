@@ -185,6 +185,19 @@ pub fn next_account(state: &crate::proxy::state::AppState) -> Option<Account> {
 ///
 /// 超期后解除绑定，下次请求重新选账户，避免长期锁死在某个已变化的账户上。
 const BINDING_TTL_MS: u64 = 12 * 60 * 60 * 1000;
+/// 会话绑定表上限：路由键来自下游可控输入（仅 len/字符集校验），无上限时
+/// 可被随机键撑大内存。超限时淘汰最早绑定的条目。
+const BINDING_CAP: usize = 5000;
+
+/// 清理超期绑定（后台周期任务与超限淘汰共用）。
+pub fn prune_bindings(state: &crate::proxy::state::AppState) {
+    let now = crate::proxy::state::now_millis();
+    state
+        .account_bindings
+        .lock()
+        .unwrap()
+        .retain(|_, b| now.saturating_sub(b.bound_at) < BINDING_TTL_MS);
+}
 
 /// 读取某会话当前绑定的账户（未绑定/超期/账户已被删除时返回 None）。
 fn bound_account(state: &crate::proxy::state::AppState, session_key: &str) -> Option<Account> {
@@ -203,13 +216,27 @@ fn bound_account(state: &crate::proxy::state::AppState, session_key: &str) -> Op
 
 /// 写入/刷新某会话的账户绑定。
 fn bind_account(state: &crate::proxy::state::AppState, session_key: &str, user_id: &str) {
-    state.account_bindings.lock().unwrap().insert(
+    let mut bindings = state.account_bindings.lock().unwrap();
+    bindings.insert(
         session_key.to_string(),
         crate::proxy::state::AccountBinding {
             user_id: user_id.to_string(),
             bound_at: crate::proxy::state::now_millis(),
         },
     );
+    // 超限淘汰最早绑定（按 bound_at 最小逐出，避免无界增长）
+    while bindings.len() > BINDING_CAP {
+        let oldest = bindings
+            .iter()
+            .min_by_key(|(_, b)| b.bound_at)
+            .map(|(k, _)| k.clone());
+        match oldest {
+            Some(k) => {
+                bindings.remove(&k);
+            }
+            None => break,
+        }
+    }
 }
 
 /// 取该账户的额度快照（路由用，仅读缓存，绝不触发网络请求）。
@@ -546,6 +573,7 @@ mod tests {
         use crate::proxy::quota::{AccountQuota, LimitWindow};
         let win = |(u, c): (f64, f64)| LimitWindow { used: u, cap: c, reset_at: None };
         let q = AccountQuota {
+            user_id: user_id.into(),
             user_name: user_id.into(),
             masked_key: format!("user_…{user_id}"),
             plan_id: None,
