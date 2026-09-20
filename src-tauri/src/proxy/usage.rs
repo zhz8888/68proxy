@@ -21,19 +21,22 @@ use super::pricing;
 use crate::i18n;
 
 /// 用量更新事件转发器（Tauri 注入，供前端统计页实时刷新）。
-static USAGE_SINK: Mutex<Option<Box<dyn Fn() + Send + Sync>>> = Mutex::new(None);
+static USAGE_SINK: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> = Mutex::new(None);
 
 /// 注册用量更新回调（Tauri setup 阶段调用，节流由调用方负责）。
 pub fn set_usage_sink<F>(f: F)
 where
     F: Fn() + Send + Sync + 'static,
 {
-    *USAGE_SINK.lock().unwrap() = Some(Box::new(f));
+    *USAGE_SINK.lock().unwrap() = Some(std::sync::Arc::new(f));
 }
 
 /// 用量记录成功后触发事件回调（无注册时静默）。
+///
+/// 回调在锁外执行：锁内只 clone `Arc`，避免回调阻塞/重入时拖住记账热路径。
 fn emit_usage_updated() {
-    if let Some(f) = USAGE_SINK.lock().unwrap().as_ref() {
+    let sink = USAGE_SINK.lock().unwrap().clone();
+    if let Some(f) = sink {
         f();
     }
 }

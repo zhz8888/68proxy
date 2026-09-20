@@ -120,45 +120,66 @@ function PriceLines({ pricing, free }: { pricing?: ModelPricing; free: boolean }
   return <span className="font-mono">{perM(tiers[0].rates)}</span>;
 }
 
+/** 去连字符与点的紧凑形式，用于兜住 `Qwen/Qwen3.7-Max` ↔ `qwen-3.7-max` 这类命名差异。 */
+function compactId(id: string): string {
+  return id.replace(/[-.]/g, "");
+}
+
 /**
- * 按与后端一致的口径匹配模型 ID：精确 → 去 provider 前缀的短名 → 最长前缀。
- * @param catalog 内置计费表（后端下发，id 为官方小写形式）
+ * 上游注册表 ID（紧凑形式）→ 定价表 ID：两处数据源的个例别名。
+ * 定价页会省略 `Preview` 这类营销后缀，紧凑比对要求逐字符相等，覆盖不到。
+ */
+const PRICING_ALIASES: Record<string, string> = {
+  qwen36maxpreview: "qwen-3.6-max",
+};
+
+/**
+ * 把上游模型 ID 解析为计费表/准入表的键，口径与后端 `pricing::find_pricing` 一致：
+ * 精确 → 去 provider 前缀的短名 → 紧凑形式 → 显式别名 → 最长前缀。
+ *
+ * 命名风格在两处数据源间并不统一：上游注册表写 `Qwen/Qwen3.7-Max`（驼峰无连字符），
+ * 定价页写 `qwen-3.7-max`（全小写带连字符），只去前缀无法互相命中。
+ * @param keys 候选键（与后端注册表同源，均为小写）
  * @param id 上游返回的模型 ID（可能带前缀/日期后缀、大小写不一）
  */
-function matchPricing(catalog: Map<string, ModelPricing>, id: string): ModelPricing | undefined {
+function resolveCatalogKey(keys: Iterable<string>, id: string): string | undefined {
+  const keySet = keys instanceof Set ? keys : new Set(keys);
   const target = id.toLowerCase();
-  const exact = catalog.get(target);
-  if (exact) return exact;
+  if (keySet.has(target)) return target;
   const short = target.split("/").pop() ?? target;
-  const byShort = catalog.get(short);
-  if (byShort) return byShort;
-  let best: ModelPricing | undefined;
-  for (const [key, p] of catalog) {
-    if (short.startsWith(key) && (!best || key.length > best.id.length)) best = p;
+  if (keySet.has(short)) return short;
+  const compact = compactId(short);
+  for (const key of keySet) {
+    if (compactId(key) === compact) return key;
+  }
+  const aliasId = PRICING_ALIASES[compact];
+  if (aliasId && keySet.has(aliasId)) return aliasId;
+  // 最长前缀匹配，避免短前缀（如 gpt-5）抢走更具体的档位
+  let best: string | undefined;
+  for (const key of keySet) {
+    if (short.startsWith(key) && (!best || key.length > best.length)) best = key;
   }
   return best;
 }
 
 /**
- * 按套餐准入结果匹配模型：优先精确键，再退回归一化后的键。
+ * 按与后端一致的口径匹配模型计费信息。
+ * @param catalog 内置计费表（后端下发，id 为官方小写形式）
+ * @param id 上游返回的模型 ID
+ */
+function matchPricing(catalog: Map<string, ModelPricing>, id: string): ModelPricing | undefined {
+  const key = resolveCatalogKey(catalog.keys(), id);
+  return key === undefined ? undefined : catalog.get(key);
+}
+
+/**
+ * 按套餐准入结果匹配模型：键与计费表同源，故复用同一套解析口径。
  * @param access 后端下发的「模型 ID → 准入结果」映射
  * @param id 列表中的模型 ID
  */
 function matchAccess(access: Record<string, ModelAccessInfo>, id: string): ModelAccessInfo | undefined {
-  const target = id.toLowerCase();
-  if (access[target]) return access[target];
-  const short = target.split("/").pop() ?? target;
-  if (access[short]) return access[short];
-  // 计费表键通常已归一化，这里按前缀取最长命中
-  let best: ModelAccessInfo | undefined;
-  let bestKey = "";
-  for (const [key, info] of Object.entries(access)) {
-    if (short.startsWith(key) && key.length > bestKey.length) {
-      best = info;
-      bestKey = key;
-    }
-  }
-  return best;
+  const key = resolveCatalogKey(Object.keys(access), id);
+  return key === undefined ? undefined : access[key];
 }
 
 /** 模型视图：展示可用模型列表及其能力与价格，支持搜索、能力筛选、复制与手动刷新。 */

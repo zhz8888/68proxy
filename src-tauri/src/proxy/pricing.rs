@@ -169,10 +169,28 @@ pub fn all_models() -> Arc<Vec<ModelPricing>> {
         .clone()
 }
 
-/// 查找模型计费信息：精确 → 去 provider 前缀的短名 → 最长前缀。
+/// 去连字符与点的紧凑形式，用于兜住 `Qwen/Qwen3.7-Max` ↔ `qwen-3.7-max` 这类命名差异。
+fn compact(s: &str) -> String {
+    s.chars().filter(|c| *c != '-' && *c != '.').collect()
+}
+
+/// 两处数据源的模型名别名：上游注册表 ID（紧凑形式）→ 定价表 ID。
+///
+/// 仅用于名称确有差异、无法靠 `compact` 自动对齐的个例：定价页会省略 `Preview`
+/// 这类营销后缀，而紧凑比对要求逐字符相等。此处刻意不引入模糊匹配——计费表
+/// 一旦把模型对到邻近档位，算出的成本会静默偏离真实值，代价高于漏配时回落
+/// 兜底单价（兜底值本身可被察觉），故逐条显式登记。
+const PRICING_ALIASES: &[(&str, &str)] = &[("qwen36maxpreview", "qwen-3.6-max")];
+
+/// 查找模型计费信息：精确 → 去 provider 前缀的短名 → 紧凑形式 → 别名 → 最长前缀。
 ///
 /// 上游模型 ID 可能带 provider 前缀（`deepseek/deepseek-v4-flash`）或日期后缀
 /// （`claude-haiku-4-5-20251001`），故匹配不区分大小写并取最长前缀。
+///
+/// 命名风格在两处数据源间并不统一：上游注册表写 `Qwen/Qwen3.7-Max`（驼峰无连字符），
+/// 定价页写 `qwen-3.7-max`（全小写带连字符），只去前缀无法互相命中，会让整族
+/// Qwen 模型静默落到兜底单价。故补一层「去掉连字符与点」的紧凑比对，个别仍对不上
+/// 的走 `PRICING_ALIASES`。
 /// 返回借用，调用方持有 `all_models()` 快照即可复用，避免整条克隆。
 pub fn find_pricing<'a>(models: &'a [ModelPricing], model: &str) -> Option<&'a ModelPricing> {
     let target = model.to_ascii_lowercase();
@@ -186,7 +204,22 @@ pub fn find_pricing<'a>(models: &'a [ModelPricing], model: &str) -> Option<&'a M
     if let Some(m) = models.iter().find(|m| m.id.to_ascii_lowercase() == short) {
         return Some(m);
     }
-    // 3) 最长前缀匹配，避免短前缀（如 gpt-5）抢走更具体的档位
+    // 3) 紧凑形式精确匹配（去连字符与点）
+    let short_compact = compact(short);
+    if let Some(m) = models
+        .iter()
+        .find(|m| compact(&m.id.to_ascii_lowercase()) == short_compact)
+    {
+        return Some(m);
+    }
+    // 4) 显式别名（紧凑形式比对无法覆盖的名称差异）
+    if let Some((_, pricing_id)) = PRICING_ALIASES.iter().find(|(k, _)| *k == short_compact) {
+        let want = pricing_id.to_ascii_lowercase();
+        if let Some(m) = models.iter().find(|m| m.id.to_ascii_lowercase() == want) {
+            return Some(m);
+        }
+    }
+    // 5) 最长前缀匹配，避免短前缀（如 gpt-5）抢走更具体的档位
     models
         .iter()
         .filter(|m| short.starts_with(&m.id.to_ascii_lowercase()))
@@ -299,6 +332,37 @@ mod tests {
             let p = find_pricing(&models, id);
             assert!(p.is_some(), "未收录模型 {id}");
         }
+    }
+
+    /// 回归：上游注册表用驼峰无连字符（`Qwen/Qwen3.7-Max`），定价页用全小写带连字符
+    /// （`qwen-3.7-max`），仅靠大小写与 provider 前缀无法互相命中，会静默落兜底单价。
+    #[test]
+    fn upstream_camel_case_ids_hit_hyphenated_pricing_entries() {
+        let models = all_models();
+        // 逐条断言：命中定价条目，而不是落到 FALLBACK_PRICE（input 1.00 / output 3.00）
+        for (id, expected) in [
+            ("Qwen/Qwen3.7-Max", "qwen-3.7-max"),
+            ("Qwen/Qwen3.7-Flash", "qwen-3.7-flash"),
+            ("Qwen/Qwen3.8-Max", "qwen-3.8-max"),
+            ("Qwen/Qwen3.8-Max-0902", "qwen-3.8-max-0902"),
+            ("Qwen/Qwen3.8-Omni-Flash", "qwen-3.8-omni-flash"),
+            ("Qwen/Qwen3.6-Plus", "qwen-3.6-plus"),
+            // 定价页省略 Preview 后缀，须经别名表命中
+            ("Qwen/Qwen3.6-Max-Preview", "qwen-3.6-max"),
+        ] {
+            let m = find_pricing(&models, id);
+            assert_eq!(
+                m.map(|m| m.id.as_str()),
+                Some(expected),
+                "{id} 应命中定价条目 {expected}"
+            );
+        }
+        // 兜底单价不得被这些模型用到
+        let p = price_for_at("Qwen/Qwen3.7-Max", 1000, 0);
+        assert!(
+            (p.input - FALLBACK_PRICE.input).abs() > 1e-9,
+            "Qwen/Qwen3.7-Max 落入兜底单价，说明未能命中定价表"
+        );
     }
 
     /// 模型匹配忽略 provider 前缀与大小写差异。

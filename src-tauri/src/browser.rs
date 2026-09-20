@@ -47,19 +47,23 @@ pub(crate) fn validate_auth_url(url: &str) -> Result<(), String> {
     let rest = url
         .strip_prefix("https://")
         .ok_or_else(|| i18n::err("browser_url_invalid"))?;
-    let host = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // userinfo（`user@host`）直接拒绝：否则 `https://commandcode.ai@evil.com/…`
+    // 会被当成官方主机而打开钓鱼页（见 config::api_base_allowed 同类问题）
+    if authority.contains('@') {
+        return Err(i18n::err("browser_url_invalid"));
+    }
+    let host = authority
         .rsplit_once(':')
         .map(|(h, _)| h)
-        .unwrap_or_else(|| rest.split(['/', '?', '#']).next().unwrap_or(""));
+        .unwrap_or(authority)
+        .to_ascii_lowercase();
     let allowed = [
         "commandcode.ai",
         "www.commandcode.ai",
         "staging.commandcode.ai",
     ];
-    if !allowed.contains(&host) {
+    if !allowed.contains(&host.as_str()) {
         return Err(i18n::err("browser_url_invalid"));
     }
     // 拒绝控制字符与引号：授权 URL 的查询串本身含 `&`，故不能整体禁用 `&`，

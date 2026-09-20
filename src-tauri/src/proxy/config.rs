@@ -265,24 +265,54 @@ impl Config {
     /// 一次 IPC 调用即可把上游指向攻击者主机，后续所有账户 key 都会外泄到那里。
     /// 回环地址（本地自建/测试）不构成外泄，放行；其他自定义主机需显式设置
     /// 环境变量 `CC_ALLOW_CUSTOM_API_BASE=1`。
+    ///
+    /// 安全要点：authority 中一旦出现 `@` 即视为携带 userinfo，直接拒绝。
+    /// 否则 `https://commandcode.ai:443@evil.com/` 会被 `rsplit_once(':')`
+    /// 误判 host 为 `commandcode.ai` 而放行，实际请求（reqwest 按 RFC 解析）
+    /// 会发往 `evil.com`，导致 Bearer key 外泄。
     fn api_base_allowed(&self) -> bool {
+        Self::api_base_allowed_str(&self.api_base)
+    }
+
+    /// 供请求路径复用的 allowlist 判定（转发/鉴权前重检用）。
+    ///
+    /// 与 `api_base_allowed` 同口径（含 userinfo 拒绝）；调用方在转发上游前
+    /// 对当前内存 `api_base` 调用，非法时拒绝请求，避免把 Bearer key 发往
+    /// 攻击者主机。
+    pub fn api_base_for_request_allowed(api_base: &str) -> bool {
+        Self::api_base_allowed_str(api_base)
+    }
+
+    fn api_base_allowed_str(api_base: &str) -> bool {
         if std::env::var("CC_ALLOW_CUSTOM_API_BASE").as_deref() == Ok("1") {
+            // 即使放行自定义主机，也绝不放行 userinfo：`@` 必然改变实际目标主机
+            let rest = api_base.split("://").nth(1).unwrap_or("");
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            if authority.contains('@') {
+                return false;
+            }
             return true;
         }
-        let rest = self.api_base.split("://").nth(1).unwrap_or("");
-        let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let rest = api_base.split("://").nth(1).unwrap_or("");
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        // userinfo（`user@host` / `user:pass@host`）直接拒绝，不做任何 host 推导
+        if authority.contains('@') {
+            return false;
+        }
+        let host_port = authority;
         let host = host_port
             .rsplit_once(':')
             .map(|(h, _)| h)
             .unwrap_or(host_port)
             .trim_start_matches('[')
             .trim_end_matches(']');
-        let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+        let host_lower = host.to_ascii_lowercase();
+        let loopback = matches!(host_lower.as_str(), "127.0.0.1" | "localhost" | "::1");
         if loopback {
             return true;
         }
-        self.api_base.starts_with("https://")
-            && (host == "commandcode.ai" || host.ends_with(".commandcode.ai"))
+        api_base.starts_with("https://")
+            && (host_lower == "commandcode.ai" || host_lower.ends_with(".commandcode.ai"))
     }
 
     /// 校验配置合法性（端口范围、监听地址、api_base 协议前缀、日志级别枚举）。
@@ -405,6 +435,18 @@ impl Config {
         }
         if let Ok(v) = std::env::var("CC_API_BASE") {
             self.api_base = v;
+            // 环境变量覆写后立即重检 allowlist：非法地址回退默认值，
+            // 避免 account_add / quota / forward 把 Bearer key 发往任意主机。
+            if !self.api_base_allowed() {
+                log::warn(&format!(
+                    "{}",
+                    crate::i18n::pick(
+                        "环境变量 CC_API_BASE 非法，已回退默认值",
+                        "Invalid CC_API_BASE env value; falling back to default"
+                    )
+                ));
+                self.api_base = Config::default().api_base;
+            }
         }
         if let Ok(v) = std::env::var("PROJECT_SLUG") {
             self.project_slug = v;

@@ -79,26 +79,38 @@ where
 
 /// 合法本地转发 Key 的正则（OnceLock 惰性编译一次，避免每次请求重复构建）。
 static KEY_RE: OnceLock<regex::Regex> = OnceLock::new();
+/// 全串匹配的严格正则（`^…$` 锚定，优先于子串提取使用）。
+static KEY_FULL_RE: OnceLock<regex::Regex> = OnceLock::new();
 
 /// 获取已编译的本地转发 Key 匹配正则 `sk-[A-Za-z0-9_-]+`。
 fn key_re() -> &'static regex::Regex {
     KEY_RE.get_or_init(|| regex::Regex::new(r"sk-[A-Za-z0-9_-]+").unwrap())
 }
 
+/// 获取全串匹配的严格正则 `^sk-[A-Za-z0-9_-]+$`。
+fn key_full_re() -> &'static regex::Regex {
+    KEY_FULL_RE.get_or_init(|| regex::Regex::new(r"^sk-[A-Za-z0-9_-]+$").unwrap())
+}
+
 /// 请求事件转发器（Tauri 注入，供前端中继轨道展示）。
-static REQUEST_SINK: Mutex<Option<Box<dyn Fn(&RequestInfo) + Send + Sync>>> = Mutex::new(None);
+static REQUEST_SINK: Mutex<Option<std::sync::Arc<dyn Fn(&RequestInfo) + Send + Sync>>> =
+    Mutex::new(None);
 
 /// 注册请求事件转发回调（Tauri setup 阶段调用，用于向前端实时推送请求状态）。
 pub fn set_request_sink<F>(f: F)
 where
     F: Fn(&RequestInfo) + Send + Sync + 'static,
 {
-    *REQUEST_SINK.lock().unwrap() = Some(Box::new(f));
+    *REQUEST_SINK.lock().unwrap() = Some(std::sync::Arc::new(f));
 }
 
 /// 把一条请求摘要推送给已注册的 sink（未注册则忽略）。
+///
+/// 锁内只 clone 出 `Arc` 即释放：回调本身在锁外执行，避免回调阻塞拖住
+/// 所有请求线程、panic 毒化锁、或回调内重入 `set_request_sink` 自死锁。
 fn emit_request(info: &RequestInfo) {
-    if let Some(sink) = REQUEST_SINK.lock().unwrap().as_ref() {
+    let sink = REQUEST_SINK.lock().unwrap().clone();
+    if let Some(sink) = sink {
         sink(info);
     }
 }
@@ -107,19 +119,34 @@ fn emit_request(info: &RequestInfo) {
 ///
 /// 优先 `Authorization: Bearer <key>`（OpenAI SDK 风格），回退 `x-api-key` 头
 /// （Anthropic SDK 风格）；无效返回 None。
+///
+/// 精确匹配优先：整串符合 `sk-[A-Za-z0-9_-]+` 全串时直接采信；否则才退回
+/// 子串提取（兼容 `Bearer sk-xxx extra` 这类 SDK 附加写法）。子串命中后
+/// 仍由 `check_local_key` 与内存 key 精确判等，不会放宽鉴权。
 pub(crate) fn extract_api_key(headers: &HeaderMap) -> Option<String> {
+    fn pick(raw: &str) -> Option<String> {
+        let k = raw.trim();
+        // 过长输入直接拒绝：避免超长头在正则上消耗资源，且合法 key 远短于此
+        if k.is_empty() || k.len() > 256 {
+            return None;
+        }
+        if key_full_re().is_match(k) {
+            return Some(k.to_string());
+        }
+        key_re().find(k).map(|m| m.as_str().to_string())
+    }
     let from_auth = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|a| a.strip_prefix("Bearer "))
-        .and_then(|k| key_re().find(k).map(|m| m.as_str().to_string()));
+        .and_then(pick);
     if from_auth.is_some() {
         return from_auth;
     }
     headers
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
-        .and_then(|k| key_re().find(k).map(|m| m.as_str().to_string()))
+        .and_then(pick)
 }
 
 /// 读取配置中的代理监听端口。
@@ -165,9 +192,13 @@ async fn origin_guard(
             .get(axum::http::header::HOST)
             .and_then(|v| v.to_str().ok())
             .map(|h| {
-                // 去掉端口后比对；IPv6 形如 [::1]:3050
-                let host = h.rsplit_once(':').map(|(a, _)| a).filter(|a| !a.is_empty()).unwrap_or(h);
-                let host = host.trim_start_matches('[').trim_end_matches(']');
+                // 去掉端口后比对。IPv6 无端口回环形如 `[::1]`：不能用 rsplit_once(':')
+                // 切分（会把 `[::1]` 切成 `[::`），先识别方括号字面量再去端口。
+                let host = if let Some(stripped) = h.strip_prefix('[') {
+                    stripped.split(']').next().unwrap_or(stripped)
+                } else {
+                    h.rsplit_once(':').map(|(a, _)| a).filter(|a| !a.is_empty()).unwrap_or(h)
+                };
                 matches!(host, "127.0.0.1" | "localhost" | "::1")
             })
             // 无 Host（HTTP/1.0 或本地进程探测）视为可接受
@@ -727,6 +758,9 @@ fn route_session_key(headers: &HeaderMap, prompt_cache_key: Option<&str>) -> Opt
 /// 校验本地转发 Key（不含账户路由）：在读取请求体**之前**调用，避免未认证客户端
 /// 用大 body / 慢速上传消耗资源（请求体在鉴权前被完整读入是资源耗尽面）。
 ///
+/// 同时重检上游 `api_base` allowlist：内存地址非法时直接拒绝，避免把账户
+/// Bearer key 转发到攻击者主机。
+///
 /// 失败返回 `(状态码, 具体原因)`，由各协议入口包装成对应错误体。
 fn check_local_key(headers: &HeaderMap) -> Result<(), (u16, &'static str)> {
     let local = crate::credentials::cached_local_key();
@@ -740,10 +774,23 @@ fn check_local_key(headers: &HeaderMap) -> Result<(), (u16, &'static str)> {
     let Some(sent) = extract_api_key(headers) else {
         return Err((401, "Missing API key. Send in Authorization: Bearer <key> header"));
     };
-    if sent != expected {
+    // 常量时间比较：避免逐字节短路泄露 key 前缀信息
+    if !constant_time_eq(sent.as_bytes(), expected.as_bytes()) {
         return Err((401, "Invalid API key"));
     }
     Ok(())
+}
+
+/// 定长比较（长度不同直接 false；内容比较无数据依赖的短路）。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// 鉴权并选出本次转发的 Command Code 账户 key。
@@ -763,6 +810,14 @@ async fn api_key_or_401(
     session_key: Option<&str>,
 ) -> Result<(String, String), (u16, &'static str)> {
     check_local_key(headers)?;
+
+    // 转发前重检上游地址：内存 api_base 可能来自 env/旧库，非法时拒绝，
+    // 避免把账户 Bearer key 发往攻击者主机。
+    if !super::config::Config::api_base_for_request_allowed(
+        &st.config.read().unwrap().api_base,
+    ) {
+        return Err((500, "Upstream address misconfigured; refusing to forward"));
+    }
 
     // 鉴权通过：按账户策略选取本次转发的 Command Code 账户
     match crate::credentials::route_account(st, session_key) {
