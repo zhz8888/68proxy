@@ -100,23 +100,37 @@ fn get_session_id(
 
 /// 取该账户（按 userId 标识）当前有效会话；不存在或已过期时生成新 UUID 会话并
 /// 按 12h+抖动 设置过期。以 userId 为键，同一账户重新登录换 key 时会话延续。
+///
+/// 单次加锁内完成检查与插入：两次独立加锁的 check-then-insert 会让并发
+/// 首请求各自生成 UUID、后者覆盖前者，前一请求返回的 threadId 与库中不一致。
 fn ensure_session(state: &AppState, user_id: &str) -> String {
     let now = now_millis();
-    if let Some(entry) = state.sessions.lock().unwrap().get(user_id) {
-        if now < entry.expires_at {
-            return entry.session_id.clone();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        if let Some(entry) = sessions.get(user_id) {
+            if now < entry.expires_at {
+                return entry.session_id.clone();
+            }
         }
     }
     let mut rng = rand::thread_rng();
     let jitter = rng.gen_range(0..AppState::session_jitter_ms());
     let session_id = uuid::Uuid::new_v4().to_string();
-    state.sessions.lock().unwrap().insert(
+    let mut sessions = state.sessions.lock().unwrap();
+    // 二次检查：等待锁期间可能已有并发请求建好会话，直接复用
+    if let Some(entry) = sessions.get(user_id) {
+        if now < entry.expires_at {
+            return entry.session_id.clone();
+        }
+    }
+    sessions.insert(
         user_id.to_string(),
         SessionEntry {
             session_id: session_id.clone(),
             expires_at: now + AppState::session_duration_ms() + jitter,
         },
     );
+    drop(sessions);
     // user_id 来自上游 whoami，可能是任意字符串：按字符截断避免字节切片落在字符中间 panic
     let short_id: String = user_id.chars().take(8).collect();
     log::info(&format!(
@@ -128,10 +142,15 @@ fn ensure_session(state: &AppState, user_id: &str) -> String {
 
 /// 取该账户（按 userId 标识）的伪装状态；指纹由 apiKey 确定性派生
 /// （同一 userId 跨重启/换进程恒为同一台设备，无需磁盘持久化）。
+///
+/// 指纹计算在锁外完成：锁内只做查表与插入，避免全局 key_states 被
+/// 长计算串行化。缓存键包含 salt + project_dir 版本，任一变化即失效重算。
 fn get_or_create_key_state(state: &AppState, user_id: &str) -> KeyState {
-    let mut states = state.key_states.lock().unwrap();
-    if let Some(s) = states.get(user_id) {
-        return s.clone();
+    if let Some(s) = state.key_states.lock().unwrap().get(user_id) {
+        let cfg = state.config.read().unwrap();
+        if s.salt == cfg.fingerprint_salt && s.project_dir == cfg.device_project_dir {
+            return s.clone();
+        }
     }
     let cfg = state.config.read().unwrap().clone();
     // 指纹由该账户的 apiKey 确定性派生；cc_accounts 里找不到（如测试构造）时
@@ -147,8 +166,10 @@ fn get_or_create_key_state(state: &AppState, user_id: &str) -> KeyState {
     let ks = KeyState {
         fingerprint,
         next_init_at: 0,
+        salt: cfg.fingerprint_salt.clone(),
+        project_dir: cfg.device_project_dir.clone(),
     };
-    states.insert(user_id.to_string(), ks.clone());
+    state.key_states.lock().unwrap().insert(user_id.to_string(), ks.clone());
     ks
 }
 
@@ -164,21 +185,82 @@ pub fn cc_version(state: &AppState) -> String {
 
 /// 初始化预请求（fingerprint/record + lifecycle-events），8h + 2h 抖动刷新。
 /// `api_key` 用于构造请求头，`user_id` 用于键控初始化状态（换 key 不重置）。
+///
+/// 单飞：进入时先把 `next_init_at` 占位为本次预计完成时间，并发首请求中
+/// 只有一个真正执行预请求，其余直接返回（预请求失败仅记日志，不阻塞主流程）。
 pub async fn ensure_initialized(state: &AppState, api_key: &str, user_id: &str) {
     let now = now_millis();
-    let next = get_or_create_key_state(state, user_id).next_init_at;
-    if now < next {
-        return;
+    {
+        let mut states = state.key_states.lock().unwrap();
+        match states.get_mut(user_id) {
+            Some(s) if now < s.next_init_at => return,
+            Some(s) => {
+                // 占位单飞：其他并发请求看到未来时间即返回
+                s.next_init_at = now + AppState::init_refresh_ms() + AppState::init_jitter_ms();
+            }
+            None => {
+                // 尚无条目：先占位，再在锁外建项（建项内部会再次加锁，
+                // 故不能在持有锁时直接调用 get_or_create_key_state）
+                states.insert(
+                    user_id.to_string(),
+                    KeyState {
+                        fingerprint: fingerprint::generate(
+                            user_id,
+                            &state.config.read().unwrap().fingerprint_salt,
+                            &fingerprint::default_device_profile(
+                                &state.config.read().unwrap().device_project_dir,
+                            ),
+                        ),
+                        next_init_at: now
+                            + AppState::init_refresh_ms()
+                            + AppState::init_jitter_ms(),
+                        salt: state.config.read().unwrap().fingerprint_salt.clone(),
+                        project_dir: state.config.read().unwrap().device_project_dir.clone(),
+                    },
+                );
+            }
+        }
     }
+    // 锁外补算正确指纹（占位用的 user_id 派生可能不对）：以“读-算-写”短临界区更新
+    refresh_key_state_fingerprint(state, user_id);
+    ensure_initialized_inner(state, api_key, user_id, now).await;
+}
 
+/// 锁外重算并写回指纹（salt / project_dir / apiKey 任一变化即更新）。
+fn refresh_key_state_fingerprint(state: &AppState, user_id: &str) {
+    let cfg = state.config.read().unwrap().clone();
+    let key = cfg
+        .cc_accounts
+        .iter()
+        .find(|a| a.user_id == user_id)
+        .map(|a| a.key.as_str())
+        .unwrap_or(user_id);
+    let profile = fingerprint::default_device_profile(&cfg.device_project_dir);
+    let fingerprint = fingerprint::generate(key, &cfg.fingerprint_salt, &profile);
+    let mut states = state.key_states.lock().unwrap();
+    if let Some(s) = states.get_mut(user_id) {
+        s.fingerprint = fingerprint;
+        s.salt = cfg.fingerprint_salt;
+        s.project_dir = cfg.device_project_dir;
+    }
+}
+
+async fn ensure_initialized_inner(state: &AppState, api_key: &str, user_id: &str, now: u64) {
     let cfg = state.config.read().unwrap().clone();
     let mut headers = base_headers(state, api_key);
     // ZDR 模式开启时预请求也携带 x-cmd-zdr（与生成请求一致）
     if cfg.zdr {
         headers.insert("x-cmd-zdr", "1".parse().unwrap());
     }
-    // 指纹同样以 user_id 键控：同一账户换 key 后保持同一设备身份
-    let fingerprint = get_or_create_key_state(state, user_id).fingerprint;
+    // 指纹同样以 user_id 键控：同一账户换 key 后保持同一设备身份。
+    // 上方已在锁外刷新过指纹，此处短临界区只读（不触发重算）。
+    let fingerprint = state
+        .key_states
+        .lock()
+        .unwrap()
+        .get(user_id)
+        .map(|s| s.fingerprint.clone());
+    let fingerprint = fingerprint.unwrap_or_else(|| get_or_create_key_state(state, user_id).fingerprint);
     let client = state.client();
 
     // 两个初始化预请求的 URL 与请求体：上报指纹 + 上报 CLI 会话存活事件

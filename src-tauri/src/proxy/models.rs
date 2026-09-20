@@ -349,16 +349,16 @@ pub fn provider_from_id(id: &str) -> Option<&'static str> {
 /// 供请求处理路径调用：直接从模型列表缓存取表，缓存为空时回退内置表，
 /// 与 `/v1/models` 的取数口径一致（见 `load_models_for`）。
 pub fn resolve_model_for(state: &AppState, model: &str) -> String {
-    let entries = {
-        let cache = state.models.read().unwrap();
-        if cache.models.is_empty() {
-            None
-        } else {
-            Some(cache.models.clone())
-        }
-    };
-    let entries = entries.unwrap_or_else(builtin_entries);
-    resolve_model_id(&entries, model)
+    // 读锁内直接解析，不 clone 整表：三协议入口每请求一次，全量 clone
+    // Vec<ModelInfo> 是多余分配。缓存为空时回退内置表。
+    let cache = state.models.read().unwrap();
+    if cache.models.is_empty() {
+        drop(cache);
+        return resolve_model_id(&builtin_entries(), model);
+    }
+    let resolved = resolve_model_id(&cache.models, model);
+    drop(cache);
+    resolved
 }
 
 /// Provider 模型列表端点的单条记录（OpenAI list 格式，字段为上游原样）。

@@ -41,6 +41,10 @@ pub struct KeyState {
     pub fingerprint: Fingerprint,
     /// 下一次执行 fingerprint/record + lifecycle 预请求的时间（Unix 毫秒），0 表示立即可做。
     pub next_init_at: u64,
+    /// 生成该指纹时使用的盐版本：变化即失效重算（改盐=换设备即时生效）。
+    pub salt: String,
+    /// 生成该指纹时使用的项目目录版本：变化即失效重算。
+    pub project_dir: String,
 }
 
 /// 会话 → 账户的粘滞绑定（`priority` 策略用）。
@@ -302,6 +306,21 @@ impl AppState {
     }
 }
 
+/// userinfo 段的百分号编码（RFC 3986）：保留 unreserved 与 `!$&'()*+,;=`
+/// 中不与 authority 分隔冲突的子集，其余（含 `@/:/?#`）全部编码。
+fn url_encode_userinfo(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// 按出站代理配置构建 HTTP 客户端（10s 连接超时）。
 ///
 /// - `none`：显式禁用系统代理（不读环境变量）；
@@ -323,10 +342,16 @@ pub fn build_client(config: &Config) -> Result<reqwest::Client, String> {
                 "http" => "http",
                 _ => "socks5",
             };
+            // userinfo 必须百分号编码：用户名/密码含 `@/:/?#` 时直接拼接会
+            // 改变 URL 的 authority 解析，把上游流量发往错误主机。
             let auth = if config.proxy_username.is_empty() {
                 String::new()
             } else {
-                format!("{}:{}@", config.proxy_username, config.proxy_password)
+                format!(
+                    "{}:{}@",
+                    url_encode_userinfo(&config.proxy_username),
+                    url_encode_userinfo(&config.proxy_password)
+                )
             };
             let url = format!("{scheme}://{auth}{}:{}", config.proxy_host, config.proxy_port);
             let proxy = reqwest::Proxy::all(&url).map_err(|e| {
