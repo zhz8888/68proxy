@@ -3446,3 +3446,92 @@ async fn failed_stream_is_not_recorded_as_ok() {
     );
     state.mark_stopped();
 }
+
+/// 给代理状态换上带 usage_history 等表的内存库（默认测试库只建了 settings）。
+fn attach_usage_db(state: &Arc<AppState>) {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    super::usage::init_usage_on(&conn).unwrap();
+    *state.usage.lock().unwrap() = Some(conn);
+}
+
+/// 统计 usage_history 中指定模型的记录条数（附表已挂载的前提）。
+fn usage_rows_for(state: &Arc<AppState>, model: &str) -> i64 {
+    let guard = state.usage.lock().unwrap();
+    guard
+        .as_ref()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM usage_history WHERE model = ?1",
+            [model],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// 回归：Anthropic 流式路径不得把「未走完 finish」的截断生成记入用量。
+///
+/// 修复前该路径传 `!translator.has_error`，而 incomplete 路径不置 has_error，
+/// 导致失败请求的 token 与成本被写进 usage_history（OpenAI 路径口径正确）。
+#[tokio::test]
+async fn truncated_anthropic_stream_is_not_recorded_as_usage() {
+    let (base, state) = start_proxy().await;
+    attach_usage_db(&state);
+    let client = reqwest::Client::new();
+
+    let res = client
+        .post(format!("{base}/v1/messages"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "no-finish",
+            "max_tokens": 64,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let text = res.text().await.unwrap();
+    assert!(
+        text.contains("no finish event") || text.contains("without a completion finish"),
+        "Anthropic 侧应告知上游被截断: {text}"
+    );
+
+    assert_eq!(
+        usage_rows_for(&state, "no-finish"),
+        0,
+        "截断生成不得计入用量统计"
+    );
+    state.mark_stopped();
+}
+
+/// 回归：Responses 流式路径同样不得把截断生成记入用量（与 Anthropic 同口径）。
+#[tokio::test]
+async fn truncated_responses_stream_is_not_recorded_as_usage() {
+    let (base, state) = start_proxy().await;
+    attach_usage_db(&state);
+    let client = reqwest::Client::new();
+
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "no-finish",
+            "input": "hi",
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let text = res.text().await.unwrap();
+    assert!(
+        text.contains("no finish event") || text.contains("response.failed"),
+        "Responses 侧应告知上游被截断: {text}"
+    );
+
+    assert_eq!(
+        usage_rows_for(&state, "no-finish"),
+        0,
+        "截断生成不得计入用量统计"
+    );
+    state.mark_stopped();
+}

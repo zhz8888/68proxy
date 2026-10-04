@@ -1611,6 +1611,10 @@ async fn stream_anthropic(
         let _ = send_frame(&tx, Frame::ZeroOutput(err), drain).await;
         return;
     }
+    // finalize() 之前先算成败：finalize 对「未走完 finish」会发 error 帧，
+    // 该路径不置 has_error，只看 has_error 会把被截断的生成记成成功消耗。
+    // 口径与 stream_openai 一致（error 事件 或 未走完 finish 即失败）。
+    let failed = translator.stream_error.is_some() || translator.incomplete_detail().is_some();
     for f in translator.finalize() {
         if !send_frame(&tx, Frame::Sse(f), drain).await {
             return;
@@ -1632,9 +1636,9 @@ async fn stream_anthropic(
         translator.cached_tokens,
         translator.cache_write_tokens.unwrap_or(0),
         true,
-        !translator.has_error,
+        !failed,
     );
-    let _ = send_frame(&tx, Frame::Done, drain).await;
+    let _ = send_frame(&tx, if failed { Frame::Failed } else { Frame::Done }, drain).await;
 }
 
 /// 后台任务：读上游字节流并经 ResponsesTranslator 翻译（流程同 stream_openai，
@@ -1720,6 +1724,9 @@ async fn stream_responses(
         let _ = send_frame(&tx, Frame::ZeroOutput(err), drain).await;
         return;
     }
+    // 成败判定同 stream_anthropic：finalize 对未走完 finish 的流发 response.failed，
+    // 该路径不置 has_error，仅看 has_error 会把截断生成记为成功消耗。
+    let failed = translator.stream_error.is_some() || translator.incomplete_detail().is_some();
     for f in translator.finalize() {
         if !send_frame(&tx, Frame::Sse(f), drain).await {
             return;
@@ -1732,8 +1739,8 @@ async fn stream_responses(
         translator.cached_tokens,
         &last_event,
     );
-    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true, !translator.has_error);
-    let _ = send_frame(&tx, Frame::Done, drain).await;
+    record_usage_entry(&st, &model, endpoint, translator.input_tokens, translator.output_tokens, translator.cached_tokens, translator.cache_write_tokens, true, !failed);
+    let _ = send_frame(&tx, if failed { Frame::Failed } else { Frame::Done }, drain).await;
 }
 // ── 行拆分工具 ────────────────────────────────────────
 
