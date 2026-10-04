@@ -865,6 +865,14 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
                 "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"半截回答\"}\n",
             ));
         }
+        if parsed["params"]["model"] == "responses-interleave" {
+            // text → reasoning → text 交错：output_index 按开启顺序分配（message=0、
+            // reasoning=1），但条目按关闭顺序入表，最终 response.completed 的 output
+            // 必须按 output_index 升序，否则客户端读 output[0] 拿到 reasoning 丢失正文。
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"text-delta\",\"text\":\"先说\"}\n{\"type\":\"reasoning-delta\",\"text\":\"想一想\"}\n{\"type\":\"text-delta\",\"text\":\"后说\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":9,\"outputTokens\":6}}\n",
+            ));
+        }
         if parsed["params"]["model"] == "max-output-tokens" {
             // 截断类 finishReason 不止 length：max_output_tokens 同样表示被截断
             return axum::response::Response::new(axum::body::Body::from(
@@ -3533,5 +3541,54 @@ async fn truncated_responses_stream_is_not_recorded_as_usage() {
         0,
         "截断生成不得计入用量统计"
     );
+    state.mark_stopped();
+}
+
+/// 回归：Responses 最终 `response.completed` 的 output 数组必须按 output_index 升序。
+///
+/// 修复前条目按关闭顺序入表，text→reasoning→text 交错时 reasoning(index 1)
+/// 会排在 message(index 0) 之前，客户端读 output[0] 拿到 reasoning、丢失正文。
+#[tokio::test]
+async fn responses_completed_output_is_ordered_by_output_index() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+
+    let res = client
+        .post(format!("{base}/v1/responses"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "responses-interleave",
+            "input": "hi",
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+    assert!(text.contains("response.completed"), "应正常收尾: {text}");
+
+    // 取出最后一个 response.completed 帧并校验 output 顺序
+    let last = text
+        .split("data: ")
+        .filter(|f| f.contains("response.completed"))
+        .last()
+        .expect("应有 response.completed 帧");
+    let line = last.lines().next().unwrap_or_default();
+    let v: Value = serde_json::from_str(line).expect("帧应为合法 JSON");
+    let output = v["response"]["output"].as_array().expect("output 应为数组");
+    assert_eq!(output.len(), 2, "应有 reasoning 与 message 两个条目: {v}");
+
+    // 顺序必须与 output_index 升序一致（message 开启在前 → index 0）
+    let types: Vec<&str> = output
+        .iter()
+        .map(|i| i["type"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        types,
+        vec!["message", "reasoning"],
+        "output 未按 output_index 排序: {v}"
+    );
+    assert_eq!(output[0]["content"][0]["text"], "先说后说");
     state.mark_stopped();
 }

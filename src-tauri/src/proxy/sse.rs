@@ -384,7 +384,12 @@ pub struct ResponsesTranslator {
     /// 当前 reasoning 条目累计的完整思考文本。
     reasoning_text: String,
     /// 已完成的 output 条目，写入最终 response.completed 的 output 数组。
-    output_items: Vec<Value>,
+    ///
+    /// 元素为 `(output_index, item)`：条目按**开启顺序**分配 output_index，但
+    /// 写入本表的顺序是**关闭顺序**（close_reasoning_item 可能先于 close_text_item
+    /// 执行），故必须随条目带上分配时的下标，收尾时按下标排序后才符合
+    /// Responses 规范要求的「output 按 output_index 升序」。
+    output_items: Vec<(u32, Value)>,
     /// 上游 finishReason 原始值（"length" 时最终置为 incomplete）。
     stop_reason: Option<String>,
     /// 最近一次解析到的 Command Code 事件类型（供请求追踪展示）。
@@ -518,7 +523,7 @@ impl ResponsesTranslator {
             "response.output_item.done",
             serde_json::json!({ "type": "response.output_item.done", "output_index": idx, "item": item }),
         ));
-        self.output_items.push(item);
+        self.output_items.push((idx, item));
     }
 
     /// 关闭当前未完结的 reasoning 条目，发出 summary 收尾事件与 output_item.done。
@@ -547,7 +552,7 @@ impl ResponsesTranslator {
             "response.output_item.done",
             serde_json::json!({ "type": "response.output_item.done", "output_index": idx, "item": item }),
         ));
-        self.output_items.push(item);
+        self.output_items.push((idx, item));
     }
 
     /// 打开一个新的 reasoning 条目（reasoning_summary_part.added）。
@@ -695,7 +700,7 @@ impl ResponsesTranslator {
                     "response.output_item.done",
                     serde_json::json!({ "type": "response.output_item.done", "output_index": idx, "item": item }),
                 ));
-                self.output_items.push(item);
+                self.output_items.push((idx, item));
                 // tool call 按固定 20 token 粗估（同上，最终以 finish 事件回报值覆盖）
                 self.output_tokens += 20;
             }
@@ -789,7 +794,12 @@ impl ResponsesTranslator {
             ));
             return out;
         }
-        let items = std::mem::take(&mut self.output_items);
+        let mut items = std::mem::take(&mut self.output_items);
+        // 按 output_index 升序：条目按下标分配、却按关闭顺序入表，
+        // 不排序会让 text→reasoning→text 交错时 reasoning 排到 message 之前，
+        // 客户端读 output[0] 拿到 reasoning 而丢失正文。
+        items.sort_by_key(|(idx, _)| *idx);
+        let items = items.into_iter().map(|(_, item)| item).collect::<Vec<_>>();
         let truncated = finish_norm == "length";
         let paused = finish_norm == "pause_turn";
         let incomplete = truncated || paused;
