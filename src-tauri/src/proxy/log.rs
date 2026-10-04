@@ -83,20 +83,28 @@ impl LogBuffer {
 /// 全局日志缓冲 + 事件转发器（Tauri AppHandle 在 setup 时注入）。
 static LOG_BUFFER: LogBuffer = LogBuffer::new(1000);
 /// 可选的外部事件转发回调（如 Tauri emit），每条日志写入缓冲后同步调用。
-static SINK: Mutex<Option<Box<dyn Fn(&LogEntry) + Send + Sync>>> = Mutex::new(None);
+///
+/// 存 `Arc` 而非 `Box`：`log()` 需要在**锁外**调用回调（见该函数注释）。
+static SINK: Mutex<Option<std::sync::Arc<dyn Fn(&LogEntry) + Send + Sync>>> = Mutex::new(None);
 
 /// 注册日志事件转发回调（Tauri setup 阶段调用一次，用于向前端推送实时日志）。
 pub fn set_sink<F>(f: F)
 where
     F: Fn(&LogEntry) + Send + Sync + 'static,
 {
-    *SINK.lock().unwrap() = Some(Box::new(f));
+    *SINK.lock().unwrap() = Some(std::sync::Arc::new(f));
 }
 
 /// 写入一条日志：先入全局缓冲，再转发给已注册的 sink（若有）。
+///
+/// 锁内只 clone 出 `Arc` 即释放，回调在锁外执行：与 server::emit_request /
+/// usage::emit_usage_updated 同口径。否则回调内的 Tauri `emit` 一旦阻塞（webview
+/// 卡顿、IPC 通道饱和）会拖住所有线程的日志写入；回调 panic 还会毒化该锁，
+/// 而 release 下 `panic = "abort"` 会让后续每次 log 调用直接终止进程。
 pub fn log(level: &str, msg: &str) {
     let entry = LOG_BUFFER.push(level, msg);
-    if let Some(sink) = SINK.lock().unwrap().as_ref() {
+    let sink = SINK.lock().unwrap().clone();
+    if let Some(sink) = sink {
         sink(&entry);
     }
 }
