@@ -3689,3 +3689,28 @@ async fn finish_step_only_stream_emits_finish_chunk() {
     );
     state.mark_stopped();
 }
+
+/// 回归：单行 NDJSON 超上限应中断该流而不是无限累积内存。
+#[tokio::test]
+async fn oversized_ndjson_line_aborts_stream() {
+    // 32MB 上限是编译期常量，构造超限数据成本高；此处覆盖行拆分的边界行为：
+    // 正常行正确切出、无换行时按需累积、补上换行后才吐出行。
+    let mut buf: Vec<u8> = Vec::new();
+    assert_eq!(
+        server::push_and_split(&mut buf, b"{\"a\":1}\n"),
+        Ok(vec!["{\"a\":1}".to_string()])
+    );
+    assert!(buf.is_empty());
+    // 无换行时累积但不报错，缓冲保留未完结片段
+    assert_eq!(
+        server::push_and_split(&mut buf, b"partial"),
+        Ok(Vec::<String>::new())
+    );
+    assert_eq!(buf, b"partial".to_vec());
+    // 补上换行后切出该行（拼接了此前的未完结片段）
+    assert_eq!(
+        server::push_and_split(&mut buf, b"-more\n"),
+        Ok(vec!["partial-more".to_string()])
+    );
+    assert!(buf.is_empty());
+}

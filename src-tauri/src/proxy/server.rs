@@ -1443,7 +1443,15 @@ async fn stream_openai(
                 return;
             }
         };
-        let complete = push_and_split(&mut buffer, &chunk);
+        let complete = match push_and_split(&mut buffer, &chunk) {
+            Ok(lines) => lines,
+            // 单行超限：上游发了无换行的异常字节流，按传输层故障收尾
+            Err(()) => {
+                log::error("Upstream NDJSON line exceeded the size limit; aborting stream");
+                let _ = send_frame(&tx, Frame::Error { message: "Upstream event exceeded the size limit".into(), retryable: false }, drain).await;
+                return;
+            }
+        };
         let mut had_output = false;
         for line in &complete {
             let frames = translator.parse_line(line);
@@ -1571,7 +1579,15 @@ async fn stream_anthropic(
                 return;
             }
         };
-        let complete = push_and_split(&mut buffer, &chunk);
+        let complete = match push_and_split(&mut buffer, &chunk) {
+            Ok(lines) => lines,
+            // 单行超限：上游发了无换行的异常字节流，按传输层故障收尾
+            Err(()) => {
+                log::error("Upstream NDJSON line exceeded the size limit; aborting stream");
+                let _ = send_frame(&tx, Frame::Error { message: "Upstream event exceeded the size limit".into(), retryable: false }, drain).await;
+                return;
+            }
+        };
         let mut had_output = false;
         for line in &complete {
             let frames = translator.process_line(line);
@@ -1686,7 +1702,15 @@ async fn stream_responses(
                 return;
             }
         };
-        let complete = push_and_split(&mut buffer, &chunk);
+        let complete = match push_and_split(&mut buffer, &chunk) {
+            Ok(lines) => lines,
+            // 单行超限：上游发了无换行的异常字节流，按传输层故障收尾
+            Err(()) => {
+                log::error("Upstream NDJSON line exceeded the size limit; aborting stream");
+                let _ = send_frame(&tx, Frame::Error { message: "Upstream event exceeded the size limit".into(), retryable: false }, drain).await;
+                return;
+            }
+        };
         let mut had_output = false;
         for line in &complete {
             let frames = translator.process_line(line);
@@ -1764,19 +1788,40 @@ fn split_lines_bytes(buffer: &[u8]) -> (Vec<String>, Vec<u8>) {
     )
 }
 
+/// 单行 NDJSON 事件的字节上限：超过即视为上游协议违规（异常/挂起的响应）。
+///
+/// 没有换行的数据会一直堆积在行缓冲里，而 `stream_idle_timeout_secs` 默认为 0
+/// （不启用），无上限时缓冲会一直增长到进程 OOM。取 32MB：远大于任何合理
+/// 的 tool-call / tool-result 事件，又能兜住持续输出无换行字节流的异常上游。
+const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
+
 /// 追加新到的字节并按需切分：仅当新数据含换行时才做行切分。
 ///
 /// `buffer` 中永不残留 `\n`，故无换行即无完整行；避免对增长中的超长单行
 /// （大 tool-call / tool-result）反复做全量 split —— O(n²) → O(n)。
 /// 返回的每一行都是完整行，其字节边界必然落在字符边界上，可安全解码。
-fn push_and_split(buffer: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> {
+///
+/// 返回 `Err(())` 表示单行超过 `MAX_LINE_BYTES`：调用方应按上游协议违规
+/// 中断该流（此时缓冲已被清空，不会残留已累积的字节）。
+pub(crate) fn push_and_split(buffer: &mut Vec<u8>, chunk: &[u8]) -> Result<Vec<String>, ()> {
     buffer.extend_from_slice(chunk);
     if !chunk.contains(&b'\n') {
-        return Vec::new();
+        // 无换行：缓冲持续增长，超过上限即中止，防止无限累积
+        return if buffer.len() > MAX_LINE_BYTES {
+            buffer.clear();
+            Err(())
+        } else {
+            Ok(Vec::new())
+        };
     }
     let (complete, last) = split_lines_bytes(buffer);
+    let tail_too_long = last.len() > MAX_LINE_BYTES;
     *buffer = last;
-    complete
+    if tail_too_long {
+        buffer.clear();
+        return Err(());
+    }
+    Ok(complete)
 }
 
 /// 解码并返回缓冲中最后一段未完结字节（流结束时处理尾部残留）。
@@ -1905,7 +1950,15 @@ async fn handle_nonstream(
                 return nonstream_error(protocol, 429, &msg, Some(5));
             }
         };
-        let complete = push_and_split(&mut buffer, &chunk);
+        let complete = match push_and_split(&mut buffer, &chunk) {
+            Ok(lines) => lines,
+            // 单行超限：上游发了无换行的异常字节流
+            Err(()) => {
+                log::error("Upstream NDJSON line exceeded the size limit; aborting non-stream read");
+                finish_request(&st, &ctx, "error");
+                return nonstream_error(protocol, 502, "Upstream event exceeded the size limit", None);
+            }
+        };
         for line in &complete {
             parse_ndjson_line(
                 line,
