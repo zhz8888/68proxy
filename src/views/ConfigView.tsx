@@ -168,6 +168,8 @@ export function ConfigView() {
   const [proxyPortInput, setProxyPortInput] = useState(
     DEFAULTS.proxy_port > 0 ? String(DEFAULTS.proxy_port) : "",
   );
+  // 出站代理模式草稿：custom 需主机与端口齐备才提交进 cfg（见 updateProxyMode）
+  const [proxyModeDraft, setProxyModeDraft] = useState(DEFAULTS.proxy_mode);
   // 模型刷新间隔以字符串保存（同端口输入模式）：清空/非法值期间不同步到配置，
   // 否则 Number("") 得 0 会让模型缓存判断恒为未命中、每次取模型都打上游
   const [refreshInput, setRefreshInput] = useState(
@@ -213,6 +215,7 @@ export function ConfigView() {
         setCfg({ ...c, language: c.language === "en" ? "en" : "zh" });
         setPortInput(String(c.port));
         setProxyPortInput(c.proxy_port > 0 ? String(c.proxy_port) : "");
+        setProxyModeDraft(c.proxy_mode);
         setRefreshInput(String(c.model_refresh_interval_secs));
         setRetentionInput(String(c.usage_retention_days));
         setStreamIdleInput(String(c.stream_idle_timeout_secs));
@@ -237,6 +240,20 @@ export function ConfigView() {
     return () => clearTimeout(t2);
   }, [cfg.port, loaded]);
 
+  // custom 模式的主机/端口补齐后，把草稿模式提交进 cfg（由自动保存持久化）。
+  // 补齐前 cfg 仍是上一个合法模式，故其他配置项的保存不会被 validate 拦下。
+  useEffect(() => {
+    if (!loaded || loadError) return;
+    if (
+      proxyModeDraft === "custom" &&
+      cfg.proxy_mode !== "custom" &&
+      cfg.proxy_host.trim() !== "" &&
+      cfg.proxy_port >= 1
+    ) {
+      update("proxy_mode", "custom");
+    }
+  }, [loaded, loadError, proxyModeDraft, cfg.proxy_mode, cfg.proxy_host, cfg.proxy_port]);
+
   /** 更新端口输入：仅在 1-65535 时同步到配置，空值/非法值期间不触发保存与检测。 */
   function updatePort(raw: string) {
     setPortInput(raw);
@@ -252,6 +269,24 @@ export function ConfigView() {
     const n = Number(raw);
     if (raw.trim() !== "" && Number.isInteger(n) && n >= 1 && n <= 65535) {
       update("proxy_port", n);
+    }
+  }
+
+  /** 切换出站代理模式。
+   *
+   * custom 模式受后端 `validate()` 约束（主机非空 + 端口 ∈ 1..=65535）。若切换时
+   * 立刻写进 cfg，600ms 防抖会在用户填完主机/端口之前提交半成品配置：既弹出与当前
+   * 操作无关的校验错，又让 cfg 永久停在「校验不通过」状态——此后**任何**其他配置
+   * 改动都被同一错误拒绝。故 custom 先只落草稿，等主机与端口齐备再提交。
+   */
+  function updateProxyMode(v: string) {
+    setProxyModeDraft(v);
+    if (v !== "custom") {
+      update("proxy_mode", v);
+      return;
+    }
+    if (cfg.proxy_host.trim() !== "" && cfg.proxy_port >= 1) {
+      update("proxy_mode", v);
     }
   }
 
@@ -524,8 +559,8 @@ export function ConfigView() {
             <Field label={t("config.proxyModeLabel")}>
               {/* 三段式模式切换：不走代理 / 跟随系统 / 自定义 */}
               <Tabs
-                value={cfg.proxy_mode}
-                onValueChange={(v) => update("proxy_mode", v)}
+                value={proxyModeDraft}
+                onValueChange={updateProxyMode}
               >
                 <TabsList className="h-11 w-full">
                   {PROXY_MODE_OPTIONS.map((opt) => (
@@ -538,7 +573,7 @@ export function ConfigView() {
               {/* 模式说明独占一行，避免长文案与标签同行被挤压折叠 */}
               <p className="text-xs text-muted-foreground">{t("config.proxyModeHint")}</p>
             </Field>
-            {cfg.proxy_mode === "custom" && (
+            {proxyModeDraft === "custom" && (
               <>
                 <Field label={t("config.proxyTypeLabel")}>
                   <Select value={cfg.proxy_type} onValueChange={(v) => update("proxy_type", v)}>
