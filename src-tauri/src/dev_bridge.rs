@@ -261,6 +261,10 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
             crate::account_remove(app()?, n("index").unwrap_or(0) as usize)?;
             Ok(Value::Null)
         }
+        // 按 userId 删除（幂等）：前端删除账户走此命令（下标删除在「渲染快照 → 点击」
+        // 之间列表变化时会错位删错账户）。漏实现会让浏览器直连开发页时删除账户必然
+        // 返回 unknown_command。
+        "account_remove_by_id" => Ok(to_value(crate::account_remove_by_id(app()?, s("userId"))?)?),
         "account_quota" => Ok(to_value(crate::account_quota(app()?, s("userId")).await?)?),
         "accounts_quota" => Ok(to_value(crate::accounts_quota(app()?).await?)?),
 
