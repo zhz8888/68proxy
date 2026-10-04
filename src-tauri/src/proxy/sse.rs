@@ -292,8 +292,11 @@ impl OpenAiTranslator {
                 // 仅在带 usage 时更新计数：上游偶发不回 totalUsage，此时保留
                 // finish-step 已记录的值，不要用 0 覆盖（否则会把已出正文的流误判为空响应）
                 if let Some(u) = event.get("totalUsage").cloned().or_else(|| event.get("usage").cloned()) {
-                    let mut input = u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let mut output = u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    // 逐字段回退到已有值而非 0：上游偶发只给残缺的 totalUsage（如
+                    // 缺 outputTokens），用 0 覆盖会把 finish-step 已记的输出清零，
+                    // 令已出正文的流被误判为空响应且不计入统计（同 Anthropic/Responses 口径）。
+                    let mut input = u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(self.input_tokens);
+                    let mut output = u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(self.output_tokens);
                     let mut cached = read_cache_read_tokens(&u);
                     normalize_usage(&mut input, &mut output, &mut cached);
                     self.input_tokens = input;

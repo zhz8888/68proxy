@@ -873,6 +873,13 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
                 "{\"type\":\"start\"}\n{\"type\":\"text-delta\",\"text\":\"先说\"}\n{\"type\":\"reasoning-delta\",\"text\":\"想一想\"}\n{\"type\":\"text-delta\",\"text\":\"后说\"}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":9,\"outputTokens\":6}}\n",
             ));
         }
+        if parsed["params"]["model"] == "partial-total-usage" {
+            // finish 事件的 totalUsage 残缺（缺 outputTokens）：不得用 0 覆盖
+            // finish-step 已记录的输出 token，否则已出正文的流被误判为空响应且不计统计。
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"text-delta\",\"text\":\"回答\"}\n{\"type\":\"finish-step\",\"finishReason\":\"stop\",\"usage\":{\"inputTokens\":12,\"outputTokens\":48,\"inputTokenDetails\":{\"cacheReadTokens\":4}}}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":12}}\n",
+            ));
+        }
         if parsed["params"]["model"] == "max-output-tokens" {
             // 截断类 finishReason 不止 length：max_output_tokens 同样表示被截断
             return axum::response::Response::new(axum::body::Body::from(
@@ -3591,4 +3598,48 @@ async fn responses_completed_output_is_ordered_by_output_index() {
     );
     assert_eq!(output[0]["content"][0]["text"], "先说后说");
     state.mark_stopped();
+}
+
+/// 回归：finish 事件 totalUsage 残缺时不得用 0 覆盖 finish-step 已记的输出 token。
+///
+/// 修复前 `unwrap_or(0)` 会把 outputTokens 清零，normalize_usage 连带清零输入，
+/// 已出正文的流被误判为空响应（429）且不计入统计。
+#[tokio::test]
+async fn partial_total_usage_preserves_finish_step_tokens() {
+    let (base, state) = start_proxy().await;
+    attach_usage_db(&state);
+    let client = reqwest::Client::new();
+
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "partial-total-usage",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "残缺 usage 不应把已出正文的流判成空响应");
+    let text = res.text().await.unwrap();
+    assert!(
+        text.contains("\"completion_tokens\":48"),
+        "应保留 finish-step 记录的输出 token: {text}"
+    );
+    assert!(
+        text.contains("\"prompt_tokens\":12"),
+        "应保留 finish-step 记录的输入 token: {text}"
+    );
+
+    // 用量应被正常记录（输入输出均不为 0）
+    for _ in 0..100 {
+        if usage_rows_for(&state, "partial-total-usage") > 0 {
+            assert_eq!(usage_rows_for(&state, "partial-total-usage"), 1);
+            state.mark_stopped();
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("残缺 usage 的正常请求应计入统计");
 }
