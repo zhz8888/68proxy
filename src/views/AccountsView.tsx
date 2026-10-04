@@ -201,9 +201,10 @@ export function AccountsView() {
       .catch((e) => setLoadError(String(e)));
     reloadQuotas();
     api.accountRoutingGet().then(setRouting).catch(() => {});
-    // 若登录仍在进行（模块级轮询还在跑），重新打开弹窗继续等待结果
-    const snap = loginSnapshot();
-    if (snap.status === "pending" || snap.status === "success") {
+    // 若登录仍在进行（模块级轮询还在跑），重新打开弹窗继续等待结果。
+    // 终态（success/denied/failed）不在此重放：轮询到达终态后快照即归一为 idle，
+    // 否则每次进入本页都会重播成功弹窗与 toast。
+    if (loginSnapshot().status === "pending") {
       setLoginOpen(true);
     }
   }, []);
