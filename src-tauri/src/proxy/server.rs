@@ -451,6 +451,12 @@ fn sse_response(
                         finish_request(&st, &ctx, "ok");
                         return None;
                     }
+                    Some(Some(Frame::Failed)) => {
+                        // 失败收尾：不登记 ok，也不清零连续超时计数（非超时故障
+                        // 不应抹掉驱动「缩减上下文」提示的计数）
+                        finish_request(&st, &ctx, "error");
+                        return None;
+                    }
                     Some(Some(Frame::ZeroOutput(err))) => {
                         // 零输出帧正常应在首帧前被 handle_stream 拦截；此处为兜底：
                         // 已发出 SSE 头，只能用协议错误帧收尾（有上游错误则透传消息与类型）
@@ -661,6 +667,12 @@ enum Frame {
     Sse(String),
     /// 上游流正常结束（已产出内容或正常收尾）。
     Done,
+    /// 流以失败收尾（上游 error 事件 / 未走完 finish / 读流出错）。
+    ///
+    /// 必须与 `Done` 区分：尾流收到 `Done` 时会无条件登记「ok」并清零连续超时计数，
+    /// 若失败路径也发 `Done`，失败请求会在请求列表里显示为 ok，且非超时故障会抹掉
+    /// 驱动「缩减上下文」提示的连续超时计数。
+    Failed,
     /// 上游零输出（未产出任何内容）：首帧前仍可回退为携带正确状态码的 JSON 响应。
     /// 携带上游 error 事件（若有），使回退响应透传真实原因而非笼统的限流错误。
     ZeroOutput(Option<super::sse::StreamError>),
@@ -1361,6 +1373,23 @@ async fn handle_stream(
                     retry_after,
                 );
             }
+            // 流在首个内容帧之前就以失败收尾：按失败登记，返回 502 传输层错误
+            Some(Frame::Failed) => {
+                finish_request(&st, &ctx, "error");
+                let msg = "Upstream stream ended abnormally";
+                return json_response(
+                    502,
+                    match protocol {
+                        Protocol::OpenAi | Protocol::Responses => {
+                            errors::openai_error(502, "proxy_error", msg, None).1
+                        }
+                        Protocol::Anthropic => {
+                            errors::anthropic_error(502, "proxy_error", msg, None).1
+                        }
+                    },
+                    None,
+                );
+            }
             None => {
                 finish_request(&st, &ctx, "disconnect");
                 return json_response(
@@ -1470,7 +1499,7 @@ async fn stream_openai(
             drain,
         )
         .await;
-        let _ = send_frame(&tx, Frame::Done, drain).await;
+        let _ = send_frame(&tx, Frame::Failed, drain).await;
         return;
     }
     // 上游没走完 finish（无完成信号 / provider 连接失败）时同样以错误收尾：
@@ -1485,7 +1514,7 @@ async fn stream_openai(
             drain,
         )
         .await;
-        let _ = send_frame(&tx, Frame::Done, drain).await;
+        let _ = send_frame(&tx, Frame::Failed, drain).await;
         return;
     }
     if produced {

@@ -3395,3 +3395,54 @@ fn readonly_connection_write_errors_are_mapped() {
     drop(conn);
     let _ = std::fs::remove_file(&path);
 }
+
+// ── 审查修复的回归测试 ────────────────────────────────
+
+/// 回归：流式失败收尾必须登记为 error，而非被尾流的 Done 分支记成 "ok"。
+///
+/// 修复前三个 stream_* 函数的失败路径都是「先发错误帧、再发 Frame::Done」，
+/// 而 sse_response 对 Done 无条件 `finish_request("ok")` + `reset_timeouts`，
+/// 导致失败请求在请求列表里显示为 ok，且非超时故障会抹掉连续超时计数。
+#[tokio::test]
+async fn failed_stream_is_not_recorded_as_ok() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+
+    // no-finish：有正文但流被截断 → 以失败收尾
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "no-finish",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200, "首个内容帧已下发，SSE 头已发出");
+    let _ = res.text().await.unwrap();
+
+    // 等待尾流收尾
+    for _ in 0..100 {
+        if state
+            .recent_requests(10)
+            .iter()
+            .any(|r| r.model == "no-finish" && r.status != "streaming")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let entry = state
+        .recent_requests(10)
+        .into_iter()
+        .find(|r| r.model == "no-finish")
+        .expect("应登记该请求");
+    assert_eq!(
+        entry.status, "error",
+        "被截断的流不得登记为 ok: {:?}",
+        entry
+    );
+    state.mark_stopped();
+}
