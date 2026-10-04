@@ -145,6 +145,9 @@ export function ConsoleView() {
       toast.error(t("console.healthNotRunning"));
       return;
     }
+    // healthCheck 后端命令自身从不 reject（not_running/请求错误/超时均以
+    // reachable:false 结果返回），故 catch 仅为兜底 Tauri IPC 传输层偶发异常
+    // （命令 panic、通道/传输错误、App 关闭），防止未处理拒绝。
     try {
       const r = await api.healthCheck();
       if (r.reachable) {
