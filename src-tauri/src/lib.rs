@@ -68,10 +68,23 @@ fn proxy_status(app: AppHandle) -> Value {
 
 /// 读取应用配置。出于安全考虑返回前会清空本地转发 Key 与 Command Code 账户列表
 /// （均由专用命令管理）。
+///
+/// 返回的是 **settings 表中的持久化原值**，而非内存里 `apply_env()` 之后的运行值：
+/// 配置页是「改任意字段即整份回存」，若返回 env 覆写后的值，用户随手改一个无关开关
+/// 就会把 PORT / CC_MAX_BODY_MB 等本次运行的临时覆写固化进设置库，下次不带环境变量
+/// 启动时永久生效（与 setup 阶段「镜像只用未叠加 env 的副本」同一考虑）。
+/// env 覆写只作用于运行时内存配置，由代理转发路径直接读取。
 #[tauri::command]
 fn config_get(app: AppHandle) -> proxy::config::Config {
     let ctx = app.state::<AppCtx>();
-    let mut cfg = ctx.proxy_state.config.read().unwrap().clone();
+    // 库尚未初始化时回退内存配置（此时无 env 覆写也无持久化值可用）
+    let mut cfg = {
+        let guard = ctx.proxy_state.usage.lock().unwrap();
+        match guard.as_ref() {
+            Some(conn) => proxy::settings::load_config(conn),
+            None => ctx.proxy_state.config.read().unwrap().clone(),
+        }
+    };
     cfg.local_api_key = String::new();
     cfg.cc_accounts = Vec::new();
     cfg
@@ -126,8 +139,13 @@ fn config_save(app: AppHandle, mut config: proxy::config::Config) -> Result<Valu
         || prev.proxy_username != config.proxy_username
         || prev.proxy_password != config.proxy_password;
     *ctx.proxy_state.config.write().unwrap() = config.clone();
+    // 运行时配置重新叠加环境变量：config_get 返回的是持久化原值（见该命令），
+    // 用户在配置页改任意字段后若不重叠加，本次运行生效的 PORT / CC_MAX_BODY_MB 等
+    // env 覆写会被前端回传的库值顶掉。env 只作用于本次运行、不落库，故在此重放。
+    ctx.proxy_state.config.write().unwrap().apply_env();
+    let effective = ctx.proxy_state.config.read().unwrap().clone();
     if proxy_changed {
-        if let Err(e) = ctx.proxy_state.rebuild_client(&config) {
+        if let Err(e) = ctx.proxy_state.rebuild_client(&effective) {
             // 重建失败（如代理地址非法）不阻断保存，仅记录并保留旧 client
             proxy::log::warn(&format!(
                 "{}: {e}",
