@@ -3698,19 +3698,19 @@ async fn oversized_ndjson_line_aborts_stream() {
     let mut buf: Vec<u8> = Vec::new();
     assert_eq!(
         server::push_and_split(&mut buf, b"{\"a\":1}\n"),
-        Ok(vec!["{\"a\":1}".to_string()])
+        (vec!["{\"a\":1}".to_string()], Ok(()))
     );
     assert!(buf.is_empty());
     // 无换行时累积但不报错，缓冲保留未完结片段
     assert_eq!(
         server::push_and_split(&mut buf, b"partial"),
-        Ok(Vec::<String>::new())
+        (Vec::<String>::new(), Ok(()))
     );
     assert_eq!(buf, b"partial".to_vec());
     // 补上换行后切出该行（拼接了此前的未完结片段）
     assert_eq!(
         server::push_and_split(&mut buf, b"-more\n"),
-        Ok(vec!["partial-more".to_string()])
+        (vec!["partial-more".to_string()], Ok(()))
     );
     assert!(buf.is_empty());
 }
