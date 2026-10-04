@@ -136,18 +136,23 @@ export function ConsoleView() {
     }
   }
 
-  /** 请求代理的 /health 端点验证可用性；代理未运行时直接提示。 */
+  /** 请求代理的 /health 端点验证可用性；代理未运行时直接提示。
+   *
+   * 走 IPC 由后端代发请求：WebView 内直接 fetch 127.0.0.1 会被 CSP 的 connect-src
+   * 白名单拦截、Origin 又会被本地代理的 origin_guard 拒绝，且路由未挂 CORS 层。 */
   async function checkHealth() {
     if (!status?.running || !status) {
       toast.error(t("console.healthNotRunning"));
       return;
     }
     try {
-      const r = await fetch(`${status.anthropic_url}/health`);
-      if (r.ok) {
+      const r = await api.healthCheck();
+      if (r.reachable) {
         toast.success(t("console.healthOk"));
-      } else {
+      } else if (r.status !== null) {
         toast.error(t("console.healthFailedHttp", { p0: r.status }));
+      } else {
+        toast.error(t("console.healthFailedConnect"));
       }
     } catch {
       toast.error(t("console.healthFailedConnect"));

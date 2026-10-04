@@ -66,6 +66,30 @@ fn proxy_status(app: AppHandle) -> Value {
     status_value(&app)
 }
 
+/// 代理健康检查：经后端请求本地 `/health`，返回是否可达与上游状态码。
+///
+/// 不能让前端用 `fetch` 直连 `127.0.0.1`：WebView 源既过不了 CSP 的 `connect-src`
+/// 白名单，也会撞上 server::origin_guard 的本机 Origin 校验，且路由未挂 CORS 层
+/// （放开跨域会让任意网页驱动本服务）。走 IPC 由后端发起请求，三重限制都不涉及。
+#[tauri::command]
+async fn health_check(app: AppHandle) -> Result<Value, String> {
+    let ctx = app.state::<AppCtx>();
+    let st = ctx.proxy_state.clone();
+    if !st.is_running() {
+        return Ok(json!({ "reachable": false, "status": Value::Null, "error": "not_running" }));
+    }
+    // 以实际监听地址探测：host 为 0.0.0.0 时回环才可达（0.0.0.0 不是合法目标地址）。
+    let cfg = st.config.read().unwrap().clone();
+    let target_host = if cfg.host == "0.0.0.0" || cfg.host == "::" { "127.0.0.1" } else { cfg.host.as_str() };
+    let url = format!("http://{target_host}:{}/health", cfg.port);
+    let client = st.client();
+    match tokio::time::timeout(Duration::from_secs(5), client.get(&url).send()).await {
+        Ok(Ok(r)) => Ok(json!({ "reachable": r.status().is_success(), "status": r.status().as_u16(), "error": Value::Null })),
+        Ok(Err(e)) => Ok(json!({ "reachable": false, "status": Value::Null, "error": e.to_string() })),
+        Err(_) => Ok(json!({ "reachable": false, "status": Value::Null, "error": "timeout" })),
+    }
+}
+
 /// 读取应用配置。出于安全考虑返回前会清空本地转发 Key 与 Command Code 账户列表
 /// （均由专用命令管理）。
 ///
@@ -1151,6 +1175,7 @@ pub fn run() {
             proxy_stop,
             proxy_restart,
             proxy_status,
+            health_check,
             config_get,
             config_save,
             local_key_get,

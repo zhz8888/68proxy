@@ -102,6 +102,16 @@ export interface ProxyStatus {
   error?: string;
 }
 
+/** 健康检查结果：后端代发 /health 探测的结果。 */
+export interface HealthCheck {
+  /** /health 是否返回成功。 */
+  reachable: boolean;
+  /** HTTP 状态码；未发出请求或失败时为 null。 */
+  status: number | null;
+  /** 失败原因（代理未运行 / 请求错误 / 超时）；成功时为 null。 */
+  error: string | null;
+}
+
 /** 一条代理日志：seq 为自增序号，ts 为毫秒时间戳。 */
 export interface LogEntry {
   /** 全局自增序号，前端增量拉取的游标。 */
@@ -470,6 +480,9 @@ export const api = {
   proxyStop: () => invoke<ProxyStatus>("proxy_stop"),
   proxyRestart: () => invoke<ProxyStatus>("proxy_restart"),
   proxyStatus: () => invoke<ProxyStatus>("proxy_status"),
+  // 健康检查：必须走后端 IPC，不能用 fetch 直连 127.0.0.1（WebView 源过不了 CSP 的
+  // connect-src 白名单、会被 origin_guard 判 403，且本地路由未挂 CORS 层）
+  healthCheck: () => invoke<HealthCheck>("health_check"),
   // 配置读写：保存时返回是否需要重启代理生效
   configGet: () => invoke<Config>("config_get"),
   configSave: (config: Config) => invoke<{ needs_restart: boolean }>("config_save", { config }),

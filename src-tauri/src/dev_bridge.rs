@@ -221,6 +221,7 @@ async fn dispatch(cmd: &str, args: &Value) -> Result<Value, String> {
         "proxy_stop" => Ok(to_value(crate::proxy_stop(app()?).await?)?),
         "proxy_restart" => Ok(to_value(crate::proxy_restart(app()?).await?)?),
         "proxy_status" => Ok(crate::proxy_status(app()?)),
+        "health_check" => Ok(to_value(crate::health_check(app()?).await?)?),
 
         // ── 配置 ──
         "config_get" => Ok(to_value(crate::config_get(app()?))?),

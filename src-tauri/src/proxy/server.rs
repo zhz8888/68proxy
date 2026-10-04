@@ -154,10 +154,13 @@ fn config_port(cfg: &Config) -> u16 {
     cfg.port
 }
 
-/// 组装全部路由：三个协议入口 + /v1/models + /health，附请求体大小限制与宽松 CORS。
+/// 组装全部路由：三个协议入口 + /v1/models + /health，附请求体大小限制与在途计数。
 ///
 /// 请求体大小由各 handler 的 read_json_body 按 config.max_body_mb 限制（超限 413 并排空），
 /// 不再依赖 DefaultBodyLimit；并挂载在途请求计数中间件（config.max_inflight > 0 时超限 503）。
+///
+/// 刻意不挂 CORS 层：本代理持有用户的上游账户凭据，放开跨域等于允许用户浏览器里的
+/// 任意网页跨域驱动本服务。需要探测本地端口的调用方（如健康检查）应走后端 IPC 命令。
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
