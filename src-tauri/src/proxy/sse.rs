@@ -162,6 +162,8 @@ pub struct OpenAiTranslator {
     pub stream_error: Option<StreamError>,
     /// 是否见过完成信号（finish / finish-step）；口径见 incomplete_upstream_detail。
     saw_finish: bool,
+    /// 是否已向下游发出过带 finish_reason 的结束 chunk（由 `finish` 事件产出）。
+    sent_finish_chunk: bool,
 }
 
 impl OpenAiTranslator {
@@ -181,6 +183,7 @@ impl OpenAiTranslator {
             cache_write_tokens: 0,
             stream_error: None,
             saw_finish: false,
+            sent_finish_chunk: false,
         }
     }
 
@@ -312,6 +315,7 @@ impl OpenAiTranslator {
                 });
                 // pause_turn 在 OpenAI 无对应枚举，折成 length（如实表达输出不完整）
                 let fr = to_openai_finish_reason(&fr);
+                self.sent_finish_chunk = true;
                 out.push(make_chunk(&self.completion_id, self.created, &self.model, serde_json::json!({}), Some(&fr), Some(usage)));
             }
             "error" => {
@@ -339,6 +343,36 @@ impl OpenAiTranslator {
     /// 流正常结束时的终止帧 `data: [DONE]`。
     pub fn done_event(&self) -> String {
         "data: [DONE]\n\n".to_string()
+    }
+
+    /// 成功收尾帧序列：末尾恒为 `data: [DONE]`；上游若止于 `finish-step`（未再发
+    /// `finish`），在其前面补一个带 `finish_reason` 与 usage 的结束 chunk。
+    ///
+    /// `finish-step` 已按完成信号计入「正常结束」（见 incomplete_upstream_detail），
+    /// 但它本身不产出任何帧；此时直接 `[DONE]` 会让严格 OpenAI 客户端
+    /// （如 Vercel AI SDK 抛 "No finish_reason received in stream"）判定协议错误
+    /// 并丢弃已收到的全部内容。已由 `finish` 产出结束 chunk 时只发 `[DONE]`。
+    pub fn finalize(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.sent_finish_chunk {
+            let fr = to_openai_finish_reason(self.finish_reason.as_deref().unwrap_or("stop"));
+            let usage = serde_json::json!({
+                "prompt_tokens": self.input_tokens,
+                "completion_tokens": self.output_tokens,
+                "total_tokens": self.input_tokens + self.output_tokens,
+                "prompt_tokens_details": { "cached_tokens": self.cached_tokens },
+            });
+            out.push(make_chunk(
+                &self.completion_id,
+                self.created,
+                &self.model,
+                serde_json::json!({}),
+                Some(&fr),
+                Some(usage),
+            ));
+        }
+        out.push(self.done_event());
+        out
     }
 
     /// 上游零输出（空响应）时下发的错误帧，伪装成限流并提示 10s 后重试。

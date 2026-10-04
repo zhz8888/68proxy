@@ -880,6 +880,14 @@ fn mock_upstream(captured: Option<Arc<Mutex<Value>>>) -> Router {
                 "{\"type\":\"start\"}\n{\"type\":\"text-delta\",\"text\":\"回答\"}\n{\"type\":\"finish-step\",\"finishReason\":\"stop\",\"usage\":{\"inputTokens\":12,\"outputTokens\":48,\"inputTokenDetails\":{\"cacheReadTokens\":4}}}\n{\"type\":\"finish\",\"finishReason\":\"stop\",\"totalUsage\":{\"inputTokens\":12}}\n",
             ));
         }
+        if parsed["params"]["model"] == "finish-step-only" {
+            // 只到 finish-step 就结束（未再发 finish）：已按完成信号计入正常结束，
+            // 但 finish-step 本身不产出结束 chunk，须由 finalize() 补发 finish_reason，
+            // 否则严格 OpenAI 客户端收到裸 [DONE] 会判定协议错误并丢弃已收内容。
+            return axum::response::Response::new(axum::body::Body::from(
+                "{\"type\":\"start\"}\n{\"type\":\"text-start\"}\n{\"type\":\"text-delta\",\"text\":\"回答\"}\n{\"type\":\"finish-step\",\"finishReason\":\"stop\",\"usage\":{\"inputTokens\":11,\"outputTokens\":7}}\n",
+            ));
+        }
         if parsed["params"]["model"] == "max-output-tokens" {
             // 截断类 finishReason 不止 length：max_output_tokens 同样表示被截断
             return axum::response::Response::new(axum::body::Body::from(
@@ -3642,4 +3650,42 @@ async fn partial_total_usage_preserves_finish_step_tokens() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("残缺 usage 的正常请求应计入统计");
+}
+
+/// 回归：流止于 finish-step（未再发 finish）时须补发带 finish_reason 的结束 chunk。
+///
+/// 修复前直接发裸 `[DONE]`，严格 OpenAI 客户端（如 Vercel AI SDK）会抛
+/// "No finish_reason received in stream" 并丢弃已收到的全部内容。
+#[tokio::test]
+async fn finish_step_only_stream_emits_finish_chunk() {
+    let (base, state) = start_proxy().await;
+    let client = reqwest::Client::new();
+
+    let res = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", "Bearer sk-test-local-key-123")
+        .json(&json!({
+            "model": "finish-step-only",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let text = res.text().await.unwrap();
+
+    assert!(text.contains("data: [DONE]"), "应以 [DONE] 收尾: {text}");
+    assert!(
+        text.contains("\"finish_reason\":\"stop\""),
+        "止于 finish-step 时必须补发 finish_reason 块: {text}"
+    );
+    assert!(text.contains("\"completion_tokens\":7"), "usage 应来自 finish-step: {text}");
+    // 已发 finish_reason 后不得重复下发
+    assert_eq!(
+        text.matches("\"finish_reason\":\"stop\"").count(),
+        1,
+        "finish chunk 不应重复: {text}"
+    );
+    state.mark_stopped();
 }

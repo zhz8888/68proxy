@@ -1518,7 +1518,11 @@ async fn stream_openai(
         return;
     }
     if produced {
-        let _ = send_frame(&tx, Frame::Sse(translator.done_event()), drain).await;
+        for f in translator.finalize() {
+            if !send_frame(&tx, Frame::Sse(f), drain).await {
+                return;
+            }
+        }
         let _ = send_frame(&tx, Frame::Done, drain).await;
     } else {
         let _ = send_frame(&tx, Frame::Sse(translator.zero_output_error_frame()), drain).await;
